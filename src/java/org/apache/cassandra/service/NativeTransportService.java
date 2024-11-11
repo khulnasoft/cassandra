@@ -18,6 +18,9 @@
 package org.apache.cassandra.service;
 
 import java.net.InetAddress;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.concurrent.TimeUnit;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -35,9 +38,7 @@ import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.metrics.ClientMetrics;
 import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.Server;
-import org.apache.cassandra.utils.NativeLibrary;
-
-import static org.apache.cassandra.config.CassandraRelevantProperties.NATIVE_EPOLL_ENABLED;
+import org.apache.cassandra.utils.INativeLibrary;
 
 /**
  * Handles native transport server lifecycle and associated resources. Lazily initialized.
@@ -47,7 +48,7 @@ public class NativeTransportService
 
     private static final Logger logger = LoggerFactory.getLogger(NativeTransportService.class);
 
-    private Server server = null;
+    private Collection<Server> servers = Collections.emptyList();
 
     private boolean initialized = false;
     private EventLoopGroup workerGroup;
@@ -73,6 +74,7 @@ public class NativeTransportService
         }
 
         int nativePort = DatabaseDescriptor.getNativeTransportPort();
+        int nativePortSSL = DatabaseDescriptor.getNativeTransportPortSSL();
         InetAddress nativeAddr = DatabaseDescriptor.getRpcAddress();
 
         org.apache.cassandra.transport.Server.Builder builder = new org.apache.cassandra.transport.Server.Builder()
@@ -80,35 +82,62 @@ public class NativeTransportService
                                                                 .withHost(nativeAddr);
 
         EncryptionOptions.TlsEncryptionPolicy encryptionPolicy = DatabaseDescriptor.getNativeProtocolEncryptionOptions().tlsEncryptionPolicy();
-        server = builder.withTlsEncryptionPolicy(encryptionPolicy).withPort(nativePort).build();
+        Server regularPortServer;
+        Server tlsPortServer = null;
 
-        ClientMetrics.instance.init(server);
+        // If an SSL port is separately supplied for the native transport, listen for unencrypted connections on the
+        // regular port, and encryption / optionally encrypted connections on the ssl port.
+        if (nativePort != nativePortSSL)
+        {
+            regularPortServer = builder.withTlsEncryptionPolicy(EncryptionOptions.TlsEncryptionPolicy.UNENCRYPTED).withPort(nativePort).build();
+            switch(encryptionPolicy)
+            {
+                case OPTIONAL: // FALLTHRU - encryption is optional on the regular port, but encrypted on the tls port.
+                case ENCRYPTED:
+                    tlsPortServer = builder.withTlsEncryptionPolicy(encryptionPolicy).withPort(nativePortSSL).build();
+                    break;
+                case UNENCRYPTED: // Should have been caught by DatabaseDescriptor.applySimpleConfig
+                    throw new IllegalStateException("Encryption must be enabled in client_encryption_options for native_transport_port_ssl");
+                default:
+                    throw new IllegalStateException("Unrecognized TLS encryption policy: " + encryptionPolicy);
+            }
+        }
+        // Otherwise, if only the regular port is supplied, listen as the encryption policy specifies
+        else
+        {
+            regularPortServer = builder.withTlsEncryptionPolicy(encryptionPolicy).withPort(nativePort).build();
+        }
+
+        if (tlsPortServer == null)
+        {
+            servers = Collections.singleton(regularPortServer);
+        }
+        else
+        {
+            servers = Collections.unmodifiableList(Arrays.asList(regularPortServer, tlsPortServer));
+        }
+
+        ClientMetrics.instance.init(servers);
 
         initialized = true;
     }
 
     /**
-     * Starts native transport server.
+     * Starts native transport servers.
      */
     public void start()
     {
-        logger.info("Using Netty Version: {}", Version.identify().entrySet());
+        logger.debug("Using Netty Version: {}", Version.identify().entrySet());
         initialize();
-        server.start();
+        servers.forEach(Server::start);
     }
 
     /**
-     * Stops currently running native transport server.
+     * Stops currently running native transport servers.
      */
     public void stop()
     {
-        stop(false);
-    }
-
-    public void stop(boolean force)
-    {
-        if (server != null)
-            server.stop(force);
+        servers.forEach(Server::stop);
     }
 
     /**
@@ -117,14 +146,10 @@ public class NativeTransportService
     public void destroy()
     {
         stop();
-        ClientMetrics.instance.release();
-        server = null;
+        servers = Collections.emptyList();
 
         // shutdown executors used by netty for native transport server
-        if (workerGroup != null)
-            workerGroup.shutdownGracefully(3, 5, TimeUnit.SECONDS).awaitUninterruptibly();
-
-        Dispatcher.shutdown();
+        workerGroup.shutdownGracefully(3, 5, TimeUnit.SECONDS).awaitUninterruptibly();
     }
 
     /**
@@ -132,9 +157,9 @@ public class NativeTransportService
      */
     public static boolean useEpoll()
     {
-        final boolean enableEpoll = NATIVE_EPOLL_ENABLED.getBoolean();
+        final boolean enableEpoll = Boolean.parseBoolean(System.getProperty("cassandra.native.epoll.enabled", "true"));
 
-        if (enableEpoll && !Epoll.isAvailable() && NativeLibrary.osType == NativeLibrary.OSType.LINUX)
+        if (enableEpoll && !Epoll.isAvailable() && INativeLibrary.instance.isOS(INativeLibrary.OSType.LINUX))
             logger.warn("epoll not available", Epoll.unavailabilityCause());
 
         return enableEpoll && Epoll.isAvailable();
@@ -145,7 +170,9 @@ public class NativeTransportService
      */
     public boolean isRunning()
     {
-        return server != null && server.isRunning();
+        for (Server server : servers)
+            if (server.isRunning()) return true;
+        return false;
     }
 
     @VisibleForTesting
@@ -155,13 +182,14 @@ public class NativeTransportService
     }
 
     @VisibleForTesting
-    Server getServer()
+    Collection<Server> getServers()
     {
-        return server;
+        return servers;
     }
 
     public void clearConnectionHistory()
     {
-        server.clearConnectionHistory();
+        for (Server server : servers)
+            server.clearConnectionHistory();
     }
 }

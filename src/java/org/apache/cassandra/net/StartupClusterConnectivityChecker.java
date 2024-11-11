@@ -17,40 +17,36 @@
  */
 package org.apache.cassandra.net;
 
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import org.apache.cassandra.utils.concurrent.CountDownLatch;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.SetMultimap;
-import org.apache.commons.lang3.StringUtils;
+import com.google.common.util.concurrent.Uninterruptibles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.gms.ApplicationState;
 import org.apache.cassandra.gms.EndpointState;
 import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.gms.IEndpointStateChangeSubscriber;
+import org.apache.cassandra.gms.VersionedValue;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.utils.FBUtilities;
 
-import static java.util.stream.Collectors.groupingBy;
-import static java.util.stream.Collectors.mapping;
-import static java.util.stream.Collectors.toList;
 import static org.apache.cassandra.net.Verb.PING_REQ;
 import static org.apache.cassandra.net.ConnectionType.LARGE_MESSAGES;
 import static org.apache.cassandra.net.ConnectionType.SMALL_MESSAGES;
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
-import static org.apache.cassandra.utils.concurrent.CountDownLatch.newCountDownLatch;
 
 public class StartupClusterConnectivityChecker
 {
@@ -121,17 +117,15 @@ public class StartupClusterConnectivityChecker
                         TimeUnit.NANOSECONDS.toSeconds(timeoutNanos));
         }
 
-        // The threshold is 3 because for each peer we want to have 3 acks,
-        // one for small message connection, one for large message connnection and one for alive event from gossip.
-        AckMap acks = new AckMap(3, peers);
+        AckMap acks = new AckMap(3);
         Map<String, CountDownLatch> dcToRemainingPeers = new HashMap<>(datacenterToPeers.size());
         for (String datacenter: datacenterToPeers.keys())
         {
             dcToRemainingPeers.put(datacenter,
-                                   newCountDownLatch(Math.max(datacenterToPeers.get(datacenter).size() - 1, 0)));
+                                   new CountDownLatch(Math.max(datacenterToPeers.get(datacenter).size() - 1, 0)));
         }
 
-        long startNanos = nanoTime();
+        long startNanos = System.nanoTime();
 
         // set up a listener to react to new nodes becoming alive (in gossip), and account for all the nodes that are already alive
         Set<InetAddressAndPort> alivePeers = Collections.newSetFromMap(new ConcurrentHashMap<>());
@@ -149,40 +143,33 @@ public class StartupClusterConnectivityChecker
                 String datacenter = peerToDatacenter.get(peer);
                 // We have to check because we might only have the local DC in the map
                 if (dcToRemainingPeers.containsKey(datacenter))
-                    dcToRemainingPeers.get(datacenter).decrement();
+                    dcToRemainingPeers.get(datacenter).countDown();
             }
         }
 
         boolean succeeded = true;
         for (CountDownLatch countDownLatch : dcToRemainingPeers.values())
         {
-            long remainingNanos = Math.max(1, timeoutNanos - (nanoTime() - startNanos));
+            long remainingNanos = Math.max(1, timeoutNanos - (System.nanoTime() - startNanos));
             //noinspection UnstableApiUsage
-            succeeded &= countDownLatch.awaitUninterruptibly(remainingNanos, TimeUnit.NANOSECONDS);
+            succeeded &= Uninterruptibles.awaitUninterruptibly(countDownLatch, remainingNanos, TimeUnit.NANOSECONDS);
         }
 
         Gossiper.instance.unregister(listener);
 
+        Map<String, Long> numDown = dcToRemainingPeers.entrySet().stream()
+                                                      .collect(Collectors.toMap(Map.Entry::getKey,
+                                                                                e -> e.getValue().getCount()));
+
         if (succeeded)
         {
             logger.info("Ensured sufficient healthy connections with {} after {} milliseconds",
-                        dcToRemainingPeers.keySet(), TimeUnit.NANOSECONDS.toMillis(nanoTime() - startNanos));
+                        numDown.keySet(), TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos));
         }
         else
         {
-            // dc -> missing peer host addresses
-            Map<String, List<String>> peersDown = acks.getMissingPeers().stream()
-                                                      .collect(groupingBy(peer -> {
-                                                                              String dc = peerToDatacenter.get(peer);
-                                                                              if (dc != null)
-                                                                                  return dc;
-                                                                              return StringUtils.defaultString(getDatacenterSource.apply(peer), "unknown");
-                                                                          },
-                                                                          mapping(InetAddressAndPort::getHostAddressAndPort,
-                                                                                  toList())));
             logger.warn("Timed out after {} milliseconds, was waiting for remaining peers to connect: {}",
-                        TimeUnit.NANOSECONDS.toMillis(nanoTime() - startNanos),
-                        peersDown);
+                        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos), numDown);
         }
 
         return succeeded;
@@ -201,7 +188,7 @@ public class StartupClusterConnectivityChecker
                 String datacenter = getDatacenter.apply(msg.from());
                 // We have to check because we might only have the local DC in the map
                 if (dcToRemainingPeers.containsKey(datacenter))
-                    dcToRemainingPeers.get(datacenter).decrement();
+                    dcToRemainingPeers.get(datacenter).countDown();
             }
         };
 
@@ -240,7 +227,7 @@ public class StartupClusterConnectivityChecker
             {
                 String datacenter = getDatacenter.apply(endpoint);
                 if (dcToRemainingPeers.containsKey(datacenter))
-                    dcToRemainingPeers.get(datacenter).decrement();
+                    dcToRemainingPeers.get(datacenter).countDown();
             }
         }
     }
@@ -250,37 +237,15 @@ public class StartupClusterConnectivityChecker
         private final int threshold;
         private final Map<InetAddressAndPort, AtomicInteger> acks;
 
-        AckMap(int threshold, Iterable<InetAddressAndPort> initialPeers)
+        AckMap(int threshold)
         {
             this.threshold = threshold;
             acks = new ConcurrentHashMap<>();
-            for (InetAddressAndPort peer : initialPeers)
-                initOrGetCounter(peer);
         }
 
         boolean incrementAndCheck(InetAddressAndPort address)
         {
-            return initOrGetCounter(address).incrementAndGet() == threshold;
-        }
-
-        /**
-         * Get a list of peers that has not fully ack'd, i.e. not reaching threshold acks
-         */
-        List<InetAddressAndPort> getMissingPeers()
-        {
-            List<InetAddressAndPort> missingPeers = new ArrayList<>();
-            for (Map.Entry<InetAddressAndPort, AtomicInteger> entry : acks.entrySet())
-            {
-                if (entry.getValue().get() < threshold)
-                    missingPeers.add(entry.getKey());
-            }
-            return missingPeers;
-        }
-
-        // init the counter for the peer just in case
-        private AtomicInteger initOrGetCounter(InetAddressAndPort address)
-        {
-            return acks.computeIfAbsent(address, addr -> new AtomicInteger(0));
+            return acks.computeIfAbsent(address, addr -> new AtomicInteger(0)).incrementAndGet() == threshold;
         }
     }
 }

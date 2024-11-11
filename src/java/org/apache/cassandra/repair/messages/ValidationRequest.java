@@ -23,9 +23,7 @@ import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.repair.RepairJobDesc;
-import org.apache.cassandra.utils.CassandraUInt;
 
 /**
  * ValidationRequest
@@ -34,9 +32,9 @@ import org.apache.cassandra.utils.CassandraUInt;
  */
 public class ValidationRequest extends RepairMessage
 {
-    public final long nowInSec;
+    public final int nowInSec;
 
-    public ValidationRequest(RepairJobDesc desc, long nowInSec)
+    public ValidationRequest(RepairJobDesc desc, int nowInSec)
     {
         super(desc);
         this.nowInSec = nowInSec;
@@ -63,7 +61,7 @@ public class ValidationRequest extends RepairMessage
     @Override
     public int hashCode()
     {
-        return (int) nowInSec;
+        return nowInSec;
     }
 
     public static final IVersionedSerializer<ValidationRequest> serializer = new IVersionedSerializer<ValidationRequest>()
@@ -71,20 +69,19 @@ public class ValidationRequest extends RepairMessage
         public void serialize(ValidationRequest message, DataOutputPlus out, int version) throws IOException
         {
             RepairJobDesc.serializer.serialize(message.desc, out, version);
-            out.writeInt(version >= MessagingService.VERSION_50 ? CassandraUInt.fromLong(message.nowInSec) : (int) message.nowInSec);
+            out.writeInt(message.nowInSec);
         }
 
         public ValidationRequest deserialize(DataInputPlus dis, int version) throws IOException
         {
             RepairJobDesc desc = RepairJobDesc.serializer.deserialize(dis, version);
-            long nowInsec = version >= MessagingService.VERSION_50 ? CassandraUInt.toLong(dis.readInt()) : dis.readInt();
-            return new ValidationRequest(desc, nowInsec);
+            return new ValidationRequest(desc, dis.readInt());
         }
 
         public long serializedSize(ValidationRequest message, int version)
         {
             long size = RepairJobDesc.serializer.serializedSize(message.desc, version);
-            size += TypeSizes.INT_SIZE;
+            size += TypeSizes.sizeof(message.nowInSec);
             return size;
         }
     };

@@ -21,7 +21,9 @@
 package org.apache.cassandra.db;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 
+import org.apache.cassandra.db.marshal.ByteBufferAccessor;
 import org.apache.cassandra.utils.memory.ByteBufferCloner;
 
 import static org.apache.cassandra.db.AbstractBufferClusteringPrefix.EMPTY_VALUES_ARRAY;
@@ -32,16 +34,16 @@ import static org.apache.cassandra.db.AbstractBufferClusteringPrefix.EMPTY_VALUE
 public interface ClusteringBound<V> extends ClusteringBoundOrBoundary<V>
 {
     /** The smallest start bound, i.e. the one that starts before any row. */
-    ClusteringBound<?> BOTTOM = new BufferClusteringBound(ClusteringPrefix.Kind.INCL_START_BOUND, EMPTY_VALUES_ARRAY);
+    public static final ClusteringBound<?> BOTTOM = new BufferClusteringBound(ClusteringPrefix.Kind.INCL_START_BOUND, EMPTY_VALUES_ARRAY);
     /** The biggest end bound, i.e. the one that ends after any row. */
-    ClusteringBound<?> TOP = new BufferClusteringBound(ClusteringPrefix.Kind.INCL_END_BOUND, EMPTY_VALUES_ARRAY);
+    public static final ClusteringBound<?> TOP = new BufferClusteringBound(ClusteringPrefix.Kind.INCL_END_BOUND, EMPTY_VALUES_ARRAY);
 
     /** The biggest start bound, i.e. the one that starts after any row. */
-    ClusteringBound<?> MAX_START = new BufferClusteringBound(Kind.EXCL_START_BOUND, EMPTY_VALUES_ARRAY);
+    public static final ClusteringBound<?> MAX_START = new BufferClusteringBound(Kind.EXCL_START_BOUND, EMPTY_VALUES_ARRAY);
     /** The smallest end bound, i.e. the one that end before any row. */
-    ClusteringBound<?> MIN_END = new BufferClusteringBound(Kind.EXCL_END_BOUND, EMPTY_VALUES_ARRAY);
+    public static final ClusteringBound<?> MIN_END = new BufferClusteringBound(Kind.EXCL_END_BOUND, EMPTY_VALUES_ARRAY);
 
-    static ClusteringPrefix.Kind boundKind(boolean isStart, boolean isInclusive)
+    public static ClusteringPrefix.Kind boundKind(boolean isStart, boolean isInclusive)
     {
         return isStart
                ? (isInclusive ? ClusteringPrefix.Kind.INCL_START_BOUND : ClusteringPrefix.Kind.EXCL_START_BOUND)
@@ -79,9 +81,42 @@ public interface ClusteringBound<V> extends ClusteringBoundOrBoundary<V>
         return kind() == Kind.SSTABLE_LOWER_BOUND || kind() == Kind.SSTABLE_UPPER_BOUND;
     }
 
-    default ClusteringBound<V> artificialLowerBound(boolean isReversed)
+    default ClusteringBound<V> artificialLowerBound()
     {
-        return create(!isReversed ? Kind.SSTABLE_LOWER_BOUND : Kind.SSTABLE_UPPER_BOUND, this);
+        return create(Kind.SSTABLE_LOWER_BOUND, this);
+    }
+
+    default ClusteringBound<V> artificialUpperBound()
+    {
+        return create(Kind.SSTABLE_UPPER_BOUND, this);
+    }
+
+    // For use by intersects, it's called with the sstable bound opposite to the slice bound
+    // (so if the slice bound is a start, it's call with the max sstable bound)
+    default int compareTo(ClusteringComparator comparator, List<ByteBuffer> sstableBound)
+    {
+        for (int i = 0; i < sstableBound.size(); i++)
+        {
+            // Say the slice bound is a start. It means we're in the case where the max
+            // sstable bound is say (1:5) while the slice start is (1). So the start
+            // does start before the sstable end bound (and intersect it). It's the exact
+            // inverse with a end slice bound.
+            if (i >= size())
+                return isStart() ? -1 : 1;
+
+            int cmp = comparator.compareComponent(i, get(i), accessor(), sstableBound.get(i), ByteBufferAccessor.instance);
+            if (cmp != 0)
+                return cmp;
+        }
+
+        // Say the slice bound is a start. I means we're in the case where the max
+        // sstable bound is say (1), while the slice start is (1:5). This again means
+        // that the slice start before the end bound.
+        if (size() > sstableBound.size())
+            return isStart() ? -1 : 1;
+
+        // The slice bound is equal to the sstable bound. Results depends on whether the slice is inclusive or not
+        return isInclusive() ? 0 : (isStart() ? 1 : -1);
     }
 
     static <V> ClusteringBound<V> create(ClusteringPrefix.Kind kind, ClusteringPrefix<V> from)
@@ -89,29 +124,29 @@ public interface ClusteringBound<V> extends ClusteringBoundOrBoundary<V>
         return from.accessor().factory().bound(kind, from.getRawValues());
     }
 
-    static <V> ClusteringBound<V> inclusiveStartOf(ClusteringPrefix<V> from)
+    public static <V> ClusteringBound<V> inclusiveStartOf(ClusteringPrefix<V> from)
     {
         return create(ClusteringPrefix.Kind.INCL_START_BOUND, from);
     }
 
-    static <V> ClusteringBound<V> inclusiveEndOf(ClusteringPrefix<V> from)
+    public static <V> ClusteringBound<V> inclusiveEndOf(ClusteringPrefix<V> from)
     {
         return create(ClusteringPrefix.Kind.INCL_END_BOUND, from);
     }
 
-    static <V> ClusteringBound<V> exclusiveStartOf(ClusteringPrefix<V> from)
+    public static ClusteringBound<?> exclusiveStartOf(ClusteringPrefix<?> from)
     {
         return create(ClusteringPrefix.Kind.EXCL_START_BOUND, from);
     }
 
-    static <V> ClusteringBound<V> exclusiveEndOf(ClusteringPrefix<V> from)
+    public static ClusteringBound<?> exclusiveEndOf(ClusteringPrefix<?> from)
     {
         return create(ClusteringPrefix.Kind.EXCL_END_BOUND, from);
     }
 
-    static ClusteringBound<?> create(ClusteringComparator comparator, boolean isStart, boolean isInclusive, Object... values)
+    public static ClusteringBound<?> create(ClusteringComparator comparator, boolean isStart, boolean isInclusive, Object... values)
     {
-        CBuilder builder = CBuilder.create(comparator);
+        ClusteringBuilder builder = ClusteringBuilder.create(comparator);
         for (Object val : values)
         {
             if (val instanceof ByteBuffer)
@@ -125,14 +160,12 @@ public interface ClusteringBound<V> extends ClusteringBoundOrBoundary<V>
     @Override
     default ClusteringBound<V> asStartBound()
     {
-        assert isStart();
         return this;
     }
 
     @Override
     default ClusteringBound<V> asEndBound()
     {
-        assert isEnd();
         return this;
     }
 }

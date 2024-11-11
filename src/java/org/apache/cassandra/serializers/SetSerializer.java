@@ -31,6 +31,7 @@ import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.ByteBufferAccessor;
 import org.apache.cassandra.db.marshal.ValueAccessor;
 import org.apache.cassandra.db.marshal.ValueComparators;
+import org.apache.cassandra.transport.ProtocolVersion;
 
 public class SetSerializer<T> extends AbstractMapSerializer<Set<T>>
 {
@@ -57,7 +58,6 @@ public class SetSerializer<T> extends AbstractMapSerializer<Set<T>>
         this.comparators = comparators;
     }
 
-    @Override
     public List<ByteBuffer> serializeValues(Set<T> values)
     {
         List<ByteBuffer> buffers = new ArrayList<>(values.size());
@@ -67,19 +67,24 @@ public class SetSerializer<T> extends AbstractMapSerializer<Set<T>>
         return buffers;
     }
 
-    @Override
-    public <V> void validate(V input, ValueAccessor<V> accessor)
+    public int getElementCount(Set<T> value)
     {
-        if (accessor.isEmpty(input))
-            throw new MarshalException("Not enough bytes to read a set");
+        return value.size();
+    }
+
+    public <V> void validateForNativeProtocol(V input, ValueAccessor<V> accessor, ProtocolVersion version)
+    {
         try
         {
-            int n = readCollectionSize(input, accessor);
-            int offset = sizeOfCollectionSize();
+            // Empty values are still valid.
+            if (accessor.isEmpty(input)) return;
+            
+            int n = readCollectionSize(input, accessor, version);
+            int offset = sizeOfCollectionSize(n, version);
             for (int i = 0; i < n; i++)
             {
-                V value = readNonNullValue(input, accessor, offset);
-                offset += sizeOfValue(value, accessor);
+                V value = readNonNullValue(input, accessor, offset, version);
+                offset += sizeOfValue(value, accessor, version);
                 elements.validate(value, accessor);
             }
             if (!accessor.isEmptyFromOffset(input, offset))
@@ -91,13 +96,12 @@ public class SetSerializer<T> extends AbstractMapSerializer<Set<T>>
         }
     }
 
-    @Override
-    public <V> Set<T> deserialize(V input, ValueAccessor<V> accessor)
+    public <V> Set<T> deserializeForNativeProtocol(V input, ValueAccessor<V> accessor, ProtocolVersion version)
     {
         try
         {
-            int n = readCollectionSize(input, accessor);
-            int offset = sizeOfCollectionSize();
+            int n = readCollectionSize(input, accessor, version);
+            int offset = sizeOfCollectionSize(n, version);
 
             if (n < 0)
                 throw new MarshalException("The data cannot be deserialized as a set");
@@ -110,8 +114,8 @@ public class SetSerializer<T> extends AbstractMapSerializer<Set<T>>
 
             for (int i = 0; i < n; i++)
             {
-                V value = readNonNullValue(input, accessor, offset);
-                offset += sizeOfValue(value, accessor);
+                V value = readNonNullValue(input, accessor, offset, version);
+                offset += sizeOfValue(value, accessor, version);
                 elements.validate(value, accessor);
                 l.add(elements.deserialize(value, accessor));
             }
@@ -125,7 +129,6 @@ public class SetSerializer<T> extends AbstractMapSerializer<Set<T>>
         }
     }
 
-    @Override
     public String toString(Set<T> value)
     {
         StringBuilder sb = new StringBuilder();
@@ -147,7 +150,6 @@ public class SetSerializer<T> extends AbstractMapSerializer<Set<T>>
         return sb.toString();
     }
 
-    @Override
     @SuppressWarnings({ "rawtypes", "unchecked" })
     public Class<Set<T>> getType()
     {
@@ -159,13 +161,13 @@ public class SetSerializer<T> extends AbstractMapSerializer<Set<T>>
     {
         try
         {
-            int n = readCollectionSize(input, ByteBufferAccessor.instance);
-            int offset = sizeOfCollectionSize();
+            int n = readCollectionSize(input, ByteBufferAccessor.instance, ProtocolVersion.V3);
+            int offset = sizeOfCollectionSize(n, ProtocolVersion.V3);
 
             for (int i = 0; i < n; i++)
             {
-                ByteBuffer value = readValue(input, ByteBufferAccessor.instance, offset);
-                offset += sizeOfValue(value, ByteBufferAccessor.instance);
+                ByteBuffer value = readValue(input, ByteBufferAccessor.instance, offset, ProtocolVersion.V3);
+                offset += sizeOfValue(value, ByteBufferAccessor.instance, ProtocolVersion.V3);
                 int comparison = comparator.compareForCQL(value, key);
                 if (comparison == 0)
                     return value;

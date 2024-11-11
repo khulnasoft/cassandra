@@ -42,7 +42,7 @@ interface RowTimestamps
      * @param cell the cell to get the timestamp from
      * @param nowInSec the query timestamp in second
      */
-    void addTimestamp(int index, Cell<?> cell, long nowInSec);
+    void addTimestamp(int index, Cell<?> cell, int nowInSec);
 
     /**
      * Returns the timestamp of the specified column.
@@ -60,11 +60,13 @@ interface RowTimestamps
         @Override
         public void addNoTimestamp(int index)
         {
+            // nothing to do here, it's noop
         }
 
         @Override
-        public void addTimestamp(int index, Cell<?> cell, long nowInSec)
+        public void addTimestamp(int index, Cell<?> cell, int nowInSec)
         {
+            // nothing to do here, it's noop
         }
 
         @Override
@@ -90,7 +92,7 @@ interface RowTimestamps
             }
 
             @Override
-            public void addTimestamp(int index, Cell<?> cell, long nowInSec)
+            public void addTimestamp(int index, Cell<?> cell, int nowInSec)
             {
                 array[index].addTimestampFrom(cell, nowInSec);
             }

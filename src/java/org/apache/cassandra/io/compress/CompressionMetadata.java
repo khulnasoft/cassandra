@@ -29,6 +29,8 @@ import java.util.SortedSet;
 import java.util.TreeSet;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Throwables;
 import com.google.common.primitives.Longs;
 
 import org.apache.cassandra.db.TypeSizes;
@@ -36,7 +38,9 @@ import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.IVersionedSerializer;
+import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
+import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
@@ -45,35 +49,96 @@ import org.apache.cassandra.io.util.FileInputStreamPlus;
 import org.apache.cassandra.io.util.FileOutputStreamPlus;
 import org.apache.cassandra.io.util.Memory;
 import org.apache.cassandra.io.util.SafeMemory;
+import org.apache.cassandra.io.util.SliceDescriptor;
 import org.apache.cassandra.schema.CompressionParams;
+import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.concurrent.Ref;
 import org.apache.cassandra.utils.concurrent.Transactional;
-import org.apache.cassandra.utils.concurrent.WrappedSharedCloseable;
 
 /**
  * Holds metadata about compressed file
- * TODO extract interface ICompressionMetadata which will just provide non-resource properties
  */
-public class CompressionMetadata extends WrappedSharedCloseable
+public class CompressionMetadata implements AutoCloseable
 {
-    // dataLength can represent either the true length of the file
-    // or some shorter value, in the case we want to impose a shorter limit on readers
-    // (when early opening, we want to ensure readers cannot read past fully written sections)
+    /**
+     * DataLength can represent either the true length of the file
+     * or some shorter value, in the case we want to impose a shorter limit on readers
+     * (when early opening, we want to ensure readers cannot read past fully written sections).
+     * If zero copy metadata is present, this is the uncompressed length of the partial data file.
+     */
     public final long dataLength;
+
+    /**
+     * Length of the compressed file in bytes. This refers to the partial file length if zero copy metadata is present.
+     */
     public final long compressedFileLength;
-    private final Memory chunkOffsets;
-    private final long chunkOffsetsSize;
-    public final File chunksIndexFile;
+
+    /**
+     * Offsets of consecutive chunks in the (compressed) data file. The length of this array is equal to the number of
+     * chunks. Each item is of Long type, thus 8 bytes long. Note that even if we deal with a partial data file (zero
+     * copy metadata is present), we store offsets of all chunks for the original (compressed) data file.
+     */
+    private final Memory.LongArray chunkOffsets;
+
+    public final File indexFilePath;
+
     public final CompressionParams parameters;
 
-    @VisibleForTesting
-    public static CompressionMetadata open(File chunksIndexFile, long compressedLength, boolean hasMaxCompressedSize)
-    {
-        CompressionParams parameters;
-        long dataLength;
-        Memory chunkOffsets;
+    /**
+     * The length of the chunk in bits. The chunk length must be a power of 2, so this is the number of trailing zeros
+     * in the chunk length.
+     */
+    private final int chunkLengthBits;
 
-        try (FileInputStreamPlus stream = chunksIndexFile.newInputStream())
+    /**
+     * If we don't want to load the all offsets into memory, for example when we deal with a slice, this is the index of
+     * the first offset we loaded.
+     */
+    private final int startChunkIndex;
+
+    /**
+     * Create metadata about given compressed file including uncompressed data length, chunk size
+     * and list of the chunk offsets of the compressed data.
+     *
+     * This is an expensive operation! Don't create more than one for each
+     * sstable.
+     *
+     * @param dataFilePath Path to the compressed file
+     *
+     * @return metadata about given compressed file.
+     */
+    public static CompressionMetadata create(File dataFilePath)
+    {
+        return create(dataFilePath, SliceDescriptor.NONE);
+    }
+
+    public static CompressionMetadata create(File dataFilePath, SliceDescriptor sliceDescription)
+    {
+        Descriptor descriptor = Descriptor.fromFilename(dataFilePath);
+        return new CompressionMetadata(descriptor.fileFor(Component.COMPRESSION_INFO),
+                                       dataFilePath.length(),
+                                       descriptor.version.hasMaxCompressedLength(),
+                                       sliceDescription);
+    }
+
+    @VisibleForTesting
+    public CompressionMetadata(File indexFilePath, long compressedLength, boolean hasMaxCompressedSize)
+    {
+        this(indexFilePath, compressedLength, hasMaxCompressedSize, SliceDescriptor.NONE);
+    }
+
+    /*
+     * If zero copy metadata is present, the compression metadata represents information about chunks in the original
+     * data file rather than the partial file it deals.
+     */
+    @VisibleForTesting
+    public CompressionMetadata(File indexFilePath, long compressedLength, boolean hasMaxCompressedSize, SliceDescriptor sliceDescriptor)
+    {
+        this.indexFilePath = indexFilePath;
+        long uncompressedOffset = sliceDescriptor.exists() ? sliceDescriptor.sliceStart : 0;
+        long uncompressedLength = sliceDescriptor.exists() ? sliceDescriptor.dataEnd - sliceDescriptor.sliceStart : -1;
+
+        try (FileInputStreamPlus stream = indexFilePath.newInputStream())
         {
             String compressorName = stream.readUTF();
             int optionCount = stream.readInt();
@@ -97,8 +162,23 @@ public class CompressionMetadata extends WrappedSharedCloseable
                 throw new RuntimeException("Cannot create CompressionParams for stored parameters", e);
             }
 
-            dataLength = stream.readLong();
-            chunkOffsets = readChunkOffsets(stream);
+            assert Integer.bitCount(chunkLength) == 1;
+            chunkLengthBits = Integer.numberOfTrailingZeros(chunkLength);
+            long readDataLength = stream.readLong();
+            dataLength = uncompressedLength >= 0 ? uncompressedLength : readDataLength;
+
+            startChunkIndex = Math.toIntExact(uncompressedOffset >> chunkLengthBits);
+            assert uncompressedOffset == (long) startChunkIndex << chunkLengthBits;
+
+            int endChunkIndex = Math.toIntExact((uncompressedOffset + dataLength - 1) >> chunkLengthBits) + 1;
+
+            Pair<Memory.LongArray, Long> offsetsAndLimit = readChunkOffsets(stream, startChunkIndex, endChunkIndex, compressedLength);
+            chunkOffsets = offsetsAndLimit.left;
+            // We adjust the compressed file length to store the position after the last chunk just to be able to
+            // calculate the offset of the chunk next to the last one (in order to calculate the length of the last chunk).
+            // Obvously, we could use the compressed file length for that purpose but unfortunately, sometimes there is
+            // an empty chunk added to the end of the file thus we cannot rely on the file length.
+            compressedFileLength = offsetsAndLimit.right;
         }
         catch (FileNotFoundException | NoSuchFileException e)
         {
@@ -106,39 +186,24 @@ public class CompressionMetadata extends WrappedSharedCloseable
         }
         catch (IOException e)
         {
-            throw new CorruptSSTableException(e, chunksIndexFile);
+            throw new CorruptSSTableException(e, indexFilePath);
         }
 
-        return new CompressionMetadata(chunksIndexFile, parameters, chunkOffsets, chunkOffsets.size(), dataLength, compressedLength);
     }
 
     // do not call this constructor directly, unless used in testing
     @VisibleForTesting
-    public CompressionMetadata(File chunksIndexFile,
-                               CompressionParams parameters,
-                               Memory chunkOffsets,
-                               long chunkOffsetsSize,
-                               long dataLength,
-                               long compressedFileLength)
+    private CompressionMetadata(File filePath, CompressionParams parameters, Memory.LongArray offsets, long dataLength, long compressedLength)
     {
-        super(chunkOffsets);
-        this.chunksIndexFile = chunksIndexFile;
+        this.indexFilePath = filePath;
         this.parameters = parameters;
+        assert Integer.bitCount(parameters.chunkLength()) == 1;
+        this.chunkLengthBits = Integer.numberOfTrailingZeros(parameters.chunkLength());
+        this.compressedFileLength = compressedLength;
+        assert offsets != null;
+        this.chunkOffsets = offsets;
         this.dataLength = dataLength;
-        this.compressedFileLength = compressedFileLength;
-        this.chunkOffsets = chunkOffsets;
-        this.chunkOffsetsSize = chunkOffsetsSize;
-    }
-
-    private CompressionMetadata(CompressionMetadata copy)
-    {
-        super(copy);
-        this.chunksIndexFile = copy.chunksIndexFile;
-        this.parameters = copy.parameters;
-        this.dataLength = copy.dataLength;
-        this.compressedFileLength = copy.compressedFileLength;
-        this.chunkOffsets = copy.chunkOffsets;
-        this.chunkOffsetsSize = copy.chunkOffsetsSize;
+        this.startChunkIndex = 0;
     }
 
     public ICompressor compressor()
@@ -162,31 +227,28 @@ public class CompressionMetadata extends WrappedSharedCloseable
      */
     public long offHeapSize()
     {
-        return chunkOffsets.size();
+        return chunkOffsets.memory.size();
     }
 
-    @Override
     public void addTo(Ref.IdentityCollection identities)
     {
-        super.addTo(identities);
-        identities.add(chunkOffsets);
-    }
-
-    @Override
-    public CompressionMetadata sharedCopy()
-    {
-        return new CompressionMetadata(this);
+        identities.add(chunkOffsets.memory);
     }
 
     /**
-     * Read offsets of the individual chunks from the given input.
+     * Reads offsets of the individual chunks from the given input, filtering out non-relevant offsets (outside the
+     * specified range).
      *
-     * @param input Source of the data.
+     * @param input Source of the data
+     * @param startIndex Index of the first chunk to read, inclusive
+     * @param endIndex Index of the last chunk to read, exclusive
+     * @param compressedFileLength compressed file length
      *
-     * @return collection of the chunk offsets.
+     * @return A pair of chunk offsets array and the offset next to the last read chunk
      */
-    private static Memory readChunkOffsets(FileInputStreamPlus input)
+    private static Pair<Memory.LongArray, Long> readChunkOffsets(FileInputStreamPlus input, int startIndex, int endIndex, long compressedFileLength)
     {
+        final Memory.LongArray offsets;
         final int chunkCount;
         try
         {
@@ -196,82 +258,71 @@ public class CompressionMetadata extends WrappedSharedCloseable
         }
         catch (IOException e)
         {
-            throw new FSReadError(e, input.file);
+            throw new FSReadError(e, input.path);
         }
 
-        Memory offsets = Memory.allocate(chunkCount * 8L);
-        int i = 0;
+        Preconditions.checkState(startIndex < chunkCount, "The start index %s has to be < chunk count %s", startIndex, chunkCount);
+        Preconditions.checkState(endIndex <= chunkCount, "The end index %s has to be <= chunk count %s", endIndex, chunkCount);
+        Preconditions.checkState(startIndex <= endIndex, "The start index %s has to be < end index %s", startIndex, endIndex);
+
+        int chunksToRead = endIndex - startIndex;
+
+        if (chunksToRead == 0)
+            return Pair.create(new Memory.LongArray(0), 0L);
+
+        offsets = new Memory.LongArray(chunksToRead);
+        long i = 0;
         try
         {
-
-            for (i = 0; i < chunkCount; i++)
+            input.skipBytes(startIndex * 8);
+            long lastOffset;
+            for (i = 0; i < chunksToRead; i++)
             {
-                offsets.setLong(i * 8L, input.readLong());
+                lastOffset = input.readLong();
+                offsets.set(i, lastOffset);
             }
 
-            return offsets;
+            lastOffset = endIndex < chunkCount ? input.readLong() - offsets.get(0) : compressedFileLength;
+            return Pair.create(offsets, lastOffset);
+        }
+        catch (EOFException e)
+        {
+            offsets.close();
+            String msg = String.format("Corrupted Index File %s: read %d but expected at least %d chunks.",
+                                       input, i, chunksToRead);
+            throw new CorruptSSTableException(new IOException(msg, e), input.path);
         }
         catch (IOException e)
         {
-            if (offsets != null)
-                offsets.close();
-
-            if (e instanceof EOFException)
-            {
-                String msg = String.format("Corrupted Index File %s: read %d but expected %d chunks.",
-                                           input.file.path(), i, chunkCount);
-                throw new CorruptSSTableException(new IOException(msg, e), input.file);
-            }
-            throw new FSReadError(e, input.file);
+            offsets.close();
+            throw new FSReadError(e, input.path);
         }
     }
 
     /**
      * Get a chunk of compressed data (offset, length) corresponding to given position
      *
-     * @param position Position in the file.
-     * @return pair of chunk offset and length.
+     * @param uncompressedDataPosition Position in the uncompressed data. If we deal with a slice, this is the position
+     *                                 in the original uncompressed data.
+     * @return A pair of chunk offset and length. If we deal with a slice, the chunk offset refers to the position in
+     * the compressed slice.
      */
-    public Chunk chunkFor(long position)
+    public Chunk chunkFor(long uncompressedDataPosition)
     {
-        // position of the chunk
-        long idx = 8 * (position / parameters.chunkLength());
-
-        if (idx >= chunkOffsetsSize)
-            throw new CorruptSSTableException(new EOFException(), chunksIndexFile);
-
-        if (idx < 0)
-            throw new CorruptSSTableException(new IllegalArgumentException(String.format("Invalid negative chunk index %d with position %d", idx, position)),
-                                              chunksIndexFile);
-
-        long chunkOffset = chunkOffsets.getLong(idx);
-        long nextChunkOffset = (idx + 8 == chunkOffsetsSize)
-                                ? compressedFileLength
-                                : chunkOffsets.getLong(idx + 8);
-
-        return new Chunk(chunkOffset, (int) (nextChunkOffset - chunkOffset - 4)); // "4" bytes reserved for checksum
+        int chunkIdx = chunkIndex(uncompressedDataPosition);
+        return chunk(chunkIdx);
     }
 
-    public long getDataOffsetForChunkOffset(long chunkOffset)
+    private Chunk chunk(long chunkOffset, long nextChunkOffset)
     {
-        long l = 0;
-        long h = (chunkOffsetsSize >> 3) - 1;
-        long idx, offset;
+        return new Chunk(chunkOffset, Math.toIntExact(nextChunkOffset - chunkOffset - 4)); // "4" bytes reserved for checksum
+    }
 
-        while (l <= h)
-        {
-            idx = (l + h) >>> 1;
-            offset = chunkOffsets.getLong(idx << 3);
-
-            if (offset < chunkOffset)
-                l = idx + 1;
-            else if (offset > chunkOffset)
-                h = idx - 1;
-            else
-                return idx * parameters.chunkLength();
-        }
-
-        throw new IllegalArgumentException("No chunk with offset " + chunkOffset);
+    private Chunk chunk(int chunkIdx)
+    {
+        long chunkOffset = chunkOffset(chunkIdx);
+        long nextChunkOffset = nextChunkOffset(chunkIdx);
+        return chunk(chunkOffset, nextChunkOffset);
     }
 
     /**
@@ -281,35 +332,35 @@ public class CompressionMetadata extends WrappedSharedCloseable
     public long getTotalSizeForSections(Collection<SSTableReader.PartitionPositionBounds> sections)
     {
         long size = 0;
-        long lastOffset = -1;
+        int lastIncludedChunkIdx = -1;
         for (SSTableReader.PartitionPositionBounds section : sections)
         {
-            int startIndex = (int) (section.lowerPosition / parameters.chunkLength());
+            int sectionStartIdx = Math.max(chunkIndex(section.lowerPosition), lastIncludedChunkIdx + 1);
+            int sectionEndIdx = chunkIndex(section.upperPosition - 1); // we need to include the last byte of the seciont but not the upper position (which is excludded)
 
-            int endIndex = (int) (section.upperPosition / parameters.chunkLength());
-            if (section.upperPosition % parameters.chunkLength() == 0)
-                endIndex--;
-
-            for (int i = startIndex; i <= endIndex; i++)
+            for (int idx = sectionStartIdx; idx <= sectionEndIdx; idx++)
             {
-                long offset = i * 8L;
-                long chunkOffset = chunkOffsets.getLong(offset);
-                if (chunkOffset > lastOffset)
-                {
-                    lastOffset = chunkOffset;
-                    long nextChunkOffset = offset + 8 == chunkOffsetsSize
-                                                   ? compressedFileLength
-                                                   : chunkOffsets.getLong(offset + 8);
-                    size += (nextChunkOffset - chunkOffset);
-                }
+                long chunkOffset = chunkOffset(idx);
+                long nextChunkOffset = nextChunkOffset(idx);
+                size += nextChunkOffset - chunkOffset;
             }
+            lastIncludedChunkIdx = sectionEndIdx;
         }
         return size;
     }
 
+    private long nextChunkOffset(int chunkIdx)
+    {
+        if (chunkIdx == chunkOffsets.size() - 1)
+            return compressedFileLength + chunkOffsets.get(0);
+        return chunkOffset(chunkIdx + 1);
+    }
+
     /**
-     * @param sections Collection of sections in uncompressed file
-     * @return Array of chunks which corresponds to given sections of uncompressed file, sorted by chunk offset
+     * @param sections Collection of sections in uncompressed data. If we deal with a slice, the sections refer to the
+     *                 positions in the original uncompressed data.
+     * @return Array of chunks which corresponds to given sections of uncompressed file, sorted by chunk offset.
+     * Note that if we deal with a slice, the chunk offsets refer to the positions in the compressed slice.
      */
     public Chunk[] getChunksForSections(Collection<SSTableReader.PartitionPositionBounds> sections)
     {
@@ -318,31 +369,39 @@ public class CompressionMetadata extends WrappedSharedCloseable
 
         for (SSTableReader.PartitionPositionBounds section : sections)
         {
-            int startIndex = (int) (section.lowerPosition / parameters.chunkLength());
+            int sectionStartIdx = chunkIndex(section.lowerPosition);
+            int sectionEndIdx = chunkIndex(section.upperPosition - 1); // we need to include the last byte of the seciont but not the upper position (which is excludded)
 
-            int endIndex = (int) (section.upperPosition / parameters.chunkLength());
-            if (section.upperPosition % parameters.chunkLength() == 0)
-                endIndex--;
-
-            for (int i = startIndex; i <= endIndex; i++)
-            {
-                long offset = i * 8L;
-                long chunkOffset = chunkOffsets.getLong(offset);
-                long nextChunkOffset = offset + 8 == chunkOffsetsSize
-                                     ? compressedFileLength
-                                     : chunkOffsets.getLong(offset + 8);
-                offsets.add(new Chunk(chunkOffset, (int) (nextChunkOffset - chunkOffset - 4))); // "4" bytes reserved for checksum
-            }
+            for (int idx = sectionStartIdx; idx <= sectionEndIdx; idx++)
+                offsets.add(chunk(idx));
         }
 
         return offsets.toArray(new Chunk[offsets.size()]);
+    }
+
+    private long chunkOffset(int chunkIdx)
+    {
+        if (chunkIdx >= chunkOffsets.size())
+            throw new CorruptSSTableException(new EOFException(String.format("Chunk %d out of bounds: %d", chunkIdx, chunkOffsets.size())), indexFilePath);
+
+        return chunkOffsets.get(chunkIdx);
+    }
+
+    private int chunkIndex(long uncompressedDataPosition)
+    {
+        return Math.toIntExact(uncompressedDataPosition >> chunkLengthBits) - startChunkIndex;
+    }
+
+    public void close()
+    {
+        chunkOffsets.close();
     }
 
     public static class Writer extends Transactional.AbstractTransactional implements Transactional
     {
         // path to the file
         private final CompressionParams parameters;
-        private final File file;
+        private final File filePath;
         private int maxCount = 100;
         private SafeMemory offsets = new SafeMemory(maxCount * 8L);
         private int count = 0;
@@ -350,15 +409,15 @@ public class CompressionMetadata extends WrappedSharedCloseable
         // provided by user when setDescriptor
         private long dataLength, chunkCount;
 
-        private Writer(CompressionParams parameters, File file)
+        private Writer(CompressionParams parameters, File path)
         {
             this.parameters = parameters;
-            this.file = file;
+            filePath = path;
         }
 
-        public static Writer open(CompressionParams parameters, File file)
+        public static Writer open(CompressionParams parameters, File path)
         {
-            return new Writer(parameters, file);
+            return new Writer(parameters, path);
         }
 
         public void addOffset(long offset)
@@ -393,7 +452,7 @@ public class CompressionMetadata extends WrappedSharedCloseable
             }
             catch (IOException e)
             {
-                throw new FSWriteError(e, file);
+                throw new FSWriteError(e, filePath);
             }
         }
 
@@ -405,7 +464,6 @@ public class CompressionMetadata extends WrappedSharedCloseable
             return this;
         }
 
-        @Override
         public void doPrepare()
         {
             assert chunkCount == count;
@@ -420,7 +478,7 @@ public class CompressionMetadata extends WrappedSharedCloseable
             }
 
             // flush the data to disk
-            try (FileOutputStreamPlus out = file.newOutputStream(File.WriteMode.OVERWRITE))
+            try (FileOutputStreamPlus out = new FileOutputStreamPlus(filePath))
             {
                 writeHeader(out, dataLength, count);
                 for (int i = 0; i < count; i++)
@@ -431,14 +489,15 @@ public class CompressionMetadata extends WrappedSharedCloseable
             }
             catch (FileNotFoundException | NoSuchFileException fnfe)
             {
-                throw new RuntimeException(fnfe);
+                throw Throwables.propagate(fnfe);
             }
             catch (IOException e)
             {
-                throw new FSWriteError(e, file);
+                throw new FSWriteError(e, filePath);
             }
         }
 
+        @SuppressWarnings("resource")
         public CompressionMetadata open(long dataLength, long compressedLength)
         {
             SafeMemory tOffsets = this.offsets.sharedCopy();
@@ -453,11 +512,11 @@ public class CompressionMetadata extends WrappedSharedCloseable
             if (tCount < this.count)
                 compressedLength = tOffsets.getLong(tCount * 8L);
 
-            return new CompressionMetadata(file, parameters, tOffsets, tCount * 8L, dataLength, compressedLength);
+            return new CompressionMetadata(filePath, parameters, new Memory.LongArray(tOffsets, tCount), dataLength, compressedLength);
         }
 
         /**
-         * Get a chunk offset by it's index.
+         * Get a chunk offset by its index.
          *
          * @param chunkIndex Index of the chunk.
          *
@@ -479,19 +538,16 @@ public class CompressionMetadata extends WrappedSharedCloseable
             count = chunkIndex;
         }
 
-        @Override
         protected Throwable doPostCleanup(Throwable failed)
         {
             return offsets.close(failed);
         }
 
-        @Override
         protected Throwable doCommit(Throwable accumulate)
         {
             return accumulate;
         }
 
-        @Override
         protected Throwable doAbort(Throwable accumulate)
         {
             return accumulate;
@@ -510,13 +566,12 @@ public class CompressionMetadata extends WrappedSharedCloseable
 
         public Chunk(long offset, int length)
         {
-            assert(length > 0);
+            assert (length >= 0);
 
             this.offset = offset;
             this.length = length;
         }
 
-        @Override
         public boolean equals(Object o)
         {
             if (this == o) return true;
@@ -526,7 +581,6 @@ public class CompressionMetadata extends WrappedSharedCloseable
             return length == chunk.length && offset == chunk.offset;
         }
 
-        @Override
         public int hashCode()
         {
             int result = (int) (offset ^ (offset >>> 32));
@@ -534,7 +588,6 @@ public class CompressionMetadata extends WrappedSharedCloseable
             return result;
         }
 
-        @Override
         public String toString()
         {
             return String.format("Chunk<offset: %d, length: %d>", offset, length);
@@ -543,20 +596,17 @@ public class CompressionMetadata extends WrappedSharedCloseable
 
     static class ChunkSerializer implements IVersionedSerializer<Chunk>
     {
-        @Override
         public void serialize(Chunk chunk, DataOutputPlus out, int version) throws IOException
         {
             out.writeLong(chunk.offset);
             out.writeInt(chunk.length);
         }
 
-        @Override
         public Chunk deserialize(DataInputPlus in, int version) throws IOException
         {
             return new Chunk(in.readLong(), in.readInt());
         }
 
-        @Override
         public long serializedSize(Chunk chunk, int version)
         {
             long size = TypeSizes.sizeof(chunk.offset);

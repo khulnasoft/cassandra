@@ -19,62 +19,40 @@
 package org.apache.cassandra.net;
 
 import java.nio.channels.ClosedChannelException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Objects;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Consumer;
+import java.util.concurrent.TimeoutException;
 
-import com.google.common.net.InetAddresses;
 import org.junit.AfterClass;
 import org.junit.Assert;
-import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import io.netty.channel.EventLoop;
 import io.netty.util.concurrent.Future;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.config.EncryptionOptions.ServerEncryptionOptions;
-import org.apache.cassandra.config.ParameterizedClass;
 import org.apache.cassandra.db.commitlog.CommitLog;
-import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
-import org.apache.cassandra.gms.GossipDigestSyn;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.net.OutboundConnectionInitiator.Result;
 import org.apache.cassandra.net.OutboundConnectionInitiator.Result.MessagingSuccess;
-import org.apache.cassandra.security.DefaultSslContextFactory;
-import org.apache.cassandra.transport.TlsTestUtils;
-import org.apache.cassandra.utils.concurrent.AsyncPromise;
 
-import static org.apache.cassandra.net.ConnectionType.SMALL_MESSAGES;
-import static org.apache.cassandra.config.EncryptionOptions.ClientAuth.NOT_REQUIRED;
-import static org.apache.cassandra.config.EncryptionOptions.ClientAuth.REQUIRED;
+import static org.apache.cassandra.net.MessagingService.VERSION_30;
+import static org.apache.cassandra.net.MessagingService.VERSION_3014;
 import static org.apache.cassandra.net.MessagingService.current_version;
 import static org.apache.cassandra.net.MessagingService.minimum_version;
-import static org.apache.cassandra.net.OutboundConnectionInitiator.Result;
-import static org.apache.cassandra.net.OutboundConnectionInitiator.SslFallbackConnectionType;
-import static org.apache.cassandra.net.OutboundConnectionInitiator.initiateMessaging;
-import static org.apache.cassandra.tcm.ClusterMetadata.EMPTY_METADATA_IDENTIFIER;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
+import static org.apache.cassandra.net.ConnectionType.SMALL_MESSAGES;
+import static org.apache.cassandra.net.OutboundConnectionInitiator.*;
 
 // TODO: test failure due to exception, timeout, etc
 public class HandshakeTest
 {
     private static final SocketFactory factory = new SocketFactory();
-    static final InetAddressAndPort TO_ADDR = InetAddressAndPort.getByAddressOverrideDefaults(InetAddresses.forString("127.0.0.2"), 7012);
-    static final InetAddressAndPort FROM_ADDR = InetAddressAndPort.getByAddressOverrideDefaults(InetAddresses.forString("127.0.0.1"), 7012);
-    private volatile Throwable handshakeEx;
-
+    private static final int SUPPORTED_DSE_VERSION = 4;
     @BeforeClass
     public static void startup()
     {
         DatabaseDescriptor.daemonInitialization();
-        ClusterMetadataTestHelper.setInstanceForTest();
         CommitLog.instance.start();
     }
 
@@ -84,21 +62,15 @@ public class HandshakeTest
         factory.shutdownNow();
     }
 
-    @Before
-    public void setup()
+    private Result handshake(int req, int outMin, int outMax) throws ExecutionException, InterruptedException
     {
-        handshakeEx = null;
+        return handshake(req, new AcceptVersions(outMin, outMax, SUPPORTED_DSE_VERSION), null);
     }
-
-    private Result handshake(int outMin, int outMax) throws ExecutionException, InterruptedException
+    private Result handshake(int req, int outMin, int outMax, int inMin, int inMax) throws ExecutionException, InterruptedException
     {
-        return handshake(new AcceptVersions(outMin, outMax), null);
+        return handshake(req, new AcceptVersions(outMin, outMax, SUPPORTED_DSE_VERSION), new AcceptVersions(inMin, inMax, SUPPORTED_DSE_VERSION));
     }
-    private Result handshake(int outMin, int outMax, int inMin, int inMax) throws ExecutionException, InterruptedException
-    {
-        return handshake(new AcceptVersions(outMin, outMax), new AcceptVersions(inMin, inMax));
-    }
-    private Result handshake(AcceptVersions acceptOutbound, AcceptVersions acceptInbound) throws ExecutionException, InterruptedException
+    private Result handshake(int req, AcceptVersions acceptOutbound, AcceptVersions acceptInbound) throws ExecutionException, InterruptedException
     {
         InboundSockets inbound = new InboundSockets(new InboundConnectionSettings().withAcceptMessaging(acceptInbound));
         try
@@ -109,12 +81,15 @@ public class HandshakeTest
             Future<Result<MessagingSuccess>> future =
             initiateMessaging(eventLoop,
                               SMALL_MESSAGES,
-                              SslFallbackConnectionType.SERVER_CONFIG,
                               new OutboundConnectionSettings(endpoint)
                                                     .withAcceptVersions(acceptOutbound)
                                                     .withDefaults(ConnectionCategory.MESSAGING),
-                              AsyncPromise.withExecutor(eventLoop));
-            return future.get();
+                              req, new AsyncPromise<>(eventLoop));
+            return future.get(20, TimeUnit.SECONDS);
+        }
+        catch (TimeoutException e)
+        {
+            throw new RuntimeException(e);
         }
         finally
         {
@@ -122,11 +97,10 @@ public class HandshakeTest
         }
     }
 
-
     @Test
     public void testBothCurrentVersion() throws InterruptedException, ExecutionException
     {
-        Result result = handshake(minimum_version, current_version);
+        Result result = handshake(current_version, minimum_version, current_version);
         Assert.assertEquals(Result.Outcome.SUCCESS, result.outcome);
         result.success().channel.close();
     }
@@ -134,7 +108,7 @@ public class HandshakeTest
     @Test
     public void testSendCompatibleOldVersion() throws InterruptedException, ExecutionException
     {
-        Result result = handshake(current_version, current_version + 1, current_version +1, current_version + 2);
+        Result result = handshake(current_version, current_version, current_version + 1, current_version +1, current_version + 2);
         Assert.assertEquals(Result.Outcome.SUCCESS, result.outcome);
         Assert.assertEquals(current_version + 1, result.success().messagingVersion);
         result.success().channel.close();
@@ -143,7 +117,7 @@ public class HandshakeTest
     @Test
     public void testSendCompatibleFutureVersion() throws InterruptedException, ExecutionException
     {
-        Result result = handshake(MessagingService.minimum_version, current_version + 1);
+        Result result = handshake(current_version + 1, current_version - 1, current_version + 1);
         Assert.assertEquals(Result.Outcome.SUCCESS, result.outcome);
         Assert.assertEquals(current_version, result.success().messagingVersion);
         result.success().channel.close();
@@ -152,7 +126,7 @@ public class HandshakeTest
     @Test
     public void testSendIncompatibleFutureVersion() throws InterruptedException, ExecutionException
     {
-        Result result = handshake(current_version + 1, current_version + 1);
+        Result result = handshake(current_version + 1, current_version + 1, current_version + 1);
         Assert.assertEquals(Result.Outcome.INCOMPATIBLE, result.outcome);
         Assert.assertEquals(current_version, result.incompatible().closestSupportedVersion);
         Assert.assertEquals(current_version, result.incompatible().maxMessagingVersion);
@@ -161,231 +135,101 @@ public class HandshakeTest
     @Test
     public void testSendIncompatibleOldVersion() throws InterruptedException, ExecutionException
     {
-        Result result = handshake(current_version + 1, current_version + 1, current_version + 2, current_version + 3);
+        Result result = handshake(current_version + 1, current_version + 1, current_version + 1, current_version + 2, current_version + 3);
         Assert.assertEquals(Result.Outcome.INCOMPATIBLE, result.outcome);
         Assert.assertEquals(current_version + 2, result.incompatible().closestSupportedVersion);
         Assert.assertEquals(current_version + 3, result.incompatible().maxMessagingVersion);
     }
 
     @Test
-    public void testSendAllSupported() throws InterruptedException, ExecutionException
+    public void testSendCompatibleMaxVersionPre40() throws InterruptedException, ExecutionException
     {
-        List<MessagingService.Version> supportedVersions = MessagingService.Version.supportedVersions();
-        for (MessagingService.Version outMin : supportedVersions)
-            for (MessagingService.Version outMax : supportedVersions)
-                if (outMin.value <= outMax.value)
-                    for (MessagingService.Version inMin : supportedVersions)
-                        for (MessagingService.Version inMax : supportedVersions)
-                            if (inMin.value <= inMax.value)
-                            {
-                                Result result = handshake(outMin.value, outMax.value, inMin.value, inMax.value);
-                                // expect success if out and in have a version in common
-                                boolean expectSuccess = outMin.value <= inMax.value && inMin.value <= outMax.value;
-
-                                Assert.assertEquals(String.format("wrong result outcome for outMin %s outMax %s inMin %s inMax %s", outMin.value, outMax.value, inMin.value, inMax.value),
-                                                expectSuccess ? Result.Outcome.SUCCESS : Result.Outcome.INCOMPATIBLE, result.outcome);
-
-                                if (expectSuccess)
-                                {
-                                    Assert.assertEquals(String.format("wrong agreed messagingVersion for outMin %s outMax %s inMin %s inMax %s", outMin.value, outMax.value, inMin.value, inMax.value),
-                                                    Math.min(outMax.value, inMax.value), result.success().messagingVersion);
-                                    result.success().channel.close();
-                                }
-                            }
-        }
-
-    @Test
-    public void testOutboundConnectionfFallbackDuringUpgrades() throws ClosedChannelException, InterruptedException
-    {
-        // Upgrade from Non-SSL -> Optional SSL
-        // Outbound connection from Optional SSL(new node) -> Non-SSL (old node)
-        testOutboundFallbackOnSSLHandshakeFailure(SslFallbackConnectionType.SSL, true, SslFallbackConnectionType.NO_SSL, false);
-
-        // Upgrade from Optional SSL -> Strict SSL
-        // Outbound connection from Strict SSL(new node) -> Optional SSL (old node)
-        testOutboundFallbackOnSSLHandshakeFailure(SslFallbackConnectionType.SSL, false, SslFallbackConnectionType.SSL, true);
-
-        // Upgrade from Optional SSL -> Strict MTLS
-        // Outbound connection from Strict MTLS(new node) -> Optional SSL (old node)
-        testOutboundFallbackOnSSLHandshakeFailure(SslFallbackConnectionType.MTLS, false, SslFallbackConnectionType.SSL, true);
-
-        // Upgrade from Strict SSL -> Optional MTLS
-        // Outbound connection from Optional MTLS(new node) -> Strict SSL (old node)
-        testOutboundFallbackOnSSLHandshakeFailure(SslFallbackConnectionType.MTLS, true, SslFallbackConnectionType.SSL, false);
-
-        // Upgrade from Strict Optional MTLS -> Strict MTLS
-        // Outbound connection from Strict TLS(new node) -> Optional TLS (old node)
-        testOutboundFallbackOnSSLHandshakeFailure(SslFallbackConnectionType.MTLS, false, SslFallbackConnectionType.MTLS, true);
+        Result result = handshake(VERSION_3014, VERSION_30, VERSION_3014, VERSION_30, VERSION_3014);
+        Assert.assertEquals(Result.Outcome.SUCCESS, result.outcome);
+        Assert.assertEquals(VERSION_3014, result.success().messagingVersion);
+        result.success().channel.close();
     }
 
     @Test
-    public void testOutboundConnectionfFallbackDuringDowngrades() throws ClosedChannelException, InterruptedException
+    public void testSendCompatibleFutureVersionPre40() throws InterruptedException, ExecutionException
     {
-        // From Strict MTLS -> Optional MTLS
-        // Outbound connection from Optional TLS(new node) -> Strict MTLS (old node)
-        testOutboundFallbackOnSSLHandshakeFailure(SslFallbackConnectionType.MTLS, true, SslFallbackConnectionType.MTLS, false);
-
-        // From Optional MTLS -> Strict SSL
-        // Outbound connection from Strict SSL(new node) -> Optional MTLS (old node)
-        testOutboundFallbackOnSSLHandshakeFailure(SslFallbackConnectionType.SSL, false, SslFallbackConnectionType.MTLS, true);
-
-        // From Strict MTLS -> Optional SSL
-        // Outbound connection from Optional SSL(new node) -> Strict MTLS (old node)
-        testOutboundFallbackOnSSLHandshakeFailure(SslFallbackConnectionType.SSL, true, SslFallbackConnectionType.MTLS, false);
-
-        // From Strict SSL -> Optional SSL
-        // Outbound connection from Optional SSL(new node) -> Strict SSL (old node)
-        testOutboundFallbackOnSSLHandshakeFailure(SslFallbackConnectionType.SSL, true, SslFallbackConnectionType.SSL, false);
-
-        // From Optional SSL -> Non-SSL
-        // Outbound connection from Non-SSL(new node) -> Optional SSL (old node)
-        testOutboundFallbackOnSSLHandshakeFailure(SslFallbackConnectionType.NO_SSL, false, SslFallbackConnectionType.SSL, true);
+        Result result = handshake(VERSION_3014, VERSION_30, VERSION_3014, VERSION_30, VERSION_30);
+        Assert.assertEquals(Result.Outcome.RETRY, result.outcome);
+        Assert.assertEquals(VERSION_30, result.retry().withMessagingVersion);
     }
 
     @Test
-    public void testOutboundConnectionDoesntFallbackWhenErrorIsNotSSLRelated() throws ClosedChannelException, InterruptedException
+    public void testSendIncompatibleFutureVersionPre40() throws InterruptedException, ExecutionException
     {
-        // Configuring nodes in Optional SSL mode
-        // when optional mode is enabled, if the connection error is SSL related, fallback to another SSL strategy should happen,
-        // otherwise it should use same SSL strategy and retry
-        ServerEncryptionOptions serverEncryptionOptions = getServerEncryptionOptions(SslFallbackConnectionType.SSL, true);
-        InboundSockets inbound = getInboundSocket(serverEncryptionOptions);
+        Result result = handshake(VERSION_3014, VERSION_3014, VERSION_3014, VERSION_30, VERSION_30);
+        Assert.assertEquals(Result.Outcome.INCOMPATIBLE, result.outcome);
+        Assert.assertEquals(-1, result.incompatible().closestSupportedVersion);
+        Assert.assertEquals(VERSION_30, result.incompatible().maxMessagingVersion);
+    }
+
+    @Test
+    public void testDSEToCCInitialHandshake() throws InterruptedException, ExecutionException
+    {
+        // This is how DSE 255 (0,4) intiaties the connection to CC (10,100)
+        Result result = handshake(255, 0, 4, 10, 100);
+        Assert.assertEquals(Result.Outcome.SUCCESS, result.outcome);
+        result.success().channel.close();
+    }
+
+    @Test
+    public void testSendCompatibleOldVersionPre40() throws InterruptedException
+    {
         try
         {
-            InetAddressAndPort endpoint = inbound.sockets().stream().map(s -> s.settings.bindAddress).findFirst().get();
-
-            // Open outbound connections before server starts listening
-            // The connection should be accepted after opening inbound connections, with the same SSL context without fallback
-            OutboundConnection outboundConnection = initiateOutbound(endpoint, SslFallbackConnectionType.SSL, true);
-
-            // Let the outbound connection be tried for 4 times atleast
-            while (outboundConnection.connectionAttempts() < SslFallbackConnectionType.values().length)
-            {
-                Thread.sleep(1000);
-            }
-            assertFalse(outboundConnection.isConnected());
-            inbound.open();
-            // As soon as the node accepts inbound connections, the connection must be established with right SSL context
-            waitForConnection(outboundConnection);
-            assertTrue(outboundConnection.isConnected());
+            handshake(VERSION_30, VERSION_30, VERSION_3014, VERSION_3014, VERSION_3014);
+            Assert.fail("Should have thrown");
         }
-        finally
+        catch (ExecutionException e)
         {
-            inbound.close().await(10L, TimeUnit.SECONDS);
+            Assert.assertTrue(e.getCause() instanceof ClosedChannelException);
         }
     }
 
-    private ServerEncryptionOptions getServerEncryptionOptions(SslFallbackConnectionType sslConnectionType, boolean optional)
+    @Test
+    public void testSendIncompatibleOldVersionPre40() throws InterruptedException
     {
-        ServerEncryptionOptions serverEncryptionOptions = new ServerEncryptionOptions().withOptional(optional)
-                                                                                       .withKeyStore(TlsTestUtils.SERVER_KEYSTORE_PATH)
-                                                                                       .withKeyStorePassword(TlsTestUtils.SERVER_KEYSTORE_PASSWORD)
-                                                                                       .withOutboundKeystore(TlsTestUtils.SERVER_OUTBOUND_KEYSTORE_PATH)
-                                                                                       .withOutboundKeystorePassword(TlsTestUtils.SERVER_OUTBOUND_KEYSTORE_PASSWORD)
-                                                                                       .withTrustStore(TlsTestUtils.SERVER_TRUSTSTORE_PATH)
-                                                                                       .withTrustStorePassword(TlsTestUtils.SERVER_TRUSTSTORE_PASSWORD)
-                                                                                       .withSslContextFactory((new ParameterizedClass(DefaultSslContextFactory.class.getName(),
-                                                                                                                                      new HashMap<>())));
-        if (sslConnectionType == SslFallbackConnectionType.MTLS)
-        {
-            serverEncryptionOptions = serverEncryptionOptions.withInternodeEncryption(ServerEncryptionOptions.InternodeEncryption.all)
-                                                             .withRequireClientAuth(REQUIRED);
-        }
-        else if (sslConnectionType == SslFallbackConnectionType.SSL)
-        {
-            serverEncryptionOptions = serverEncryptionOptions.withInternodeEncryption(ServerEncryptionOptions.InternodeEncryption.all)
-                                                             .withRequireClientAuth(NOT_REQUIRED);
-        }
-        return serverEncryptionOptions;
-    }
-
-    private InboundSockets getInboundSocket(ServerEncryptionOptions serverEncryptionOptions)
-    {
-        InboundConnectionSettings settings = new InboundConnectionSettings().withAcceptMessaging(new AcceptVersions(minimum_version, current_version))
-                                                                            .withEncryption(serverEncryptionOptions)
-                                                                            .withBindAddress(TO_ADDR);
-        List<InboundConnectionSettings> settingsList =  new ArrayList<>();
-        settingsList.add(settings);
-        return new InboundSockets(settingsList);
-    }
-
-    private OutboundConnection initiateOutbound(InetAddressAndPort endpoint, SslFallbackConnectionType connectionType, boolean optional) throws ClosedChannelException
-    {
-        final OutboundConnectionSettings settings = new OutboundConnectionSettings(endpoint)
-        .withAcceptVersions(new AcceptVersions(minimum_version, current_version))
-        .withDefaults(ConnectionCategory.MESSAGING)
-        .withEncryption(getServerEncryptionOptions(connectionType, optional))
-        .withDebugCallbacks(new HandshakeAcknowledgeChecker(t -> handshakeEx = t))
-        .withFrom(FROM_ADDR);
-        OutboundConnections outboundConnections = OutboundConnections.tryRegister(new ConcurrentHashMap<>(), TO_ADDR, settings);
-        GossipDigestSyn syn = new GossipDigestSyn("cluster", "partitioner", EMPTY_METADATA_IDENTIFIER, new ArrayList<>(0));
-        Message<GossipDigestSyn> message = Message.out(Verb.GOSSIP_DIGEST_SYN, syn);
-        OutboundConnection outboundConnection = outboundConnections.connectionFor(message);
-        outboundConnection.enqueue(message);
-        return outboundConnection;
-    }
-
-    private void testOutboundFallbackOnSSLHandshakeFailure(SslFallbackConnectionType fromConnectionType, boolean fromOptional,
-                                                           SslFallbackConnectionType toConnectionType, boolean toOptional) throws ClosedChannelException, InterruptedException
-    {
-        // Configures inbound connections to be optional mTLS
-        InboundSockets inbound = getInboundSocket(getServerEncryptionOptions(toConnectionType, toOptional));
         try
         {
-            InetAddressAndPort endpoint = inbound.sockets().stream().map(s -> s.settings.bindAddress).findFirst().get();
-            inbound.open();
-
-            // Open outbound connections, and wait until connection is established
-            OutboundConnection outboundConnection = initiateOutbound(endpoint, fromConnectionType, fromOptional);
-            waitForConnection(outboundConnection);
-            assertTrue(outboundConnection.isConnected());
-            assertNull(handshakeEx);
+            handshake(VERSION_30, VERSION_30, VERSION_30, VERSION_3014, VERSION_3014);
+            Assert.fail("Should have thrown");
         }
-        finally
+        catch (ExecutionException e)
         {
-            inbound.close().await(10L, TimeUnit.SECONDS);
+            Assert.assertTrue(e.getCause() instanceof ClosedChannelException);
         }
     }
 
-    private void waitForConnection(OutboundConnection outboundConnection) throws InterruptedException
+    @Test
+    public void testSendCompatibleOldVersion40() throws InterruptedException, ExecutionException
     {
-        long startTime = System.currentTimeMillis();
-        while (!outboundConnection.isConnected() && System.currentTimeMillis() - startTime < 60000)
+        Result result = handshake(VERSION_30, VERSION_30, VERSION_30, VERSION_30, current_version);
+        Assert.assertEquals(Result.Outcome.SUCCESS, result.outcome);
+        Assert.assertEquals(VERSION_30, result.success().messagingVersion);
+    }
+
+    @Test
+    public void testSendIncompatibleOldVersion40() throws InterruptedException
+    {
+        try
         {
-            Thread.sleep(1000);
+            Assert.fail(Objects.toString(handshake(VERSION_30, VERSION_30, VERSION_30, current_version, current_version)));
+        }
+        catch (ExecutionException e)
+        {
+            Assert.assertTrue(e.getCause() instanceof ClosedChannelException);
         }
     }
 
-    private static class HandshakeAcknowledgeChecker implements OutboundDebugCallbacks
+    @Test // fairly contrived case, but since we introduced logic for testing we need to be careful it doesn't make us worse
+    public void testSendToFuturePost40BelievedToBePre40() throws InterruptedException, ExecutionException
     {
-        private final AtomicInteger acks = new AtomicInteger(0);
-        private final Consumer<Throwable> fail;
-
-        private HandshakeAcknowledgeChecker(Consumer<Throwable> fail)
-        {
-            this.fail = fail;
-        }
-
-        @Override
-        public void onSendSmallFrame(int messageCount, int payloadSizeInBytes)
-        {
-        }
-
-        @Override
-        public void onSentSmallFrame(int messageCount, int payloadSizeInBytes)
-        {
-        }
-
-        @Override
-        public void onFailedSmallFrame(int messageCount, int payloadSizeInBytes)
-        {
-        }
-
-        @Override
-        public void onConnect(int messagingVersion, OutboundConnectionSettings settings)
-        {
-            if (acks.incrementAndGet() > 1)
-                fail.accept(new AssertionError("Handshake was acknowledged more than once"));
-        }
+        Result result = handshake(VERSION_30, VERSION_30, current_version, VERSION_30, current_version + 1);
+        Assert.assertEquals(Result.Outcome.SUCCESS, result.outcome);
+        Assert.assertEquals(VERSION_30, result.success().messagingVersion);
     }
 }

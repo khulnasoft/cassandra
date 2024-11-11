@@ -18,6 +18,7 @@
  */
 package org.apache.cassandra.utils;
 
+import java.io.DataInputStream;
 import java.io.IOException;
 
 import org.junit.Assert;
@@ -63,7 +64,7 @@ public class SerializationsTest extends AbstractSerializationsTester
                 if (oldBfFormat)
                     serializeOldBfFormat((BloomFilter) bf, out);
                 else
-                    BloomFilterSerializer.forVersion(false).serialize((BloomFilter) bf, out);
+                    BloomFilter.serializer.serialize((BloomFilter) bf, out);
             }
         }
     }
@@ -78,7 +79,7 @@ public class SerializationsTest extends AbstractSerializationsTester
         }
 
         try (FileInputStreamPlus in = getInput("4.0", "utils.BloomFilter1000.bin");
-             IFilter filter = BloomFilterSerializer.forVersion(false).deserialize(in))
+             IFilter filter = BloomFilter.serializer.deserialize(in, false))
         {
             boolean present;
             for (int i = 0 ; i < 1000 ; i++)
@@ -94,7 +95,7 @@ public class SerializationsTest extends AbstractSerializationsTester
         }
 
         try (FileInputStreamPlus in = getInput("3.0", "utils.BloomFilter1000.bin");
-             IFilter filter = BloomFilterSerializer.forVersion(true).deserialize(in))
+             IFilter filter = BloomFilter.serializer.deserialize(in, true))
         {
             boolean present;
             for (int i = 0 ; i < 1000 ; i++)
@@ -116,12 +117,12 @@ public class SerializationsTest extends AbstractSerializationsTester
         testBloomFilterTable("test/data/bloom-filter/la/foo/la-1-big-Filter.db", true);
     }
 
-    private void testBloomFilterTable(String file, boolean oldBfFormat) throws Exception
+    private static void testBloomFilterTable(String file, boolean oldBfFormat) throws Exception
     {
         Murmur3Partitioner partitioner = new Murmur3Partitioner();
 
-        try (FileInputStreamPlus in = new File(file).newInputStream();
-             IFilter filter = BloomFilterSerializer.forVersion(oldBfFormat).deserialize(in))
+        try (DataInputStream in = new DataInputStream(new FileInputStreamPlus(new File(file)));
+             IFilter filter = BloomFilter.serializer.deserialize(in, oldBfFormat))
         {
             for (int i = 1; i <= 10; i++)
             {

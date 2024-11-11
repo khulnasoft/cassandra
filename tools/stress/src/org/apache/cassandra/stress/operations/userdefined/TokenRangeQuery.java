@@ -24,15 +24,17 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import com.datastax.driver.core.ColumnMetadata;
-import com.datastax.driver.core.PagingState;
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
-import com.datastax.driver.core.SimpleStatement;
-import com.datastax.driver.core.Statement;
-import com.datastax.driver.core.TableMetadata;
-import com.datastax.driver.core.Token;
-import com.datastax.driver.core.TokenRange;
+import javax.naming.OperationNotSupportedException;
+
+import com.khulnasoft.driver.core.ColumnMetadata;
+import com.khulnasoft.driver.core.PagingState;
+import com.khulnasoft.driver.core.ResultSet;
+import com.khulnasoft.driver.core.Row;
+import com.khulnasoft.driver.core.SimpleStatement;
+import com.khulnasoft.driver.core.Statement;
+import com.khulnasoft.driver.core.TableMetadata;
+import com.khulnasoft.driver.core.Token;
+import com.khulnasoft.driver.core.TokenRange;
 import io.netty.util.concurrent.FastThreadLocal;
 import org.apache.cassandra.stress.Operation;
 import org.apache.cassandra.stress.StressYaml;

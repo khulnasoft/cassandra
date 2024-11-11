@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.io.util;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 
 import org.junit.Test;
@@ -30,6 +31,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
 
 public class TailOverridingRebuffererTest
 {
@@ -99,7 +101,7 @@ public class TailOverridingRebuffererTest
     }
 
     @Test
-    public void testOtherMethods()
+    public void testOtherMethods() throws IOException
     {
         Rebufferer tor = new TailOverridingRebufferer(r, 8, tail.duplicate());
 

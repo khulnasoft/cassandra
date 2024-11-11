@@ -23,10 +23,9 @@ import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.codahale.metrics.Timer;
-
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import org.apache.cassandra.utils.concurrent.WaitQueue;
+import org.github.jamm.Unmetered;
 
 public abstract class MemtableAllocator
 {
@@ -76,6 +75,11 @@ public abstract class MemtableAllocator
         return offHeap;
     }
 
+    public long unusedReservedOnHeapMemory()
+    {
+        return 0; // only slabbed allocators would have non-zero here
+    }
+
     /**
      * Mark this allocator reclaiming; this will permit any outstanding allocations to temporarily
      * overshoot the maximum memory limit so that flushing can begin immediately
@@ -102,9 +106,10 @@ public abstract class MemtableAllocator
     }
 
     /** Mark the BB as unused, permitting it to be reclaimed */
-    public static class SubAllocator
+    public static final class SubAllocator
     {
         // the tracker we are owning memory from
+        @Unmetered  // total pool size should not be included in memtable's deep size
         private final MemtablePool.SubPool parent;
 
         // the state of the memtable
@@ -182,17 +187,19 @@ public abstract class MemtableAllocator
                     allocated(size);
                     return;
                 }
-                WaitQueue.Signal signal = parent.hasRoom().register(parent.blockedTimerContext(), Timer.Context::stop);
-                opGroup.notifyIfBlocking(signal);
+                WaitQueue.Signal signal = opGroup.isBlockingSignal(parent.hasRoom().register(parent.blockedTimerContext()));
                 boolean allocated = parent.tryAllocate(size);
-                if (allocated)
+                if (allocated || opGroup.isBlocking())
                 {
                     signal.cancel();
-                    acquired(size);
+                    if (allocated) // if we allocated, take ownership
+                        acquired(size);
+                    else // otherwise we're blocking so we're permitted to overshoot our constraints, to just allocate without blocking
+                        allocated(size);
                     return;
                 }
                 else
-                    signal.awaitThrowUncheckedOnInterrupt();
+                    signal.awaitUninterruptibly();
             }
         }
 
@@ -208,7 +215,8 @@ public abstract class MemtableAllocator
 
             if (state == LifeCycle.DISCARDING)
             {
-                logger.trace("Allocated {} bytes whilst discarding", size);
+                if (logger.isTraceEnabled())
+                    logger.trace("Allocated {} bytes whilst discarding", size);
                 updateReclaiming();
             }
         }
@@ -225,7 +233,8 @@ public abstract class MemtableAllocator
 
             if (state == LifeCycle.DISCARDING)
             {
-                logger.trace("Allocated {} bytes whilst discarding", size);
+                if (logger.isTraceEnabled())
+                    logger.trace("Allocated {} bytes whilst discarding", size);
                 updateReclaiming();
             }
         }
@@ -248,7 +257,8 @@ public abstract class MemtableAllocator
             }
             else
             {
-                logger.trace("Tried to release {} bytes whilst discarding", size);
+                if (logger.isTraceEnabled())
+                    logger.trace("Tried to release {} bytes whilst discarding", size);
             }
         }
 

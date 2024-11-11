@@ -30,7 +30,7 @@ CLASSPATH="$CASSANDRA_CONF"
 # compiled classes. NOTE: This isn't needed by the startup script,
 # it's just used here in constructing the classpath.
 if [ -d $CASSANDRA_HOME/build ] ; then
-    jars_cnt="`ls -1 $CASSANDRA_HOME/build/apache-cassandra*.jar | grep -v 'javadoc.jar' | grep -v 'sources.jar' | wc -l | xargs echo`"
+    jars_cnt="`ls -1 $CASSANDRA_HOME/build/dse-db*.jar | grep -v 'javadoc.jar' | grep -v 'sources.jar' | wc -l | xargs echo`"
     if [ "$jars_cnt" -gt 1 ]; then
         dir="`cd $CASSANDRA_HOME/build; pwd`"
         echo "There are JAR artifacts for multiple versions in the $dir directory. Please clean the project with 'ant realclean' and build it again." 1>&2
@@ -38,8 +38,8 @@ if [ -d $CASSANDRA_HOME/build ] ; then
     fi
 
     if [ "$jars_cnt" = "1" ]; then
-        cassandra_bin="`ls -1 $CASSANDRA_HOME/build/apache-cassandra*.jar | grep -v javadoc | grep -v sources`"
-        CLASSPATH="$CLASSPATH:$cassandra_bin"
+        dse_db_bin="`ls -1 $CASSANDRA_HOME/build/dse-db*.jar | grep -v javadoc | grep -v sources`"
+        CLASSPATH="$CLASSPATH:$dse_db_bin"
     fi
 fi
 
@@ -48,7 +48,7 @@ fi
 cassandra_storagedir="$CASSANDRA_HOME/data"
 
 # JAVA_HOME can optionally be set here
-# JAVA_HOME=/usr/local/jdk11
+#JAVA_HOME=/usr/local/jdk6
 
 for jar in "$CASSANDRA_HOME"/lib/*.jar; do
     CLASSPATH="$CLASSPATH:$jar"
@@ -79,14 +79,11 @@ if [ -f "$CASSANDRA_HOME"/lib/jsr223/scala/scala-compiler.jar ] ; then
 fi
 
 # set JVM javaagent opts to avoid warnings/errors
-JAVA_AGENT="$JAVA_AGENT -javaagent:$CASSANDRA_HOME/lib/jamm-0.4.0.jar"
+JAVA_AGENT="$JAVA_AGENT -javaagent:$CASSANDRA_HOME/lib/jamm-0.3.2.jar"
 
-platform=$(uname -m)
-if [ -d "$CASSANDRA_HOME"/lib/"$platform" ]; then
-    for jar in "$CASSANDRA_HOME"/lib/"$platform"/*.jar ; do
-        CLASSPATH="$CLASSPATH:${jar}"
-    done
-fi
+# Added sigar-bin to the java.library.path CASSANDRA-7838
+JAVA_OPTS="$JAVA_OPTS:-Djava.library.path=$CASSANDRA_HOME/lib/sigar-bin"
+
 
 #
 # Java executable and per-Java version JVM settings
@@ -113,34 +110,27 @@ if [ -z $JAVA ] ; then
     exit 1;
 fi
 
-# Matches variable 'java.supported' in build.xml
-java_versions_supported=11,17
-
 # Determine the sort of JVM we'll be running on.
 java_ver_output=`"${JAVA:-java}" -version 2>&1`
 jvmver=`echo "$java_ver_output" | grep '[openjdk|java] version' | awk -F'"' 'NR==1 {print $2}' | cut -d\- -f1`
 JVM_VERSION=${jvmver%_*}
-short=$(echo "${jvmver}" | cut -c1-2)
 
-# Unsupported JDKs below the upper supported version are not allowed
-if [ "$short" != "$(echo "$java_versions_supported" | cut -d, -f1)" ] && [ "$JVM_VERSION" \< "$(echo "$java_versions_supported" | cut -d, -f2)" ] ; then
-    echo "Unsupported Java $JVM_VERSION. Supported are $java_versions_supported"
+JAVA_VERSION=${JVM_VERSION%%.*}
+if [ "$JVM_VERSION" = "1.8.0" ]  ; then
+    JVM_PATCH_VERSION=${jvmver#*_}
+    if [ "$JVM_VERSION" \< "1.8" ] || [ "$JVM_VERSION" \> "1.8.2" ] ; then
+        echo "DSE DB 4.0 requires either Java 8 (update 151 or newer) or Java 11 (or newer). Java $JVM_VERSION is not supported."
+        exit 1;
+    fi
+    if [ "$JVM_PATCH_VERSION" -lt 151 ] ; then
+        echo "DSE DB 4.0 requires either Java 8 (update 151 or newer) or Java 11 (or newer). Java 8 update $JVM_PATCH_VERSION is not supported."
+        exit 1;
+    fi
+    JAVA_VERSION=8
+elif [ "$JVM_VERSION" \< "11" ] ; then
+    echo "DSE DB 4.0 requires either Java 8 (update 151 or newer) or Java 11 (or newer)."
     exit 1;
 fi
-# Allow execution of supported Java versions, and newer if CASSANDRA_JDK_UNSUPPORTED is set
-is_supported_version=$(echo "$java_versions_supported" | tr "," '\n' | grep -F -x "$short")
-if [ -z "$is_supported_version" ] ; then
-    if [ -z "$CASSANDRA_JDK_UNSUPPORTED" ] ; then
-        echo "Unsupported Java $JVM_VERSION. Supported are $java_versions_supported"
-        echo "If you would like to test with newer Java versions set CASSANDRA_JDK_UNSUPPORTED to any value (for example, CASSANDRA_JDK_UNSUPPORTED=true). Unset the parameter for default behavior"
-        exit 1;
-    else
-        echo "######################################################################"
-        echo "Warning! You are using JDK$short. This Cassandra version only supports $java_versions_supported."
-        echo "######################################################################"
-    fi
-fi
-JAVA_VERSION=$short
 
 jvm=`echo "$java_ver_output" | grep -A 1 '[openjdk|java] version' | awk 'NR==2 {print $1}'`
 case "$jvm" in
@@ -167,17 +157,11 @@ if [ $JAVA_VERSION -ge 17 ] ; then
     JVM_DEP_OPTS_FILE=$CASSANDRA_CONF/jvm17${jvmoptions_variant:--clients}.options
 elif [ $JAVA_VERSION -ge 11 ] ; then
     JVM_DEP_OPTS_FILE=$CASSANDRA_CONF/jvm11${jvmoptions_variant:--clients}.options
+else
+    JVM_DEP_OPTS_FILE=$CASSANDRA_CONF/jvm8${jvmoptions_variant:--clients}.options
 fi
 
 for opt in `grep "^-" $JVM_OPTS_FILE` `grep "^-" $JVM_DEP_OPTS_FILE`
 do
   JVM_OPTS="$JVM_OPTS $opt"
 done
-
-# Append additional options when using JDK17+ (CASSANDRA-19001)
-USING_JDK=$(command -v javac || command -v "${JAVA_HOME:-/usr}/bin/javac")
-if [ -n "$USING_JDK" ] && [ "$JAVA_VERSION" -ge 17 ]; then
-  JVM_OPTS="$JVM_OPTS --add-exports jdk.attach/sun.tools.attach=ALL-UNNAMED"
-  JVM_OPTS="$JVM_OPTS --add-exports jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED"
-  JVM_OPTS="$JVM_OPTS --add-opens jdk.compiler/com.sun.tools.javac=ALL-UNNAMED"
-fi

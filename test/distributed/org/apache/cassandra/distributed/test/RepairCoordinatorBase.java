@@ -22,7 +22,6 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.concurrent.RejectedExecutionException;
 
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -33,9 +32,7 @@ import org.apache.cassandra.distributed.api.Feature;
 import org.apache.cassandra.distributed.api.NodeToolResult;
 import org.apache.cassandra.distributed.test.DistributedRepairUtils.RepairParallelism;
 import org.apache.cassandra.distributed.test.DistributedRepairUtils.RepairType;
-
-import static org.apache.cassandra.config.CassandraRelevantProperties.NODETOOL_JMX_NOTIFICATION_POLL_INTERVAL_SECONDS;
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
+import org.apache.cassandra.io.util.FileUtils;
 
 public class RepairCoordinatorBase extends TestBaseImpl
 {
@@ -70,7 +67,7 @@ public class RepairCoordinatorBase extends TestBaseImpl
         // This only works because the way CI works
         // In CI a new JVM is spun up for each test file, so this doesn't have to worry about another test file
         // getting this set first
-        NODETOOL_JMX_NOTIFICATION_POLL_INTERVAL_SECONDS.setLong(1);
+        System.setProperty("cassandra.nodetool.jmx_notification_poll_interval_seconds", "1");
     }
 
     @BeforeClass
@@ -82,15 +79,12 @@ public class RepairCoordinatorBase extends TestBaseImpl
                               .withConfig(c -> c.with(Feature.NETWORK)
                                                 .with(Feature.GOSSIP))
                               .start());
-
-        CLUSTER.setUncaughtExceptionsFilter(throwable -> throwable instanceof RejectedExecutionException && "RepairJobTask has shut down".equals(throwable.getMessage()));
     }
 
     @AfterClass
     public static void teardownCluster()
     {
-        if (CLUSTER != null)
-            CLUSTER.close();
+        FileUtils.closeQuietly(CLUSTER);
     }
 
     protected String tableName(String prefix) {
@@ -99,7 +93,7 @@ public class RepairCoordinatorBase extends TestBaseImpl
 
     protected String postfix()
     {
-        return toLowerCaseLocalized(repairType.name()) + "_" + toLowerCaseLocalized(parallelism.name()) + "_" + withNotifications;
+        return repairType.name().toLowerCase() + "_" + parallelism.name().toLowerCase() + "_" + withNotifications;
     }
 
     protected NodeToolResult repair(int node, String... args) {

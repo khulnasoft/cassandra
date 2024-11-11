@@ -26,28 +26,29 @@ import java.util.stream.Collectors;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
+import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.Multimap;
 
-import org.junit.*;
+import org.junit.Assert;
+import org.junit.BeforeClass;
+import org.junit.Rule;
+import org.junit.Test;
 import org.junit.rules.ExpectedException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.dht.*;
+import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner.LongToken;
 import org.apache.cassandra.dht.OrderPreservingPartitioner.StringToken;
-import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.tcm.ClusterMetadataService;
+import org.apache.cassandra.locator.TokenMetadata.Topology;
 import org.apache.cassandra.service.ClientWarn;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.tcm.compatibility.TokenRingUtils;
-import org.apache.cassandra.tcm.membership.Location;
-import org.apache.cassandra.tcm.ownership.VersionedEndpoints;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 
 import static org.apache.cassandra.locator.NetworkTopologyStrategy.REPLICATION_FACTOR;
@@ -57,22 +58,14 @@ import static org.junit.Assert.assertTrue;
 
 public class NetworkTopologyStrategyTest
 {
-    private static final String KEYSPACE = "ks1";
+    private static final String KEYSPACE = "Keyspace1";
     private static final Logger logger = LoggerFactory.getLogger(NetworkTopologyStrategyTest.class);
 
     @BeforeClass
     public static void setupDD()
     {
         DatabaseDescriptor.daemonInitialization();
-        DatabaseDescriptor.setPartitionerUnsafe(OrderPreservingPartitioner.instance);
         DatabaseDescriptor.setTransientReplicationEnabledUnsafe(true);
-        ClusterMetadataService.setInstance(ClusterMetadataTestHelper.instanceForTest());
-    }
-
-    @After
-    public void teardown()
-    {
-        ServerTestUtils.resetCMS();
     }
 
     @Test
@@ -80,25 +73,24 @@ public class NetworkTopologyStrategyTest
     {
         IEndpointSnitch snitch = new PropertyFileSnitch();
         DatabaseDescriptor.setEndpointSnitch(snitch);
-        createDummyTokens(true);
+        TokenMetadata metadata = new TokenMetadata();
+        createDummyTokens(metadata, true);
 
-        ClusterMetadataTestHelper.createKeyspace("CREATE KEYSPACE " + KEYSPACE + " WITH REPLICATION = {" +
-                                                 "   'class' : 'NetworkTopologyStrategy'," +
-                                                 "   'DC1': 3," +
-                                                 "   'DC2': 2," +
-                                                 "   'DC3': 1" +
-                                                 "  } ;");
+        Map<String, String> configOptions = new HashMap<String, String>();
+        configOptions.put("DC1", "3");
+        configOptions.put("DC2", "2");
+        configOptions.put("DC3", "1");
 
-        NetworkTopologyStrategy strategy = (NetworkTopologyStrategy) ClusterMetadata.current().schema.getKeyspaces().getNullable(KEYSPACE).replicationStrategy;
-        Assert.assertEquals(strategy.getReplicationFactor("DC1").allReplicas, 3);
-        Assert.assertEquals(strategy.getReplicationFactor("DC2").allReplicas, 2);
-        Assert.assertEquals(strategy.getReplicationFactor("DC3").allReplicas, 1);
-
+        // Set the localhost to the tokenmetadata. Embedded cassandra way?
+        NetworkTopologyStrategy strategy = new NetworkTopologyStrategy(KEYSPACE, metadata, snitch, configOptions);
+        assert strategy.getReplicationFactor("DC1").allReplicas == 3;
+        assert strategy.getReplicationFactor("DC2").allReplicas == 2;
+        assert strategy.getReplicationFactor("DC3").allReplicas == 1;
         // Query for the natural hosts
-        VersionedEndpoints.ForToken replicas = ClusterMetadataTestHelper.getNaturalReplicasForToken(KEYSPACE, new StringToken("123"));
-        Assert.assertEquals(6, replicas.get().size());
-        Assert.assertEquals(6, replicas.get().endpoints().size()); // ensure uniqueness
-        Assert.assertEquals(6, new HashSet<>(replicas.get().byEndpoint().values()).size()); // ensure uniqueness
+        EndpointsForToken replicas = strategy.getNaturalReplicasForToken(new StringToken("123"));
+        assert 6 == replicas.size();
+        assert 6 == replicas.endpoints().size(); // ensure uniqueness
+        assert 6 == new HashSet<>(replicas.byEndpoint().values()).size(); // ensure uniqueness
     }
 
     @Test
@@ -106,23 +98,75 @@ public class NetworkTopologyStrategyTest
     {
         IEndpointSnitch snitch = new PropertyFileSnitch();
         DatabaseDescriptor.setEndpointSnitch(snitch);
-        createDummyTokens(false);
+        TokenMetadata metadata = new TokenMetadata();
+        createDummyTokens(metadata, false);
 
-        Map<String, String> configOptions = new HashMap<>();
+        Map<String, String> configOptions = new HashMap<String, String>();
         configOptions.put("DC1", "3");
         configOptions.put("DC2", "3");
         configOptions.put("DC3", "0");
-        NetworkTopologyStrategy strategy = new NetworkTopologyStrategy(KEYSPACE, configOptions);
 
-        Assert.assertEquals(strategy.getReplicationFactor("DC1").allReplicas, 3);
-        Assert.assertEquals(strategy.getReplicationFactor("DC2").allReplicas, 3);
-        Assert.assertEquals(strategy.getReplicationFactor("DC3").allReplicas, 0);
+        // Set the localhost to the tokenmetadata. Embedded cassandra way?
+        NetworkTopologyStrategy strategy = new NetworkTopologyStrategy(KEYSPACE, metadata, snitch, configOptions);
+        assert strategy.getReplicationFactor("DC1").allReplicas == 3;
+        assert strategy.getReplicationFactor("DC2").allReplicas == 3;
+        assert strategy.getReplicationFactor("DC3").allReplicas == 0;
         // Query for the natural hosts
-        Token token = new StringToken("123");
-        EndpointsForToken replicas = strategy.calculateNaturalReplicas(token, ClusterMetadata.current()).forToken(token);
-        Assert.assertEquals(6, replicas.size());
-        Assert.assertEquals(6, replicas.endpoints().size()); // ensure uniqueness
-        Assert.assertEquals(6, new HashSet<>(replicas.byEndpoint().values()).size()); // ensure uniqueness
+        EndpointsForToken replicas = strategy.getNaturalReplicasForToken(new StringToken("123"));
+        assert 6 == replicas.size();
+        assert 6 == replicas.endpoints().size(); // ensure uniqueness
+        assert 6 == new HashSet<>(replicas.byEndpoint().values()).size(); // ensure uniqueness
+    }
+
+    @Test
+    public void testAcceptsNodesFromSameRack() throws IOException, ConfigurationException
+    {
+        IEndpointSnitch snitch = new RackInferringSnitch();
+        DatabaseDescriptor.setEndpointSnitch(snitch);
+        TokenMetadata metadata = new TokenMetadata();
+
+        tokenFactory(metadata, "123", new byte[]{ 10, 0, 0, 10 });
+        tokenFactory(metadata, "234", new byte[]{ 10, 0, 0, 11 });
+        tokenFactory(metadata, "345", new byte[]{ 10, 0, 1, 12 });
+
+        Map<String, String> configOptions = new HashMap<>();
+        configOptions.put("0", "3");
+
+        NetworkTopologyStrategy strategy = new NetworkTopologyStrategy(KEYSPACE, metadata, snitch, configOptions);
+        Assert.assertEquals(3, strategy.getReplicationFactor("0").allReplicas);
+
+        EndpointsForToken endpoints = strategy.getNaturalReplicasForToken(new StringToken("123"));
+        Assert.assertEquals(3, endpoints.size());
+    }
+
+    @Test
+    public void testDoNotAcceptNodesFromSameRackIfQuorumExists() throws IOException, ConfigurationException
+    {
+        IEndpointSnitch snitch = new RackInferringSnitch()
+        {
+            @Override
+            public boolean acceptsNodesFromSameRack(int rf, int rackCount)
+            {
+                int quorum = rf / 2 + 1;
+                return rackCount < quorum;
+            }
+        };
+        DatabaseDescriptor.setEndpointSnitch(snitch);
+        TokenMetadata metadata = new TokenMetadata();
+
+        tokenFactory(metadata, "123", new byte[]{ 10, 0, 0, 10 });
+        tokenFactory(metadata, "234", new byte[]{ 10, 0, 0, 11 });
+        tokenFactory(metadata, "345", new byte[]{ 10, 0, 1, 12 });
+
+        Map<String, String> configOptions = new HashMap<>();
+        configOptions.put("0", "3");
+
+        NetworkTopologyStrategy strategy = new NetworkTopologyStrategy(KEYSPACE, metadata, snitch, configOptions);
+        Assert.assertEquals(3, strategy.getReplicationFactor("0").allReplicas);
+
+        EndpointsForToken endpoints = strategy.getNaturalReplicasForToken(new StringToken("123"));
+        Assert.assertEquals(2, endpoints.size());
+        Assert.assertNotEquals(snitch.getRack(endpoints.get(0).endpoint()), snitch.getRack(endpoints.get(1).endpoint()));
     }
 
     @Test
@@ -134,7 +178,7 @@ public class NetworkTopologyStrategyTest
 
         IEndpointSnitch snitch = new RackInferringSnitch();
         DatabaseDescriptor.setEndpointSnitch(snitch);
-
+        TokenMetadata metadata = new TokenMetadata();
         Map<String, String> configOptions = new HashMap<String, String>();
         Multimap<InetAddressAndPort, Token> tokens = HashMultimap.create();
 
@@ -152,16 +196,16 @@ public class NetworkTopologyStrategyTest
                     StringToken token = new StringToken(String.format("%02x%02x%02x", ep, rack, dc));
                     logger.debug("adding node {} at {}", address, token);
                     tokens.put(address, token);
-                    ClusterMetadataTestHelper.addEndpoint(address, token, snitch.getDatacenter(address), snitch.getRack(address));
                 }
             }
         }
+        metadata.updateNormalTokens(tokens);
 
-        NetworkTopologyStrategy strategy = new NetworkTopologyStrategy(KEYSPACE, configOptions);
+        NetworkTopologyStrategy strategy = new NetworkTopologyStrategy(KEYSPACE, metadata, snitch, configOptions);
 
         for (String testToken : new String[]{"123456", "200000", "000402", "ffffff", "400200"})
         {
-            EndpointsForRange replicas = strategy.calculateNaturalReplicas(new StringToken(testToken), ClusterMetadata.current());
+            EndpointsForRange replicas = strategy.calculateNaturalReplicas(new StringToken(testToken), metadata);
             Set<InetAddressAndPort> endpointSet = replicas.endpoints();
 
             Assert.assertEquals(totalRF, replicas.size());
@@ -171,35 +215,33 @@ public class NetworkTopologyStrategyTest
         }
     }
 
-    public void createDummyTokens(boolean populateDC3) throws UnknownHostException
+    public void createDummyTokens(TokenMetadata metadata, boolean populateDC3) throws UnknownHostException
     {
-        Location l1 = new Location("DC1", "Rack1");
-        Location l2 = new Location("DC2", "Rack1");
-        Location l3 = new Location("DC3", "Rack1");
         // DC 1
-        tokenFactory("123", new byte[]{ 10, 0, 0, 10 }, l1);
-        tokenFactory("234", new byte[]{ 10, 0, 0, 11 }, l1);
-        tokenFactory("345", new byte[]{ 10, 0, 0, 12 }, l1);
+        tokenFactory(metadata, "123", new byte[]{ 10, 0, 0, 10 });
+        tokenFactory(metadata, "234", new byte[]{ 10, 0, 0, 11 });
+        tokenFactory(metadata, "345", new byte[]{ 10, 0, 0, 12 });
         // Tokens for DC 2
-        tokenFactory("789", new byte[]{ 10, 20, 114, 10 }, l2);
-        tokenFactory("890", new byte[]{ 10, 20, 114, 11 }, l2);
+        tokenFactory(metadata, "789", new byte[]{ 10, 20, 114, 10 });
+        tokenFactory(metadata, "890", new byte[]{ 10, 20, 114, 11 });
         //tokens for DC3
         if (populateDC3)
         {
-            tokenFactory("456", new byte[]{ 10, 21, 119, 13 }, l3);
-            tokenFactory("567", new byte[]{ 10, 21, 119, 10 }, l3);
+            tokenFactory(metadata, "456", new byte[]{ 10, 21, 119, 13 });
+            tokenFactory(metadata, "567", new byte[]{ 10, 21, 119, 10 });
         }
         // Extra Tokens
-        tokenFactory("90A", new byte[]{ 10, 0, 0, 13 }, l1);
+        tokenFactory(metadata, "90A", new byte[]{ 10, 0, 0, 13 });
         if (populateDC3)
-            tokenFactory("0AB", new byte[]{ 10, 21, 119, 14 }, l3);
-        tokenFactory("ABC", new byte[]{ 10, 20, 114, 15 }, l2);
+            tokenFactory(metadata, "0AB", new byte[]{ 10, 21, 119, 14 });
+        tokenFactory(metadata, "ABC", new byte[]{ 10, 20, 114, 15 });
     }
 
-    public void tokenFactory(String token, byte[] bytes, Location location) throws UnknownHostException
+    public void tokenFactory(TokenMetadata metadata, String token, byte[] bytes) throws UnknownHostException
     {
-        InetAddressAndPort addr = InetAddressAndPort.getByAddress(bytes);
-        ClusterMetadataTestHelper.addEndpoint(addr, new StringToken(token), location);
+        Token token1 = new StringToken(token);
+        InetAddressAndPort add1 = InetAddressAndPort.getByAddress(bytes);
+        metadata.updateNormalToken(token1, add1);
     }
 
     @Test
@@ -208,44 +250,35 @@ public class NetworkTopologyStrategyTest
         final int NODES = 100;
         final int VNODES = 64;
         final int RUNS = 10;
-        try (WithPartitioner m3p = new WithPartitioner(Murmur3Partitioner.instance))
+        StorageService.instance.setPartitionerUnsafe(Murmur3Partitioner.instance);
+        Map<String, Integer> datacenters = ImmutableMap.of("rf1", 1, "rf3", 3, "rf5_1", 5, "rf5_2", 5, "rf5_3", 5);
+        List<InetAddressAndPort> nodes = new ArrayList<>(NODES);
+        for (byte i=0; i<NODES; ++i)
+            nodes.add(InetAddressAndPort.getByAddress(new byte[]{ 127, 0, 0, i}));
+        for (int run=0; run<RUNS; ++run)
         {
-            Map<String, Integer> datacenters = ImmutableMap.of("rf1", 1, "rf3", 3, "rf5_1", 5, "rf5_2", 5, "rf5_3", 5);
-            List<InetAddressAndPort> nodes = new ArrayList<>(NODES);
-            for (byte i = 0; i < NODES; ++i)
-                nodes.add(InetAddressAndPort.getByAddress(new byte[]{ 127, 0, 0, i }));
-            for (int run = 0; run < RUNS; ++run)
-            {
-                ServerTestUtils.resetCMS();
-                Random rand = new Random(run);
-                IEndpointSnitch snitch = generateSnitch(datacenters, nodes, rand);
-                DatabaseDescriptor.setEndpointSnitch(snitch);
+            Random rand = new Random();
+            IEndpointSnitch snitch = generateSnitch(datacenters, nodes, rand);
+            DatabaseDescriptor.setEndpointSnitch(snitch);
 
-                for (int i = 0; i < NODES; ++i)  // Nodes
-                {
-                    Set<Token> tokens = new HashSet<>();
-                    while (tokens.size() < VNODES) // tokens/vnodes per node
-                    {
-                        tokens.add(Murmur3Partitioner.instance.getRandomToken(rand));
-                    }
-                    ClusterMetadataTestHelper.addEndpoint(nodes.get(i), tokens, snitch.getDatacenter(nodes.get(i)), snitch.getRack(nodes.get(i)));
-                }
-                testEquivalence(ClusterMetadata.current(), snitch, datacenters, rand);
-            }
+            TokenMetadata meta = new TokenMetadata();
+            for (int i=0; i<NODES; ++i)  // Nodes
+                for (int j=0; j<VNODES; ++j) // tokens/vnodes per node
+                    meta.updateNormalToken(Murmur3Partitioner.instance.getRandomToken(rand), nodes.get(i));
+            testEquivalence(meta, snitch, datacenters, rand);
         }
     }
 
-    void testEquivalence(ClusterMetadata metadata, IEndpointSnitch snitch, Map<String, Integer> datacenters, Random rand)
+    void testEquivalence(TokenMetadata tokenMetadata, IEndpointSnitch snitch, Map<String, Integer> datacenters, Random rand)
     {
-        NetworkTopologyStrategy nts = new NetworkTopologyStrategy("ks",
-                                                                  datacenters.entrySet()
-                                                                             .stream()
-                                                                             .collect(Collectors.toMap(x -> x.getKey(), x -> Integer.toString(x.getValue()))));
+        NetworkTopologyStrategy nts = new NetworkTopologyStrategy("ks", tokenMetadata, snitch,
+                                                                  datacenters.entrySet().stream().
+                                                                      collect(Collectors.toMap(x -> x.getKey(), x -> Integer.toString(x.getValue()))));
         for (int i=0; i<1000; ++i)
         {
             Token token = Murmur3Partitioner.instance.getRandomToken(rand);
-            List<InetAddressAndPort> expected = calculateNaturalEndpoints(token, metadata, datacenters, snitch);
-            List<InetAddressAndPort> actual = new ArrayList<>(nts.calculateNaturalReplicas(token, metadata).endpoints());
+            List<InetAddressAndPort> expected = calculateNaturalEndpoints(token, tokenMetadata, datacenters, snitch);
+            List<InetAddressAndPort> actual = new ArrayList<>(nts.calculateNaturalReplicas(token, tokenMetadata).endpoints());
             if (endpointsDiffer(expected, actual))
             {
                 System.err.println("Endpoints mismatch for token " + token);
@@ -318,7 +351,7 @@ public class NetworkTopologyStrategyTest
     }
 
     // Copy of older endpoints calculation algorithm for comparison
-    public static List<InetAddressAndPort> calculateNaturalEndpoints(Token searchToken, ClusterMetadata metadata, Map<String, Integer> datacenters, IEndpointSnitch snitch)
+    public static List<InetAddressAndPort> calculateNaturalEndpoints(Token searchToken, TokenMetadata tokenMetadata, Map<String, Integer> datacenters, IEndpointSnitch snitch)
     {
         // we want to preserve insertion order so that the first added endpoint becomes primary
         Set<InetAddressAndPort> replicas = new LinkedHashSet<>();
@@ -327,10 +360,11 @@ public class NetworkTopologyStrategyTest
         for (Map.Entry<String, Integer> dc : datacenters.entrySet())
             dcReplicas.put(dc.getKey(), new HashSet<InetAddressAndPort>(dc.getValue()));
 
+        Topology topology = tokenMetadata.getTopology();
         // all endpoints in each DC, so we can check when we have exhausted all the members of a DC
-        Multimap<String, InetAddressAndPort> allEndpoints = metadata.directory.allDatacenterEndpoints();
+        Multimap<String, InetAddressAndPort> allEndpoints = topology.getDatacenterEndpoints();
         // all racks in a DC so we can check when we have exhausted all racks in a DC
-        Map<String, Multimap<String, InetAddressAndPort>> racks = metadata.directory.allDatacenterRacks();
+        Map<String, ImmutableMultimap<String, InetAddressAndPort>> racks = topology.getDatacenterRacks();
         assert !allEndpoints.isEmpty() && !racks.isEmpty() : "not aware of any cluster members";
 
         // tracks the racks we have already placed replicas in
@@ -344,11 +378,11 @@ public class NetworkTopologyStrategyTest
         for (Map.Entry<String, Integer> dc : datacenters.entrySet())
             skippedDcEndpoints.put(dc.getKey(), new LinkedHashSet<InetAddressAndPort>());
 
-        Iterator<Token> tokenIter = TokenRingUtils.ringIterator(metadata.tokenMap.tokens(), searchToken, false);
+        Iterator<Token> tokenIter = TokenMetadata.ringIterator(tokenMetadata.sortedTokens(), searchToken, false);
         while (tokenIter.hasNext() && !hasSufficientReplicas(dcReplicas, allEndpoints, datacenters))
         {
             Token next = tokenIter.next();
-            InetAddressAndPort ep = metadata.directory.endpoint(metadata.tokenMap.owner(next));
+            InetAddressAndPort ep = tokenMetadata.getEndpoint(next);
             String dc = snitch.getDatacenter(ep);
             // have we already found all replicas for this dc?
             if (!datacenters.containsKey(dc) || hasSufficientReplicas(dc, dcReplicas, allEndpoints, datacenters))
@@ -387,7 +421,7 @@ public class NetworkTopologyStrategyTest
             }
         }
 
-        return new ArrayList<>(replicas);
+        return new ArrayList<InetAddressAndPort>(replicas);
     }
 
     private static boolean hasSufficientReplicas(String dc, Map<String, Set<InetAddressAndPort>> dcReplicas, Multimap<String, InetAddressAndPort> allEndpoints, Map<String, Integer> datacenters)
@@ -422,36 +456,37 @@ public class NetworkTopologyStrategyTest
     @Test
     public void testTransientReplica() throws Exception
     {
-        try (WithPartitioner m3p = new WithPartitioner(Murmur3Partitioner.instance))
-        {
-            IEndpointSnitch snitch = new SimpleSnitch();
-            DatabaseDescriptor.setEndpointSnitch(snitch);
+        IEndpointSnitch snitch = new SimpleSnitch();
+        DatabaseDescriptor.setEndpointSnitch(snitch);
 
-            List<InetAddressAndPort> endpoints = Lists.newArrayList(InetAddressAndPort.getByName("127.0.0.1"),
-                                                                    InetAddressAndPort.getByName("127.0.0.2"),
-                                                                    InetAddressAndPort.getByName("127.0.0.3"),
-                                                                    InetAddressAndPort.getByName("127.0.0.4"));
+        List<InetAddressAndPort> endpoints = Lists.newArrayList(InetAddressAndPort.getByName("127.0.0.1"),
+                                                                InetAddressAndPort.getByName("127.0.0.2"),
+                                                                InetAddressAndPort.getByName("127.0.0.3"),
+                                                                InetAddressAndPort.getByName("127.0.0.4"));
 
-            ClusterMetadataTestHelper.addEndpoint(endpoints.get(0), tk(100), SimpleSnitch.DATA_CENTER_NAME, SimpleSnitch.RACK_NAME);
-            ClusterMetadataTestHelper.addEndpoint(endpoints.get(1), tk(200), SimpleSnitch.DATA_CENTER_NAME, SimpleSnitch.RACK_NAME);
-            ClusterMetadataTestHelper.addEndpoint(endpoints.get(2), tk(300), SimpleSnitch.DATA_CENTER_NAME, SimpleSnitch.RACK_NAME);
-            ClusterMetadataTestHelper.addEndpoint(endpoints.get(3), tk(400), SimpleSnitch.DATA_CENTER_NAME, SimpleSnitch.RACK_NAME);
+        Multimap<InetAddressAndPort, Token> tokens = HashMultimap.create();
+        tokens.put(endpoints.get(0), tk(100));
+        tokens.put(endpoints.get(1), tk(200));
+        tokens.put(endpoints.get(2), tk(300));
+        tokens.put(endpoints.get(3), tk(400));
+        TokenMetadata metadata = new TokenMetadata();
+        metadata.updateNormalTokens(tokens);
 
-            Map<String, String> configOptions = new HashMap<>();
-            configOptions.put(SimpleSnitch.DATA_CENTER_NAME, "3/1");
-            NetworkTopologyStrategy strategy = new NetworkTopologyStrategy(KEYSPACE, configOptions);
+        Map<String, String> configOptions = new HashMap<String, String>();
+        configOptions.put(snitch.getDatacenter((InetAddressAndPort) null), "3/1");
 
-            Util.assertRCEquals(EndpointsForRange.of(fullReplica(endpoints.get(0), range(400, 100)),
-                                                     fullReplica(endpoints.get(1), range(400, 100)),
-                                                     transientReplica(endpoints.get(2), range(400, 100))),
-                                strategy.calculateNaturalReplicas(tk(99), ClusterMetadata.current()));
+        NetworkTopologyStrategy strategy = new NetworkTopologyStrategy(KEYSPACE, metadata, snitch, configOptions);
+
+        Util.assertRCEquals(EndpointsForRange.of(fullReplica(endpoints.get(0), range(400, 100)),
+                                               fullReplica(endpoints.get(1), range(400, 100)),
+                                               transientReplica(endpoints.get(2), range(400, 100))),
+                            strategy.getNaturalReplicasForToken(tk(99)));
 
 
-            Util.assertRCEquals(EndpointsForRange.of(fullReplica(endpoints.get(1), range(100, 200)),
-                                                     fullReplica(endpoints.get(2), range(100, 200)),
-                                                     transientReplica(endpoints.get(3), range(100, 200))),
-                                strategy.calculateNaturalReplicas(tk(101), ClusterMetadata.current()));
-        }
+        Util.assertRCEquals(EndpointsForRange.of(fullReplica(endpoints.get(1), range(100, 200)),
+                                               fullReplica(endpoints.get(2), range(100, 200)),
+                                               transientReplica(endpoints.get(3), range(100, 200))),
+                            strategy.getNaturalReplicasForToken(tk(101)));
     }
 
     @Rule
@@ -463,11 +498,14 @@ public class NetworkTopologyStrategyTest
         expectedEx.expect(ConfigurationException.class);
         expectedEx.expectMessage(REPLICATION_FACTOR + " should not appear");
 
+        IEndpointSnitch snitch = new SimpleSnitch();
+        TokenMetadata metadata = new TokenMetadata();
+        
         Map<String, String> configOptions = new HashMap<>();
         configOptions.put(REPLICATION_FACTOR, "1");
 
         @SuppressWarnings("unused") 
-        NetworkTopologyStrategy strategy = new NetworkTopologyStrategy("ks", configOptions);
+        NetworkTopologyStrategy strategy = new NetworkTopologyStrategy("ks", metadata, snitch, configOptions);
     }
 
     @Test
@@ -475,10 +513,26 @@ public class NetworkTopologyStrategyTest
     {
         HashMap<String, String> configOptions = new HashMap<>();
         configOptions.put("DC1", "2");
-        NetworkTopologyStrategy strategy = new NetworkTopologyStrategy("ks", configOptions);
-        ClusterMetadataTestHelper.addEndpoint(FBUtilities.getBroadcastAddressAndPort(), new StringToken("123"), "DC1", "RACK1");
+        
+        IEndpointSnitch snitch = new AbstractNetworkTopologySnitch()
+        {
+            public String getRack(InetAddressAndPort endpoint)
+            {
+                return "rack1";
+            }
+
+            public String getDatacenter(InetAddressAndPort endpoint)
+            {
+                return "DC1";
+            }
+        };
+
+        NetworkTopologyStrategy strategy = new NetworkTopologyStrategy("ks", new TokenMetadata(), snitch, configOptions);
+        StorageService.instance.getTokenMetadata().updateHostId(UUID.randomUUID(), FBUtilities.getBroadcastAddressAndPort());
+        StorageService.instance.getTokenMetadata().updateNormalToken(new LongToken(1), FBUtilities.getBroadcastAddressAndPort());
+        
         ClientWarn.instance.captureWarnings();
-        strategy.maybeWarnOnOptions(null);
+        strategy.maybeWarnOnOptions();
         assertTrue(ClientWarn.instance.getWarnings().stream().anyMatch(s -> s.contains("Your replication factor")));
     }
 }

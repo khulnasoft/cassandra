@@ -22,10 +22,10 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.UUID;
+import javax.annotation.Nullable;
 
 import com.google.common.primitives.Ints;
 
-import javax.annotation.Nullable;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.exceptions.UnknownTableException;
 import org.apache.cassandra.io.IVersionedAsymmetricSerializer;
@@ -74,6 +74,21 @@ public final class HintMessage implements SerializableHintMessage
         this.unknownTableID = unknownTableID;
     }
 
+    public UUID hostId()
+    {
+        return hostId;
+    }
+
+    public Hint hint()
+    {
+        return hint;
+    }
+
+    public TableId unknownTableID()
+    {
+        return unknownTableID;
+    }
+
     public static class Serializer implements IVersionedAsymmetricSerializer<SerializableHintMessage, HintMessage>
     {
         public long serializedSize(SerializableHintMessage obj, int version)
@@ -96,7 +111,8 @@ public final class HintMessage implements SerializableHintMessage
                 Encoded message = (Encoded) obj;
 
                 if (version != message.version)
-                    throw new IllegalArgumentException("serializedSize() called with non-matching version " + version);
+                    throw new IllegalArgumentException("serializedSize() called with non-matching version " + version +
+                                                       " for message with version " + message.version);
 
                 long size = UUIDSerializer.serializer.serializedSize(message.hostId, version);
                 size += TypeSizes.sizeofUnsignedVInt(message.hint.remaining());
@@ -135,7 +151,7 @@ public final class HintMessage implements SerializableHintMessage
                     throw new IllegalArgumentException("serialize() called with non-matching version " + version);
 
                 UUIDSerializer.serializer.serialize(message.hostId, out, version);
-                out.writeUnsignedVInt32(message.hint.remaining());
+                out.writeUnsignedVInt(message.hint.remaining());
                 out.write(message.hint);
             }
             else

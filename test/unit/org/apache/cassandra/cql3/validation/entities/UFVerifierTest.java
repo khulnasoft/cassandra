@@ -184,6 +184,7 @@ public class UFVerifierTest extends CQLTester
         return new UDFByteCodeVerifier().addDisallowedPackage(disallowedPkg).verify(cls.getName(), readClass(cls));
     }
 
+    @SuppressWarnings("resource")
     private static byte[] readClass(Class<?> clazz)
     {
         ByteArrayOutputStream out = new ByteArrayOutputStream();

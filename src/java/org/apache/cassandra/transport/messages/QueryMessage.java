@@ -30,13 +30,10 @@ import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.transport.CBUtil;
-import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.Message;
 import org.apache.cassandra.transport.ProtocolException;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.JVMStabilityInspector;
-
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 
 /**
  * A CQL query
@@ -93,28 +90,22 @@ public class QueryMessage extends Message.Request
     }
 
     @Override
-    protected boolean isTrackable()
-    {
-        return true;
-    }
-
-    @Override
-    protected Message.Response execute(QueryState state, Dispatcher.RequestTime requestTime, boolean traceRequest)
+    protected Message.Response execute(QueryState state, long queryStartNanoTime, boolean traceRequest)
     {
         CQLStatement statement = null;
         try
         {
-            if (options.getPageSize() == 0)
+            if (options.getPageSize().getSize() == 0)
                 throw new ProtocolException("The page size cannot be 0");
 
             if (traceRequest)
                 traceQuery(state);
 
-            long queryStartTime = currentTimeMillis();
+            long queryStartTime = System.currentTimeMillis();
 
             QueryHandler queryHandler = ClientState.getCQLQueryHandler();
             statement = queryHandler.parse(query, state, options);
-            Message.Response response = queryHandler.process(statement, state, options, getCustomPayload(), requestTime);
+            Message.Response response = queryHandler.process(statement, state, options, getCustomPayload(), queryStartNanoTime);
             QueryEvents.instance.notifyQuerySuccess(statement, query, options, state, queryStartTime, response);
 
             if (options.skipMetadata() && response instanceof ResultMessage.Rows)
@@ -136,12 +127,15 @@ public class QueryMessage extends Message.Request
     {
         ImmutableMap.Builder<String, String> builder = ImmutableMap.builder();
         builder.put("query", query);
-        if (options.getPageSize() > 0)
-            builder.put("page_size", Integer.toString(options.getPageSize()));
+        if (options.getPageSize().isDefined())
+        {
+            builder.put("page_size", Integer.toString(options.getPageSize().getSize()));
+            builder.put("page_size_unit", options.getPageSize().getUnit().name());
+        }
         if (options.getConsistency() != null)
             builder.put("consistency_level", options.getConsistency().name());
-        if (options.getSerialConsistency() != null)
-            builder.put("serial_consistency_level", options.getSerialConsistency().name());
+        if (options.getSerialConsistency(state) != null)
+            builder.put("serial_consistency_level", options.getSerialConsistency(state).name());
 
         Tracing.instance.begin("Execute CQL3 query", state.getClientAddress(), builder.build());
     }
@@ -149,7 +143,6 @@ public class QueryMessage extends Message.Request
     @Override
     public String toString()
     {
-        return String.format("QUERY %s [pageSize = %d] at consistency %s", 
-                             query, options.getPageSize(), options.getConsistency());
+        return String.format("QUERY %s [pageSize = %s]", query, options.getPageSize());
     }
 }

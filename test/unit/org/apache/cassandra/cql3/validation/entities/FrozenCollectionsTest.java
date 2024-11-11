@@ -17,8 +17,8 @@
  */
 package org.apache.cassandra.cql3.validation.entities;
 
-import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
@@ -26,7 +26,6 @@ import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import org.apache.cassandra.Util;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.restrictions.StatementRestrictions;
 import org.apache.cassandra.db.marshal.*;
@@ -37,7 +36,7 @@ import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 
-import static org.apache.cassandra.ServerTestUtils.daemonInitialization;
+import static java.lang.String.format;
 import static org.junit.Assert.assertEquals;
 
 public class FrozenCollectionsTest extends CQLTester
@@ -45,9 +44,9 @@ public class FrozenCollectionsTest extends CQLTester
     @BeforeClass
     public static void setUpClass()     // overrides CQLTester.setUpClass()
     {
-        daemonInitialization();
         // Selecting partitioner for a table is not exposed on CREATE TABLE.
         StorageService.instance.setPartitionerUnsafe(ByteOrderedPartitioner.instance);
+
         prepareServer();
     }
 
@@ -805,10 +804,10 @@ public class FrozenCollectionsTest extends CQLTester
         assertInvalid("DELETE m[?] FROM %s WHERE k=?", 0, 0);
 
         assertInvalidCreateWithMessage("CREATE TABLE %s (k int PRIMARY KEY, t set<set<int>>)",
-                "Non-frozen collections are not allowed inside collections");
+                                       "non-frozen collections are only supported at top-level");
 
         assertInvalidCreateWithMessage("CREATE TABLE %s (k int PRIMARY KEY, t frozen<set<counter>>)",
-                                       "Counters are not allowed inside collections");
+                                       "counters are not allowed within collections");
 
         assertInvalidCreateWithMessage("CREATE TABLE %s (k int PRIMARY KEY, t frozen<text>)",
                 "frozen<> is only allowed on collections, tuples, and user-defined types");
@@ -831,7 +830,6 @@ public class FrozenCollectionsTest extends CQLTester
     @Test
     public void testSecondaryIndex() throws Throwable
     {
-        Util.assumeLegacySecondaryIndex();
         createTable("CREATE TABLE %s (a frozen<map<int, text>> PRIMARY KEY, b frozen<map<int, text>>)");
 
         // for now, we don't support indexing values or keys of collections in the primary key
@@ -862,15 +860,14 @@ public class FrozenCollectionsTest extends CQLTester
                              "SELECT * FROM %s WHERE c CONTAINS KEY ?", 1);
 
         // normal indexes on frozen collections don't support CONTAINS or CONTAINS KEY
-        assertInvalidMessage("Clustering column restrictions require the use of secondary indices or" +
-                             " filtering for map-element restrictions and for the following operators: CONTAINS, CONTAINS KEY, LIKE, ANN",
+        assertInvalidMessage("Clustering columns can only be restricted with CONTAINS with a secondary index or filtering",
                              "SELECT * FROM %s WHERE b CONTAINS ?", 1);
 
         assertRows(execute("SELECT * FROM %s WHERE b CONTAINS ? ALLOW FILTERING", 1),
                    row(0, list(1, 2, 3), set(1, 2, 3), map(1, "a")),
                    row(1, list(1, 2, 3), set(4, 5, 6), map(2, "b")));
 
-        assertInvalidMessage(StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE,
+        assertInvalidMessage(String.format(StatementRestrictions.HAS_UNSUPPORTED_INDEX_RESTRICTION_MESSAGE_SINGLE, "d"),
                              "SELECT * FROM %s WHERE d CONTAINS KEY ?", 1);
 
         assertRows(execute("SELECT * FROM %s WHERE b CONTAINS ? AND d CONTAINS KEY ? ALLOW FILTERING", 1, 1),
@@ -998,7 +995,6 @@ public class FrozenCollectionsTest extends CQLTester
     @Test
     public void testClusteringColumnFiltering() throws Throwable
     {
-        Util.assumeLegacySecondaryIndex();
         createTable("CREATE TABLE %s (a int, b frozen<map<int, int>>, c int, d int, PRIMARY KEY (a, b, c))");
         createIndex("CREATE INDEX c_index ON %s (c)");
         createIndex("CREATE INDEX d_index ON %s (d)");
@@ -1378,10 +1374,9 @@ public class FrozenCollectionsTest extends CQLTester
         assertEquals("MapType(ListType(Int32Type),Int32Type)", clean(m.toString(true)));
 
         // tuple<set<int>>
-        List<AbstractType<?>> types = new ArrayList<>();
-        types.add(SetType.getInstance(Int32Type.instance, true));
+        List<AbstractType<?>> types = Collections.singletonList(SetType.getInstance(Int32Type.instance, true));
         TupleType tuple = new TupleType(types);
-        assertEquals("TupleType(SetType(Int32Type))", clean(tuple.toString()));
+        assertEquals("FrozenType(TupleType(SetType(Int32Type)))", clean(tuple.toString()));
     }
 
     @Test
@@ -1479,5 +1474,45 @@ public class FrozenCollectionsTest extends CQLTester
         flush();
 
         assertRows(execute("SELECT s FROM %s WHERE k = 0"), row(set(largeText, "v1", "v2")));
+    }
+
+    @Test
+    public void testInvalidSyntax() throws Throwable
+    {
+        // lists
+        assertInvalidThrowMessage("no viable alternative at input '>'",
+                                  SyntaxException.class,
+                                  format("CREATE TABLE %s.t (k int PRIMARY KEY, v frozen<list<>>)", KEYSPACE));
+        assertInvalidThrowMessage("mismatched input ',' expecting '>'",
+                                  SyntaxException.class,
+                                  format("CREATE TABLE %s.t (k int PRIMARY KEY, v frozen<list<int, int>>)", KEYSPACE));
+        assertInvalidThrowMessage("Unknown type cql_test_keyspace.list",
+                                  InvalidRequestException.class,
+                                  format("CREATE TABLE %s.t (k int PRIMARY KEY, v frozen<list>)", KEYSPACE));
+
+        // sets
+        assertInvalidThrowMessage("no viable alternative at input '>'",
+                                  SyntaxException.class,
+                                  format("CREATE TABLE %s.t (k int PRIMARY KEY, v frozen<set<>>)", KEYSPACE));
+        assertInvalidThrowMessage("mismatched input ',' expecting '>'",
+                                  SyntaxException.class,
+                                  format("CREATE TABLE %s.t (k int PRIMARY KEY, v frozen<set<int, int>>)", KEYSPACE));
+        assertInvalidThrowMessage("mismatched input '>' expecting '<'",
+                                  SyntaxException.class,
+                                  format("CREATE TABLE %s.t (k int PRIMARY KEY, v frozen<set>)", KEYSPACE));
+
+        // maps
+        assertInvalidThrowMessage("mismatched input '>' expecting ','",
+                                  SyntaxException.class,
+                                  format("CREATE TABLE %s.t (k int PRIMARY KEY, v frozen<map<text>>)", KEYSPACE));
+        assertInvalidThrowMessage("no viable alternative at input '2'",
+                                  SyntaxException.class,
+                                  format("CREATE TABLE %s.t (k int PRIMARY KEY, v frozen<map<2>>)", KEYSPACE));
+        assertInvalidThrowMessage("no viable alternative at input '>'",
+                                  SyntaxException.class,
+                                  format("CREATE TABLE %s.t (k int PRIMARY KEY, v frozen<map<>>)", KEYSPACE));
+        assertInvalidThrowMessage("Unknown type cql_test_keyspace.map",
+                                  InvalidRequestException.class,
+                                  format("CREATE TABLE %s.t (k int PRIMARY KEY, v frozen<map>)", KEYSPACE));
     }
 }

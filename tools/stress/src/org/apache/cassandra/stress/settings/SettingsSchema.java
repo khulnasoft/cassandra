@@ -25,7 +25,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.util.*;
 
-import com.datastax.driver.core.exceptions.AlreadyExistsException;
+import com.khulnasoft.driver.core.exceptions.AlreadyExistsException;
 import org.apache.cassandra.stress.util.JavaDriverClient;
 import org.apache.cassandra.stress.util.ResultLogger;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -69,6 +69,8 @@ public class SettingsSchema implements Serializable
         {
             //Keyspace
             client.execute(createKeyspaceStatementCQL3(), org.apache.cassandra.db.ConsistencyLevel.LOCAL_ONE);
+
+            client.execute("USE \""+keyspace+"\"", org.apache.cassandra.db.ConsistencyLevel.LOCAL_ONE);
 
             //Add standard1 and counter1
             client.execute(createStandard1StatementCQL3(settings), org.apache.cassandra.db.ConsistencyLevel.LOCAL_ONE);
@@ -123,8 +125,7 @@ public class SettingsSchema implements Serializable
         StringBuilder b = new StringBuilder();
 
         b.append("CREATE TABLE IF NOT EXISTS ")
-         .append(keyspace)
-         .append(".standard1 (key blob PRIMARY KEY ");
+         .append("standard1 (key blob PRIMARY KEY ");
 
         try
         {
@@ -139,7 +140,7 @@ public class SettingsSchema implements Serializable
         //Compression
         b.append(") WITH compression = {");
         if (compression != null)
-            b.append("'class' : '").append(compression).append("'");
+            b.append("'sstable_compression' : '").append(compression).append("'");
 
         b.append("}");
 
@@ -165,8 +166,7 @@ public class SettingsSchema implements Serializable
         StringBuilder b = new StringBuilder();
 
         b.append("CREATE TABLE IF NOT EXISTS ")
-         .append(keyspace)
-         .append(".counter1 (key blob PRIMARY KEY,");
+         .append("counter1 (key blob PRIMARY KEY,");
 
         try
         {
@@ -181,7 +181,7 @@ public class SettingsSchema implements Serializable
         //Compression
         b.append(") WITH compression = {");
         if (compression != null)
-            b.append("'class' : '").append(compression).append("'");
+            b.append("'sstable_compression' : '").append(compression).append("'");
 
         b.append("}");
 

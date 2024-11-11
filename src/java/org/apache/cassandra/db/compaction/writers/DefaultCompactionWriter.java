@@ -23,11 +23,15 @@ import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Directories;
+import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.compaction.CompactionRealm;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.SSTableWriter;
+import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 
 /**
  * The default compaction writer - creates one output file in L0
@@ -37,14 +41,21 @@ public class DefaultCompactionWriter extends CompactionAwareWriter
     protected static final Logger logger = LoggerFactory.getLogger(DefaultCompactionWriter.class);
     private final int sstableLevel;
 
-    public DefaultCompactionWriter(ColumnFamilyStore cfs, Directories directories, LifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables)
+    public DefaultCompactionWriter(CompactionRealm realm, Directories directories, LifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables)
     {
-        this(cfs, directories, txn, nonExpiredSSTables, false, 0);
+        this(realm, directories, txn, nonExpiredSSTables, false, 0);
     }
 
-    public DefaultCompactionWriter(ColumnFamilyStore cfs, Directories directories, LifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables, boolean keepOriginals, int sstableLevel)
+    @Deprecated
+    public DefaultCompactionWriter(CompactionRealm realm, Directories directories, LifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables, boolean offline, boolean keepOriginals, int sstableLevel)
     {
-        super(cfs, directories, txn, nonExpiredSSTables, keepOriginals);
+        this(realm, directories, txn, nonExpiredSSTables, keepOriginals, sstableLevel);
+    }
+
+    @SuppressWarnings("resource")
+    public DefaultCompactionWriter(CompactionRealm realm, Directories directories, LifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables, boolean keepOriginals, int sstableLevel)
+    {
+        super(realm, directories, txn, nonExpiredSSTables, keepOriginals);
         this.sstableLevel = sstableLevel;
     }
 
@@ -54,12 +65,24 @@ public class DefaultCompactionWriter extends CompactionAwareWriter
         return false;
     }
 
-    protected int sstableLevel()
+    @SuppressWarnings("resource")
+    @Override
+    protected SSTableWriter sstableWriter(Directories.DataDirectory directory, Token diskBoundary)
     {
-        return sstableLevel;
+        return SSTableWriter.create(realm.newSSTableDescriptor(getDirectories().getLocationForDisk(directory)),
+                                    estimatedTotalKeys,
+                                    minRepairedAt,
+                                    pendingRepair,
+                                    isTransient,
+                                    realm.metadataRef(),
+                                    new MetadataCollector(txn.originals(), realm.metadata().comparator, sstableLevel),
+                                    SerializationHeader.make(realm.metadata(), nonExpiredSSTables),
+                                    realm.getIndexManager().listIndexGroups(),
+                                    txn);
     }
 
-    protected long sstableKeyCount()
+    @Override
+    public long estimatedKeys()
     {
         return estimatedTotalKeys;
     }

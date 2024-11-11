@@ -30,4 +30,10 @@ public class FSNoDiskAvailableForWriteError extends FSWriteError
         super(new IOException(String.format("The data directories for the %s keyspace have been marked as unwritable",
                                             keyspace)));
     }
+
+    @Override
+    public String toString()
+    {
+        return "FSNoDiskAvailableForWriteError";
+    }
 }

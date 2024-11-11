@@ -17,14 +17,15 @@
  */
 package org.apache.cassandra.cql3.statements.schema;
 
+import java.util.function.UnaryOperator;
+
 import org.apache.cassandra.audit.AuditLogContext;
 import org.apache.cassandra.audit.AuditLogEntryType;
-import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.QualifiedName;
+import org.apache.cassandra.cql3.statements.RawKeyspaceAwareStatement;
 import org.apache.cassandra.schema.*;
 import org.apache.cassandra.schema.Keyspaces.KeyspacesDiff;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.transport.Event.SchemaChange;
 import org.apache.cassandra.transport.Event.SchemaChange.Change;
 import org.apache.cassandra.transport.Event.SchemaChange.Target;
@@ -35,18 +36,17 @@ public final class DropTriggerStatement extends AlterSchemaStatement
     private final String triggerName;
     private final boolean ifExists;
 
-    public DropTriggerStatement(String keyspaceName, String tableName, String triggerName, boolean ifExists)
+    public DropTriggerStatement(String queryString, String keyspaceName, String tableName,
+                                String triggerName, boolean ifExists)
     {
-        super(keyspaceName);
+        super(queryString, keyspaceName);
         this.tableName = tableName;
         this.triggerName = triggerName;
         this.ifExists = ifExists;
     }
 
-    @Override
-    public Keyspaces apply(ClusterMetadata metadata)
+    public Keyspaces apply(Keyspaces schema)
     {
-        Keyspaces schema = metadata.schema.getKeyspaces();
         KeyspaceMetadata keyspace = schema.getNullable(keyspaceName);
 
         TableMetadata table = null == keyspace
@@ -90,7 +90,7 @@ public final class DropTriggerStatement extends AlterSchemaStatement
         return String.format("%s (%s, %s)", getClass().getSimpleName(), keyspaceName, triggerName);
     }
 
-    public static final class Raw extends CQLStatement.Raw
+    public static final class Raw extends RawKeyspaceAwareStatement<DropTriggerStatement>
     {
         private final QualifiedName tableName;
         private final String triggerName;
@@ -103,10 +103,12 @@ public final class DropTriggerStatement extends AlterSchemaStatement
             this.ifExists = ifExists;
         }
 
-        public DropTriggerStatement prepare(ClientState state)
+        @Override
+        public DropTriggerStatement prepare(ClientState state, UnaryOperator<String> keyspaceMapper)
         {
-            String keyspaceName = tableName.hasKeyspace() ? tableName.getKeyspace() : state.getKeyspace();
-            return new DropTriggerStatement(keyspaceName, tableName.getName(), triggerName, ifExists);
+            String keyspaceName = keyspaceMapper.apply(tableName.hasKeyspace() ? tableName.getKeyspace() : state.getKeyspace());
+            return new DropTriggerStatement(rawCQLStatement, keyspaceName, tableName.getName(),
+                                            triggerName, ifExists);
         }
     }
 }

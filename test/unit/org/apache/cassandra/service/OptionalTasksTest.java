@@ -64,12 +64,12 @@ public class OptionalTasksTest
 
         try
         {
-            long originalValue = cfs.sampleReadLatencyMicros;
+            long originalValue = cfs.sampleReadLatencyNanos;
 
             // ...and ensure that the speculation threshold updater doesn't run.
             SPECULATION_THRESHOLD_UPDATER.run();
 
-            assertEquals(originalValue, cfs.sampleReadLatencyMicros);
+            assertEquals(originalValue, cfs.sampleReadLatencyNanos);
         }
         finally
         {
@@ -86,11 +86,11 @@ public class OptionalTasksTest
         ColumnFamilyStore cfs = Schema.instance.getColumnFamilyStoreInstance(Objects.requireNonNull(metadata).id);
         Objects.requireNonNull(cfs).metric.coordinatorReadLatency.update(100, TimeUnit.NANOSECONDS);
 
-        long originalValue = cfs.sampleReadLatencyMicros;
+        long originalValue = cfs.sampleReadLatencyNanos;
 
         // ...and ensure that the speculation threshold updater runs.
         SPECULATION_THRESHOLD_UPDATER.run();
 
-        assertNotEquals(originalValue, cfs.sampleReadLatencyMicros);
+        assertNotEquals(originalValue, cfs.sampleReadLatencyNanos);
     }
 }

@@ -18,19 +18,7 @@
  */
 package org.apache.cassandra.utils.btree;
 
-import java.util.AbstractSet;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Comparator;
-import java.util.List;
-import java.util.ListIterator;
-import java.util.NavigableSet;
-import java.util.NoSuchElementException;
-import java.util.Objects;
-import java.util.SortedSet;
-import java.util.Spliterator;
-import java.util.Spliterators;
-import java.util.function.Function;
+import java.util.*;
 
 import com.google.common.collect.Ordering;
 
@@ -39,7 +27,7 @@ import org.apache.cassandra.utils.btree.BTree.Dir;
 import static org.apache.cassandra.utils.btree.BTree.findIndex;
 
 
-public class BTreeSet<V> extends AbstractSet<V> implements NavigableSet<V>, List<V>
+public class BTreeSet<V> implements NavigableSet<V>, List<V>
 {
     protected final Comparator<? super V> comparator;
     protected final Object[] tree;
@@ -187,16 +175,12 @@ public class BTreeSet<V> extends AbstractSet<V> implements NavigableSet<V>, List
     @Override
     public V first()
     {
-        if (isEmpty())
-            throw new NoSuchElementException();
         return get(0);
     }
 
     @Override
     public V last()
     {
-        if (isEmpty())
-            throw new NoSuchElementException();
         return get(size() - 1);
     }
 
@@ -239,6 +223,7 @@ public class BTreeSet<V> extends AbstractSet<V> implements NavigableSet<V>, List
                 return false;
         return true;
     }
+
     public int hashCode()
     {
         // we can't just delegate to Arrays.deepHashCode(),
@@ -248,7 +233,6 @@ public class BTreeSet<V> extends AbstractSet<V> implements NavigableSet<V>, List
             result = 31 * result + Objects.hashCode(v);
         return result;
     }
-
 
     @Override
     public boolean addAll(Collection<? extends V> c)
@@ -324,6 +308,48 @@ public class BTreeSet<V> extends AbstractSet<V> implements NavigableSet<V>, List
     }
 
     public ListIterator<V> listIterator(int index)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    // @Override needed in JDK 21+.
+    public BTreeSet<V> reversed()
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    // @Override needed in JDK 21+.
+    public V removeLast()
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    // @Override needed in JDK 21+.
+    public V removeFirst()
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    // @Override needed in JDK 21+.
+    public V getLast()
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    // @Override needed in JDK 21+.
+    public V getFirst()
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    // @Override needed in JDK 21+.
+    public void addLast(V v)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    // @Override needed in JDK 21+.
+    public void addFirst(V v)
     {
         throw new UnsupportedOperationException();
     }
@@ -606,24 +632,24 @@ public class BTreeSet<V> extends AbstractSet<V> implements NavigableSet<V>, List
 
         public Builder<V> add(V v)
         {
-            wrapped.add(v);
+            wrapped .add(v);
             return this;
         }
 
         public Builder<V> addAll(Collection<V> iter)
         {
-            wrapped.addAll(iter);
+            wrapped .addAll(iter);
             return this;
         }
 
         public boolean isEmpty()
         {
-            return wrapped.isEmpty();
+            return wrapped .isEmpty();
         }
 
         public BTreeSet<V> build()
         {
-            return new BTreeSet<>(wrapped.build(), wrapped.comparator);
+            return new BTreeSet<>(wrapped .build(), wrapped .comparator);
         }
     }
 
@@ -641,22 +667,6 @@ public class BTreeSet<V> extends AbstractSet<V> implements NavigableSet<V>, List
     public static <V> BTreeSet<V> wrap(Object[] btree, Comparator<? super V> comparator)
     {
         return new BTreeSet<>(btree, comparator);
-    }
-
-    public BTreeSet<V> with(Collection<V> updateWith)
-    {
-        Object[] with = BTreeSet.<V>builder(comparator).addAll(updateWith).build().tree;
-        return new BTreeSet<>(BTree.update(tree, with, comparator, UpdateFunction.<V>noOp()), comparator);
-    }
-
-    public BTreeSet<V> with(V updateWith)
-    {
-        return new BTreeSet<>(BTree.update(tree, new Object[] { updateWith }, comparator, UpdateFunction.<V>noOp()), comparator);
-    }
-
-    public BTreeSet<V> without(V element)
-    {
-        return new BTreeSet<>(BTreeRemoval.remove(tree, comparator, element), comparator);
     }
 
     public static <V extends Comparable<V>> BTreeSet<V> of(Collection<V> sortedValues)
@@ -681,14 +691,9 @@ public class BTreeSet<V> extends AbstractSet<V> implements NavigableSet<V>, List
 
     public static <V> BTreeSet<V> copy(SortedSet<? extends V> copy, Comparator<? super V> comparator)
     {
-        return copy(copy, comparator, v -> v);
-    }
-
-    public static <V> BTreeSet<V> copy(SortedSet<? extends V> copy, Comparator<? super V> comparator, Function<V, V> modifier)
-    {
         try (BTree.FastBuilder<V> builder = BTree.fastBuilder())
         {
-            copy.forEach(value -> builder.add(modifier.apply(value)));
+            copy.forEach(builder::add);
             return wrap(builder.build(), comparator);
         }
     }

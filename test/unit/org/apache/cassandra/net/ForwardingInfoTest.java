@@ -35,12 +35,16 @@ import static org.junit.Assert.assertTrue;
 
 public class ForwardingInfoTest
 {
+    @Test
+    public void testCurrent() throws Exception
+    {
+        testVersion(MessagingService.current_version);
+    }
 
     @Test
-    public void testSupportedVersions() throws Exception
+    public void test30() throws Exception
     {
-        for (MessagingService.Version version : MessagingService.Version.supportedVersions())
-            testVersion(version.value);
+        testVersion(MessagingService.VERSION_30);
     }
 
     private void testVersion(int version) throws Exception
@@ -87,9 +91,9 @@ public class ForwardingInfoTest
             {
                 InetAddressAndPort original = addresses.get(ii);
                 InetAddressAndPort roundtripped = iterator.next();
-                assertEquals(original.getAddress(), roundtripped.getAddress());
+                assertEquals(original.address, roundtripped.address);
                 //3.0 can't send port numbers so you get the defaults
-                assertEquals(65532, roundtripped.getPort());
+                assertEquals(65532, roundtripped.port);
             }
         }
     }

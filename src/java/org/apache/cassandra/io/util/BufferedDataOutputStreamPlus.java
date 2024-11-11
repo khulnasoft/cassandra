@@ -22,13 +22,11 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.WritableByteChannel;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 
 import net.nicoulaj.compilecommand.annotations.DontInline;
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.utils.FastByteOperations;
-
-import static org.apache.cassandra.config.CassandraRelevantProperties.NIO_DATA_OUTPUT_STREAM_PLUS_BUFFER_SIZE;
 
 /**
  * An implementation of the DataOutputStreamPlus interface using a ByteBuffer to stage writes
@@ -38,7 +36,7 @@ import static org.apache.cassandra.config.CassandraRelevantProperties.NIO_DATA_O
  */
 public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
 {
-    private static final int DEFAULT_BUFFER_SIZE = NIO_DATA_OUTPUT_STREAM_PLUS_BUFFER_SIZE.getInt();
+    private static final int DEFAULT_BUFFER_SIZE = Integer.getInteger(Config.PROPERTY_PREFIX + "nio_data_output_stream_plus_buffer_size", 1024 * 32);
 
     protected ByteBuffer buffer;
 
@@ -54,8 +52,7 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
         Preconditions.checkArgument(bufferSize >= 8, "Buffer size must be large enough to accommodate a long/double");
     }
 
-    @VisibleForTesting
-    public BufferedDataOutputStreamPlus(WritableByteChannel channel, ByteBuffer buffer)
+    protected BufferedDataOutputStreamPlus(WritableByteChannel channel, ByteBuffer buffer)
     {
         super(channel);
         this.buffer = buffer;
@@ -67,16 +64,6 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
         this.buffer = buffer;
     }
 
-    protected BufferedDataOutputStreamPlus(int size)
-    {
-        this.buffer = allocate(size);
-    }
-
-    protected ByteBuffer allocate(int size)
-    {
-        return ByteBuffer.allocate(size);
-    }
-
     @Override
     public void write(byte[] b) throws IOException
     {
@@ -86,7 +73,6 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
     @Override
     public void write(byte[] b, int off, int len) throws IOException
     {
-        assert buffer != null : "Attempt to use a closed data output";
         if (b == null)
             throw new NullPointerException();
 
@@ -123,7 +109,6 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
     @Override
     public void write(ByteBuffer src) throws IOException
     {
-        assert buffer != null : "Attempt to use a closed data output";
         int srcPos = src.position();
         int srcCount;
         int trgAvailable;
@@ -141,7 +126,6 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
     @Override
     public void write(int b) throws IOException
     {
-        assert buffer != null : "Attempt to use a closed data output";
         if (!buffer.hasRemaining())
             doFlush(1);
         buffer.put((byte) (b & 0xFF));
@@ -150,7 +134,6 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
     @Override
     public void writeBoolean(boolean v) throws IOException
     {
-        assert buffer != null : "Attempt to use a closed data output";
         if (!buffer.hasRemaining())
             doFlush(1);
         buffer.put(v ? (byte)1 : (byte)0);
@@ -163,22 +146,6 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
     }
 
     @Override
-    public void writeMostSignificantBytes(long register, int bytes) throws IOException
-    {
-        assert buffer != null : "Attempt to use a closed data output";
-        if (buffer.remaining() < Long.BYTES)
-        {
-            super.writeMostSignificantBytes(register, bytes);
-        }
-        else
-        {
-            int pos = buffer.position();
-            buffer.putLong(pos, register);
-            buffer.position(pos + bytes);
-        }
-    }
-
-    @Override
     public void writeShort(int v) throws IOException
     {
         writeChar(v);
@@ -187,7 +154,6 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
     @Override
     public void writeChar(int v) throws IOException
     {
-        assert buffer != null : "Attempt to use a closed data output";
         if (buffer.remaining() < 2)
             writeSlow(v, 2);
         else
@@ -197,7 +163,6 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
     @Override
     public void writeInt(int v) throws IOException
     {
-        assert buffer != null : "Attempt to use a closed data output";
         if (buffer.remaining() < 4)
             writeSlow(v, 4);
         else
@@ -207,7 +172,6 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
     @Override
     public void writeLong(long v) throws IOException
     {
-        assert buffer != null : "Attempt to use a closed data output";
         if (buffer.remaining() < 8)
             writeSlow(v, 8);
         else
@@ -227,9 +191,8 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
     }
 
     @DontInline
-    private void writeSlow(long bytes, int count) throws IOException
+    protected void writeSlow(long bytes, int count) throws IOException
     {
-        assert buffer != null : "Attempt to use a closed data output";
         int origCount = count;
         if (ByteOrder.BIG_ENDIAN == buffer.order())
             while (count > 0) writeByte((int) (bytes >>> (8 * --count)));
@@ -254,7 +217,6 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
     @Override
     public void writeUTF(String s) throws IOException
     {
-        assert buffer != null : "Attempt to use a closed data output";
         UnbufferedDataOutputStreamPlus.writeUTF(s, this);
     }
 
@@ -264,7 +226,6 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
     @DontInline
     protected void doFlush(int count) throws IOException
     {
-        assert buffer != null : "Attempt to use a closed data output";
         buffer.flip();
 
         while (buffer.hasRemaining())
@@ -282,9 +243,6 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
     @Override
     public void close() throws IOException
     {
-        if (buffer == null)
-            return;
-
         doFlush(0);
         channel.close();
         FileUtils.clean(buffer);
@@ -293,7 +251,6 @@ public class BufferedDataOutputStreamPlus extends DataOutputStreamPlus
 
     public BufferedDataOutputStreamPlus order(ByteOrder order)
     {
-        assert buffer != null : "Attempt to use a closed data output";
         this.buffer.order(order);
         return this;
     }

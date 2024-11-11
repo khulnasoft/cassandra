@@ -23,6 +23,7 @@ import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.nio.channels.ClosedChannelException;
 import java.util.Objects;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -33,10 +34,7 @@ import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
-
-import org.apache.cassandra.utils.Clock;
-import org.apache.cassandra.utils.concurrent.AsyncPromise;
-import org.apache.cassandra.utils.concurrent.CountDownLatch;
+import com.google.common.util.concurrent.Uninterruptibles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -46,8 +44,8 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.EventLoop;
 import io.netty.channel.unix.Errors;
-import io.netty.util.concurrent.Future; //checkstyle: permit this import
-import io.netty.util.concurrent.Promise; //checkstyle: permit this import
+import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.Promise;
 import io.netty.util.concurrent.PromiseNotifier;
 import io.netty.util.concurrent.SucceededFuture;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -57,13 +55,10 @@ import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.NoSpamLogger;
-import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
-import static java.util.concurrent.TimeUnit.NANOSECONDS;
-import static org.apache.cassandra.net.InternodeConnectionUtils.isSSLError;
 import static org.apache.cassandra.net.MessagingService.current_version;
 import static org.apache.cassandra.net.OutboundConnectionInitiator.*;
 import static org.apache.cassandra.net.OutboundConnections.LARGE_MESSAGE_THRESHOLD;
@@ -71,9 +66,8 @@ import static org.apache.cassandra.net.ResourceLimits.*;
 import static org.apache.cassandra.net.ResourceLimits.Outcome.*;
 import static org.apache.cassandra.net.SocketFactory.*;
 import static org.apache.cassandra.utils.FBUtilities.prettyPrintMemory;
-import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
+import static org.apache.cassandra.utils.MonotonicClock.approxTime;
 import static org.apache.cassandra.utils.Throwables.isCausedBy;
-import static org.apache.cassandra.utils.concurrent.CountDownLatch.newCountDownLatch;
 
 /**
  * Represents a connection type to a peer, and handles the state transistions on the connection and the netty {@link Channel}.
@@ -476,13 +470,7 @@ public class OutboundConnection
      */
     private boolean onExpired(Message<?> message)
     {
-        if (logger.isTraceEnabled())
-            logger.trace("{} dropping message of type {} with payload {} whose timeout ({}ms) expired before reaching the network. {}ms elapsed after expiration. {}ms since creation.",
-                         id(), message.verb(), message.payload, DatabaseDescriptor.getRpcTimeout(MILLISECONDS),
-                         NANOSECONDS.toMillis(Clock.Global.nanoTime() - message.expiresAtNanos()),
-                         message.elapsedSinceCreated(MILLISECONDS));
-        else
-            noSpamLogger.warn("{} dropping message of type {} whose timeout expired before reaching the network", id(), message.verb());
+        noSpamLogger.warn("{} dropping message of type {} whose timeout expired before reaching the network", id(), message.verb());
         releaseCapacity(1, canonicalSize(message));
         expiredCount += 1;
         expiredBytes += canonicalSize(message);
@@ -762,6 +750,7 @@ public class OutboundConnection
          *
          * If there is more work to be done, we submit ourselves for execution once the eventLoop has time.
          */
+        @SuppressWarnings("resource")
         boolean doRun(Established established)
         {
             if (!isWritable)
@@ -972,6 +961,7 @@ public class OutboundConnection
             }
         }
 
+        @SuppressWarnings({ "resource", "RedundantSuppression" }) // make eclipse warnings go away
         boolean doRun(Established established)
         {
             Message<?> send = queue.tryPoll(approxTime.now(), this::execute);
@@ -1041,7 +1031,7 @@ public class OutboundConnection
                 }
                 catch (InterruptedException e)
                 {
-                    throw new UncheckedInterruptedException(e);
+                    throw new RuntimeException(e);
                 }
             });
         }
@@ -1107,9 +1097,8 @@ public class OutboundConnection
 
                 if (hasPending())
                 {
-                    boolean isSSLFailure = isSSLError(cause);
-                    Promise<Result<MessagingSuccess>> result = AsyncPromise.withExecutor(eventLoop);
-                    state = new Connecting(state.disconnected(), result, eventLoop.schedule(() -> attempt(result, isSSLFailure), max(100, retryRateMillis), MILLISECONDS));
+                    Promise<Result<MessagingSuccess>> result = new AsyncPromise<>(eventLoop);
+                    state = new Connecting(state.disconnected(), result, eventLoop.schedule(() -> attempt(result), max(100, retryRateMillis), MILLISECONDS));
                     retryRateMillis = min(1000, retryRateMillis * 2);
                 }
                 else
@@ -1133,7 +1122,7 @@ public class OutboundConnection
 
                         FrameEncoder.PayloadAllocator payloadAllocator = success.allocator;
                         Channel channel = success.channel;
-                        Established established = new Established(success.messagingVersion, channel, payloadAllocator, settings);
+                        Established established = new Established(messagingVersion, channel, payloadAllocator, settings);
                         state = established;
                         channel.pipeline().addLast("handleExceptionalStates", new ChannelInboundHandlerAdapter() {
                             @Override
@@ -1197,7 +1186,7 @@ public class OutboundConnection
              *
              * Note: this should only be invoked on the event loop.
              */
-            private void attempt(Promise<Result<MessagingSuccess>> result, boolean sslFallbackEnabled)
+            private void attempt(Promise<Result<MessagingSuccess>> result)
             {
                 ++connectionAttempts;
 
@@ -1207,7 +1196,7 @@ public class OutboundConnection
                  * is made before the endpointToVersion table is initially constructed or out
                  * of date (e.g. if outbound connections are established for gossip
                  * as a result of an inbound connection) and can result in the wrong outbound
-                 * port being selected if configured with legacy_ssl_storage_port_enabled=true.
+                 * port being selected if configured with enable_legacy_ssl_storage_port=true.
                  */
                 int knownMessagingVersion = messagingVersion();
                 if (knownMessagingVersion != messagingVersion)
@@ -1221,20 +1210,10 @@ public class OutboundConnection
                 if (messagingVersion > settings.acceptVersions.max)
                     messagingVersion = settings.acceptVersions.max;
 
-                // In mixed mode operation, some nodes might be configured to use SSL for internode connections and
-                // others might be configured to not use SSL. When a node is configured in optional SSL mode, It should
-                // be able to handle SSL and Non-SSL internode connections. We take care of this when accepting NON-SSL
-                // connection in Inbound connection by having optional SSL handler for inbound connections.
-                // For outbound connections, if the authentication fails, we should fall back to other SSL strategies
-                // while talking to older nodes in the cluster which are configured to make NON-SSL connections
-                SslFallbackConnectionType[] fallBackSslFallbackConnectionTypes = SslFallbackConnectionType.values();
-                int index = sslFallbackEnabled && settings.withEncryption() && settings.encryption.getOptional() ?
-                            (int) (connectionAttempts - 1) % fallBackSslFallbackConnectionTypes.length : 0;
-                if (fallBackSslFallbackConnectionTypes[index] != SslFallbackConnectionType.SERVER_CONFIG)
-                {
-                    logger.info("ConnectionId {} is falling back to {} reconnect strategy for retry", id(), fallBackSslFallbackConnectionTypes[index]);
-                }
-                initiateMessaging(eventLoop, type, fallBackSslFallbackConnectionTypes[index], settings, result)
+                // ensure we connect to the correct SSL port
+                settings = settings.withLegacyPortIfNecessary(messagingVersion);
+
+                initiateMessaging(eventLoop, type, settings, messagingVersion, result)
                 .addListener(future -> {
                     if (future.isCancelled())
                         return;
@@ -1247,9 +1226,9 @@ public class OutboundConnection
 
             Future<Result<MessagingSuccess>> initiate()
             {
-                Promise<Result<MessagingSuccess>> result = AsyncPromise.withExecutor(eventLoop);
+                Promise<Result<MessagingSuccess>> result = new AsyncPromise<>(eventLoop);
                 state = new Connecting(state.disconnected(), result);
-                attempt(result, false);
+                attempt(result);
                 return result;
             }
         }
@@ -1469,6 +1448,8 @@ public class OutboundConnection
 
                 try
                 {
+                    logger.debug("Closing connection {}", id());
+
                     // note that we never clear the queue, to ensure that an enqueue has the opportunity to remove itself
                     // if it raced with close, to potentially requeue the message on a replacement connection
 
@@ -1535,12 +1516,13 @@ public class OutboundConnection
 
         Runnable clearQueue = () ->
         {
-            CountDownLatch done = newCountDownLatch(1);
+            CountDownLatch done = new CountDownLatch(1);
             queue.runEventually(withLock -> {
                 withLock.consume(this::onClosed);
-                done.decrement();
+                done.countDown();
             });
-            done.awaitUninterruptibly();
+            //noinspection UnstableApiUsage
+            Uninterruptibles.awaitUninterruptibly(done);
         };
 
         if (flushQueue)

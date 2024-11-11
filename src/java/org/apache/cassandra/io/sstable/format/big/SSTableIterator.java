@@ -19,23 +19,18 @@ package org.apache.cassandra.io.sstable.format.big;
 
 import java.io.IOException;
 
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.Slice;
-import org.apache.cassandra.db.Slices;
-import org.apache.cassandra.db.UnfilteredValidation;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.ColumnFilter;
-import org.apache.cassandra.db.rows.RangeTombstoneMarker;
-import org.apache.cassandra.db.rows.Unfiltered;
-import org.apache.cassandra.io.sstable.AbstractSSTableIterator;
+import org.apache.cassandra.db.rows.*;
+import org.apache.cassandra.io.sstable.format.AbstractSSTableIterator;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.FileHandle;
 
 /**
  *  A Cell Iterator over SSTable
  */
-public class SSTableIterator extends AbstractSSTableIterator<RowIndexEntry>
+public class SSTableIterator extends AbstractSSTableIterator<BigTableRowIndexEntry>
 {
     /**
      * The index of the slice being processed.
@@ -45,7 +40,7 @@ public class SSTableIterator extends AbstractSSTableIterator<RowIndexEntry>
     public SSTableIterator(SSTableReader sstable,
                            FileDataInput file,
                            DecoratedKey key,
-                           RowIndexEntry indexEntry,
+                           BigTableRowIndexEntry indexEntry,
                            Slices slices,
                            ColumnFilter columns,
                            FileHandle ifile)
@@ -53,7 +48,8 @@ public class SSTableIterator extends AbstractSSTableIterator<RowIndexEntry>
         super(sstable, file, key, indexEntry, slices, columns, ifile);
     }
 
-    protected Reader createReaderInternal(RowIndexEntry indexEntry, FileDataInput file, boolean shouldCloseFile, Version version)
+    @SuppressWarnings("resource") // caller to close
+    protected RowReader createReaderInternal(BigTableRowIndexEntry indexEntry, FileDataInput file, boolean shouldCloseFile)
     {
         return indexEntry.isIndexed()
              ? new ForwardIndexedReader(indexEntry, file, shouldCloseFile)
@@ -83,7 +79,7 @@ public class SSTableIterator extends AbstractSSTableIterator<RowIndexEntry>
 
         private int lastBlockIdx; // the last index block that has data for the current query
 
-        private ForwardIndexedReader(RowIndexEntry indexEntry, FileDataInput file, boolean shouldCloseFile)
+        private ForwardIndexedReader(BigTableRowIndexEntry indexEntry, FileDataInput file, boolean shouldCloseFile)
         {
             super(file, shouldCloseFile);
             this.indexState = new IndexState(this, metadata.comparator, indexEntry, false, ifile);

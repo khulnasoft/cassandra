@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -32,7 +33,7 @@ import com.google.common.util.concurrent.MoreExecutors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static org.apache.cassandra.utils.concurrent.BlockingQueues.newBlockingQueue;
+import junit.framework.AssertionFailedError;
 
 /**
  * Allows inspecting the behavior of mocked messaging by observing {@link MatcherResponse}.
@@ -44,8 +45,8 @@ public class MockMessagingSpy
     private final AtomicInteger messagesIntercepted = new AtomicInteger();
     private final AtomicInteger mockedMessageResponses = new AtomicInteger();
 
-    private final BlockingQueue<Message<?>> interceptedMessages = newBlockingQueue();
-    private final BlockingQueue<Message<?>> deliveredResponses = newBlockingQueue();
+    private final BlockingQueue<Message<?>> interceptedMessages = new LinkedBlockingQueue<>();
+    private final BlockingQueue<Message<?>> deliveredResponses = new LinkedBlockingQueue<>();
 
     private static final Executor executor = Executors.newSingleThreadExecutor();
 
@@ -231,7 +232,7 @@ public class MockMessagingSpy
             {
                 T result = queue.poll(time, unit);
                 if (result != null)
-                    setException(new AssertionError("Received unexpected message: " + result));
+                    setException(new AssertionFailedError("Received unexpected message: " + result));
                 else
                     set(true);
             }

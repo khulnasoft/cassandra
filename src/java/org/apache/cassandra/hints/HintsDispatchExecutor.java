@@ -18,9 +18,12 @@
 package org.apache.cassandra.hints;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
@@ -28,21 +31,16 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 import com.google.common.util.concurrent.RateLimiter;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.concurrent.ExecutorPlus;
-import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
+import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
-import org.apache.cassandra.utils.concurrent.Future;
 
-import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
+import static org.apache.cassandra.config.CassandraRelevantProperties.SKIP_REWRITING_HINTS_ON_HOST_LEFT;
 
 /**
  * A multi-threaded (by default) executor for dispatching hints.
@@ -54,23 +52,22 @@ final class HintsDispatchExecutor
     private static final Logger logger = LoggerFactory.getLogger(HintsDispatchExecutor.class);
 
     private final File hintsDirectory;
-    private final ExecutorPlus executor;
+    private final JMXEnabledThreadPoolExecutor executor;
     private final AtomicBoolean isPaused;
-    private final Predicate<InetAddressAndPort> isAlive;
+    private final Predicate<UUID> isAlive;
     private final Map<UUID, Future> scheduledDispatches;
 
-    HintsDispatchExecutor(File hintsDirectory, int maxThreads, AtomicBoolean isPaused, Predicate<InetAddressAndPort> isAlive)
+    HintsDispatchExecutor(File hintsDirectory, int maxThreads, AtomicBoolean isPaused, Predicate<UUID> isAlive)
     {
         this.hintsDirectory = hintsDirectory;
         this.isPaused = isPaused;
         this.isAlive = isAlive;
 
         scheduledDispatches = new ConcurrentHashMap<>();
-        executor = executorFactory()
-                .withJmxInternal()
-                .configurePooled("HintsDispatcher", maxThreads)
-                .withThreadPriority(Thread.MIN_PRIORITY)
-                .build();
+        executor = new JMXEnabledThreadPoolExecutor(maxThreads, 1, TimeUnit.MINUTES,
+                                                    new LinkedBlockingQueue<>(),
+                                                    new NamedThreadFactory("HintsDispatcher", Thread.MIN_PRIORITY),
+                                                    "internal");
     }
 
     /*
@@ -86,7 +83,7 @@ final class HintsDispatchExecutor
         }
         catch (InterruptedException e)
         {
-            throw new UncheckedInterruptedException(e);
+            throw new AssertionError(e);
         }
     }
 
@@ -114,7 +111,7 @@ final class HintsDispatchExecutor
         return scheduledDispatches.computeIfAbsent(hostId, uuid -> executor.submit(new DispatchHintsTask(store, hostId)));
     }
 
-    Future<?> transfer(HintsCatalog catalog, Supplier<UUID> hostIdSupplier)
+    Future transfer(HintsCatalog catalog, Supplier<UUID> hostIdSupplier)
     {
         return executor.submit(new TransferHintsTask(catalog, hostIdSupplier));
     }
@@ -127,11 +124,7 @@ final class HintsDispatchExecutor
             if (future != null)
                 future.get();
         }
-        catch (InterruptedException e)
-        {
-            throw new UncheckedInterruptedException(e);
-        }
-        catch (ExecutionException e)
+        catch (ExecutionException | InterruptedException e)
         {
             throw new RuntimeException(e);
         }
@@ -165,7 +158,7 @@ final class HintsDispatchExecutor
         public void run()
         {
             UUID hostId = hostIdSupplier.get();
-            InetAddressAndPort address = StorageService.instance.getEndpointForHostId(hostId);
+            InetAddressAndPort address = HintsEndpointProvider.instance.endpointForHost(hostId);
             logger.info("Transferring all hints to {}: {}", address, hostId);
             if (transfer(hostId))
                 return;
@@ -178,7 +171,7 @@ final class HintsDispatchExecutor
             }
             catch (InterruptedException e)
             {
-                throw new UncheckedInterruptedException(e);
+                throw new RuntimeException(e);
             }
 
             hostId = hostIdSupplier.get();
@@ -193,7 +186,7 @@ final class HintsDispatchExecutor
         private boolean transfer(UUID hostId)
         {
             catalog.stores()
-                   .map(store -> new DispatchHintsTask(store, hostId, true))
+                   .map(store -> new DispatchHintsTask(store, hostId))
                    .forEach(Runnable::run);
 
             return !catalog.hasFiles();
@@ -206,25 +199,11 @@ final class HintsDispatchExecutor
         private final UUID hostId;
         private final RateLimiter rateLimiter;
 
-        DispatchHintsTask(HintsStore store, UUID hostId, boolean isTransfer)
+        DispatchHintsTask(HintsStore store, UUID hostId)
         {
             this.store = store;
             this.hostId = hostId;
-
-            // Rate limit is in bytes per second. Uses Double.MAX_VALUE if disabled (set to 0 in cassandra.yaml).
-            // Max rate is scaled by the number of nodes in the cluster (CASSANDRA-5272), unless we are transferring
-            // hints during decommission rather than dispatching them to their final destination.
-            // The goal is to bound maximum hints traffic going towards a particular node from the rest of the cluster,
-            // not total outgoing hints traffic from this node. This is why the rate limiter is not shared between
-            // all the dispatch tasks (as there will be at most one dispatch task for a particular host id at a time).
-            int nodesCount = isTransfer ? 1 : Math.max(1, ClusterMetadata.current().directory.allAddresses().size() - 1);
-            double throttleInBytes = DatabaseDescriptor.getHintedHandoffThrottleInKiB() * 1024.0 / nodesCount;
-            this.rateLimiter = RateLimiter.create(throttleInBytes == 0 ? Double.MAX_VALUE : throttleInBytes);
-        }
-
-        DispatchHintsTask(HintsStore store, UUID hostId)
-        {
-            this(store, hostId, false);
+            this.rateLimiter = HintsRateLimiterFactory.instance.create(hostId);
         }
 
         public void run()
@@ -270,65 +249,64 @@ final class HintsDispatchExecutor
          */
         private boolean dispatch(HintsDescriptor descriptor)
         {
-            logger.trace("Dispatching hints file {}", descriptor.hintsFileName);
+            logger.debug("Dispatching hints file {}", descriptor.fileName());
 
-            InetAddressAndPort address = StorageService.instance.getEndpointForHostId(hostId);
+            InetAddressAndPort address = HintsEndpointProvider.instance.endpointForHost(hostId);
             if (address != null)
                 return deliver(descriptor, address);
 
             // address == null means the target no longer exist; find new home for each hint entry.
-            convert(descriptor);
+            if (SKIP_REWRITING_HINTS_ON_HOST_LEFT.getBoolean())
+            {
+                logger.debug("Host {} is no longer a member of cluster, dropping hints", hostId);
+                store.cleanUp(descriptor);
+                store.delete(descriptor);
+            }
+            else
+                convert(descriptor);
             return true;
         }
 
         private boolean deliver(HintsDescriptor descriptor, InetAddressAndPort address)
         {
-            File file = descriptor.file(hintsDirectory);
+            File file = new File(hintsDirectory, descriptor.fileName());
             InputPosition offset = store.getDispatchOffset(descriptor);
 
-            BooleanSupplier shouldAbort = () -> !isAlive.test(address) || isPaused.get();
-            try (HintsDispatcher dispatcher = HintsDispatcher.create(file, rateLimiter, address, descriptor.hostId, shouldAbort))
+            BooleanSupplier shouldAbort = () -> !isAlive.test(descriptor.hostId) || isPaused.get();
+
+            Optional<Integer> optVersion = HintsEndpointProvider.instance.versionForEndpoint(address);
+            if (optVersion.isEmpty())
+            {
+                logger.debug("Cannot deliver handoff to endpoint {}: its version is unknown. This should be temporary.", address);
+                return false;
+            }
+
+            try (HintsDispatcher dispatcher = HintsDispatcher.create(file, rateLimiter, address, descriptor.hostId, optVersion.get(), shouldAbort))
             {
                 if (offset != null)
                     dispatcher.seek(offset);
 
-                try
+                if (dispatcher.dispatch())
                 {
-                    if (dispatcher.dispatch())
-                    {
-                        store.delete(descriptor);
-                        store.cleanUp(descriptor);
-                        logger.info("Finished hinted handoff of file {} to endpoint {}: {}", descriptor.fileName(), address, hostId);
-                        return true;
-                    }
-                    else
-                    {
-                        handleDispatchFailure(dispatcher, descriptor, address);
-                        return false;
-                    }
+                    store.delete(descriptor);
+                    store.cleanUp(descriptor);
+                    logger.info("Finished hinted handoff of file {} to endpoint {}: {}", descriptor.fileName(), address, hostId);
+                    return true;
                 }
-                // we wrap InterruptedException in UncheckedInterruptedException
-                // without that catch, undispatched HintsDescriptor won't be added back to the store and cleaned
-                // up by HintsStore.delete in tests
-                catch (UncheckedInterruptedException e)
+                else
                 {
-                    handleDispatchFailure(dispatcher, descriptor, address);
-                    throw e;
+                    store.markDispatchOffset(descriptor, dispatcher.dispatchPosition());
+                    store.offerFirst(descriptor);
+                    logger.info("Finished hinted handoff of file {} to endpoint {}: {}, partially", descriptor.fileName(), address, hostId);
+                    return false;
                 }
             }
-        }
-
-        private void handleDispatchFailure(HintsDispatcher dispatcher, HintsDescriptor descriptor, InetAddressAndPort address)
-        {
-            store.markDispatchOffset(descriptor, dispatcher.dispatchPosition());
-            store.offerFirst(descriptor);
-            logger.info("Finished hinted handoff of file {} to endpoint {}: {}, partially", descriptor.fileName(), address, hostId);
         }
 
         // for each hint in the hints file for a node that isn't part of the ring anymore, write RF hints for each replica
         private void convert(HintsDescriptor descriptor)
         {
-            File file = descriptor.file(hintsDirectory);
+            File file = new File(hintsDirectory, descriptor.fileName());
 
             try (HintsReader reader = HintsReader.open(file, rateLimiter))
             {
@@ -348,5 +326,32 @@ final class HintsDispatchExecutor
     public boolean hasScheduledDispatches()
     {
         return !scheduledDispatches.isEmpty();
+    }
+
+    public void updateDispatcherConcurrency(int concurrency)
+    {
+        logger.info("updating HintsDispatchExecutor with new concurrency = {} (current value = {})", concurrency, executor.getCorePoolSize());
+        if (concurrency > executor.getCorePoolSize())
+        {
+            // we are increasing the value
+            executor.setMaximumPoolSize(concurrency);
+            executor.setCorePoolSize(concurrency);
+        }
+        else if (concurrency < executor.getCorePoolSize())
+        {
+            // we are reducing the value
+            executor.setCorePoolSize(concurrency);
+            executor.setMaximumPoolSize(concurrency);
+        }
+    }
+
+    public int getDispatcherCorePoolSize()
+    {
+        return executor.getCorePoolSize();
+    }
+
+    public int getDispatcherMaxPoolSize()
+    {
+        return executor.getMaximumPoolSize();
     }
 }

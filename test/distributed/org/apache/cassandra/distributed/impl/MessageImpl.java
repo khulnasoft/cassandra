@@ -30,16 +30,14 @@ public class MessageImpl implements IMessage
     public final byte[] bytes;
     public final long id;
     public final int version;
-    public final long expiresAtNanos;
     public final InetSocketAddress from;
 
-    public MessageImpl(int verb, byte[] bytes, long id, int version, long expiresAtNanos, InetSocketAddress from)
+    public MessageImpl(int verb, byte[] bytes, long id, int version, InetSocketAddress from)
     {
         this.verb = verb;
         this.bytes = bytes;
         this.id = id;
         this.version = version;
-        this.expiresAtNanos = expiresAtNanos;
         this.from = from;
     }
 
@@ -61,12 +59,6 @@ public class MessageImpl implements IMessage
     public int version()
     {
         return version;
-    }
-
-    @Override
-    public long expiresAtNanos()
-    {
-        return expiresAtNanos;
     }
 
     public InetSocketAddress from()

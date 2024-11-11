@@ -17,6 +17,8 @@
  */
 package org.apache.cassandra.cql3.restrictions;
 
+import java.util.Set;
+
 import org.apache.cassandra.schema.ColumnMetadata;
 
 /**
@@ -25,52 +27,62 @@ import org.apache.cassandra.schema.ColumnMetadata;
 public interface Restrictions extends Restriction
 {
     /**
-     * Checks if the specified column is restricted by an equals at the column level.
-     * @return {@code true} if the column is restricted by an equals at the column level, {@code false} otherwise.
+     * Returns the restrictions applied to the specified column.
+     *
+     * @param columnDef the column definition
+     * @return the restrictions applied to the specified column
      */
-    boolean isRestrictedByEquals(ColumnMetadata column);
-
-    /**
-     * Checks if the specified column is restricted by an equals or an IN at the column level.
-     * @return {@code true} if the column is restricted by an equals or an IN at the column level, {@code false} otherwise.
-     */
-    boolean isRestrictedByEqualsOrIN(ColumnMetadata column);
+    Set<Restriction> getRestrictions(ColumnMetadata columnDef);
 
     /**
      * Checks if this <code>Restrictions</code> is empty or not.
      *
      * @return <code>true</code> if this <code>Restrictions</code> is empty, <code>false</code> otherwise.
      */
-    default boolean isEmpty()
-    {
-        return size() == 0;
-    }
+    boolean isEmpty();
 
     /**
      * Returns the number of columns that have a restriction.
      *
      * @return the number of columns that have a restriction.
      */
-    default int size()
+    public int size();
+
+    /**
+     * Checks if any of the underlying restriction is an IN.
+     * @return <code>true</code> if any of the underlying restriction is an IN, <code>false</code> otherwise
+     */
+    default public boolean hasIN()
     {
-        return columns().size();
+        return false;
     }
 
     /**
-     * Checks if any of the underlying restriction use an {@code IN} operator.
-     * @return {@code true} if any of the underlying restriction is an IN, {@code false} otherwise
+     * Checks if any of the underlying restrictions is a CONTAINS / CONTAINS KEY restriction.
+     * @return <code>true</code> if any of the underlying restrictions is CONTAINS, <code>false</code> otherwise
      */
-    default boolean hasIN()
+    default public boolean hasContains()
     {
         return false;
     }
 
     /**
      * Checks if any of the underlying restrictions is a slice.
-     * @return {@code true} if any of the underlying restrictions is a slice, {@code false} otherwise
+     * @return <code>true</code> if any of the underlying restrictions is a slice, <code>false</code> otherwise
      */
-    default boolean hasSlice()
+    default public boolean hasSlice()
     {
         return false;
+    }
+
+    /**
+     * Checks if all of the underlying restrictions are EQ or IN restrictions.
+     *
+     * @return <code>true</code> if all of the underlying restrictions are EQ or IN restrictions,
+     * <code>false</code> otherwise
+     */
+    default public boolean hasOnlyEqualityRestrictions()
+    {
+        return true;
     }
 }

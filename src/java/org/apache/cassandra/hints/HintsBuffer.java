@@ -19,11 +19,7 @@ package org.apache.cassandra.hints;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.Queue;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentMap;
@@ -127,7 +123,7 @@ final class HintsBuffer
         if (bufferOffsets == null)
             return Collections.emptyIterator();
 
-        return new AbstractIterator<>()
+        return new AbstractIterator<ByteBuffer>()
         {
             private final ByteBuffer flyweight = slab.duplicate();
 
@@ -140,11 +136,12 @@ final class HintsBuffer
 
                 int totalSize = slab.getInt(offset) + ENTRY_OVERHEAD_SIZE;
 
-                return flyweight.clear().position(offset).limit(offset + totalSize);
+                return (ByteBuffer) flyweight.clear().position(offset).limit(offset + totalSize);
             }
         };
     }
 
+    @SuppressWarnings("resource")
     Allocation allocate(int hintSize)
     {
         int totalSize = hintSize + ENTRY_OVERHEAD_SIZE;
@@ -236,7 +233,7 @@ final class HintsBuffer
 
         private void write(Hint hint)
         {
-            ByteBuffer buffer = slab.duplicate().position(offset).limit(offset + totalSize);
+            ByteBuffer buffer = (ByteBuffer) slab.duplicate().position(offset).limit(offset + totalSize);
             CRC32 crc = new CRC32();
             int hintSize = totalSize - ENTRY_OVERHEAD_SIZE;
             try (DataOutputBuffer dop = new DataOutputBufferFixed(buffer))

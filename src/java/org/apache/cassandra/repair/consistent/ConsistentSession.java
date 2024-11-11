@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.repair.consistent;
 
+import java.net.InetAddress;
 import java.util.Collection;
 import java.util.EnumMap;
 import java.util.List;
@@ -44,11 +45,9 @@ import org.apache.cassandra.repair.messages.RepairOption;
 import org.apache.cassandra.repair.messages.StatusRequest;
 import org.apache.cassandra.repair.messages.StatusResponse;
 import org.apache.cassandra.repair.messages.ValidationRequest;
-import org.apache.cassandra.repair.SharedContext;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.tools.nodetool.RepairAdmin;
-import org.apache.cassandra.utils.TimeUUID;
 
 /**
  * Base class for consistent Local and Coordinator sessions
@@ -57,7 +56,7 @@ import org.apache.cassandra.utils.TimeUUID;
  * There are 4 stages to a consistent incremental repair.
  *
  * <h1>Repair prepare</h1>
- *  First, the normal {@link ActiveRepairService#prepareForRepair(TimeUUID, InetAddressAndPort, Set, RepairOption, boolean, List)} stuff
+ *  First, the normal {@link ActiveRepairService#prepareForRepair(UUID, InetAddressAndPort, Set, RepairOption, boolean, List)} stuff
  *  happens, which sends out {@link PrepareMessage} and creates a {@link ActiveRepairService.ParentRepairSession}
  *  on the coordinator and each of the neighbors.
  *
@@ -70,7 +69,7 @@ import org.apache.cassandra.utils.TimeUUID;
  *  {@code PREPARED}, and a {@link PrepareConsistentResponse} is sent to the coordinator indicating success or failure.
  *  If the pending anti-compaction fails, the local session state is set to {@code FAILED}.
  *  <p/>
- *  (see {@link LocalSessions#handlePrepareMessage(org.apache.cassandra.net.Message)}
+ *  (see {@link LocalSessions#handlePrepareMessage(InetAddressAndPort, PrepareConsistentRequest)}
  *  <p/>
  *  Once the coordinator recieves positive {@code PrepareConsistentResponse} messages from all the participants, the
  *  coordinator begins the normal repair process.
@@ -188,8 +187,7 @@ public abstract class ConsistentSession
     }
 
     private volatile State state;
-    public final SharedContext ctx;
-    public final TimeUUID sessionID;
+    public final UUID sessionID;
     public final InetAddressAndPort coordinator;
     public final ImmutableSet<TableId> tableIds;
     public final long repairedAt;
@@ -199,7 +197,6 @@ public abstract class ConsistentSession
     ConsistentSession(AbstractBuilder builder)
     {
         builder.validate();
-        this.ctx = builder.ctx;
         this.state = builder.state;
         this.sessionID = builder.sessionID;
         this.coordinator = builder.coordinator;
@@ -207,12 +204,6 @@ public abstract class ConsistentSession
         this.repairedAt = builder.repairedAt;
         this.ranges = ImmutableSet.copyOf(builder.ranges);
         this.participants = ImmutableSet.copyOf(builder.participants);
-    }
-
-    public boolean isCompleted()
-    {
-        State s = getState();
-        return s == State.FINALIZED || s == State.FAILED;
     }
 
     public State getState()
@@ -273,26 +264,20 @@ public abstract class ConsistentSession
 
     abstract static class AbstractBuilder
     {
-        private final SharedContext ctx;
         private State state;
-        private TimeUUID sessionID;
+        private UUID sessionID;
         private InetAddressAndPort coordinator;
         private Set<TableId> ids;
         private long repairedAt;
         private Collection<Range<Token>> ranges;
         private Set<InetAddressAndPort> participants;
 
-        protected AbstractBuilder(SharedContext ctx)
-        {
-            this.ctx = ctx;
-        }
-
         void withState(State state)
         {
             this.state = state;
         }
 
-        void withSessionID(TimeUUID sessionID)
+        void withSessionID(UUID sessionID)
         {
             this.sessionID = sessionID;
         }

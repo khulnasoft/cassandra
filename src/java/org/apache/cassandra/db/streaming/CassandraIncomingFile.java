@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.db.streaming;
 
+import java.io.IOException;
 import java.util.Objects;
 
 import com.google.common.base.Preconditions;
@@ -47,8 +48,6 @@ public class CassandraIncomingFile implements IncomingStream
     private volatile long size = -1;
     private volatile int numFiles = 1;
 
-    private volatile boolean isEntireSSTable = false;
-
     private static final Logger logger = LoggerFactory.getLogger(CassandraIncomingFile.class);
 
     public CassandraIncomingFile(ColumnFamilyStore cfs, StreamSession session, StreamMessageHeader header)
@@ -65,16 +64,14 @@ public class CassandraIncomingFile implements IncomingStream
     }
 
     @Override
-    public synchronized void read(DataInputPlus in, int version) throws Throwable
+    public synchronized void read(DataInputPlus in, int version) throws IOException
     {
         CassandraStreamHeader streamHeader = CassandraStreamHeader.serializer.deserialize(in, version);
         logger.debug("Incoming stream entireSSTable={} components={}", streamHeader.isEntireSSTable, streamHeader.componentManifest);
-        session.countStreamedIn(streamHeader.isEntireSSTable);
 
         IStreamReader reader;
         if (streamHeader.isEntireSSTable)
         {
-            isEntireSSTable = true;
             reader = new CassandraEntireSSTableStreamReader(header, streamHeader, session);
             numFiles = streamHeader.componentManifest.components().size();
         }
@@ -106,11 +103,6 @@ public class CassandraIncomingFile implements IncomingStream
         return numFiles;
     }
 
-    public boolean isEntireSSTable()
-    {
-        return isEntireSSTable;
-    }
-    
     @Override
     public TableId getTableId()
     {

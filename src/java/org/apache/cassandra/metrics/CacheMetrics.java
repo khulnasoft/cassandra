@@ -17,37 +17,44 @@
  */
 package org.apache.cassandra.metrics;
 
-import com.codahale.metrics.Gauge;
 import org.apache.cassandra.cache.CacheSize;
+import org.apache.cassandra.service.CacheService;
 
-import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
+import static org.apache.cassandra.config.CassandraRelevantProperties.USE_MICROMETER;
 
 /**
  * Metrics for {@code ICache}.
  */
-public class CacheMetrics extends AbstractCacheMetrics
+public interface CacheMetrics
 {
-    public static final String TYPE_NAME = "Cache";
-    /** Cache capacity in bytes */
-    public final Gauge<Long> capacity;
-
-    /** Total size of cache, in bytes */
-    public final Gauge<Long> size;
-
-    /** Total number of cache entries */
-    public final Gauge<Integer> entries;
-
-    /**
-     * Create metrics for given cache.
-     *
-     * @param type Type of Cache to identify metrics
-     * @param cache Weighted Cache to measure metrics
-     */
-    public CacheMetrics(String type, CacheSize cache)
+    static CacheMetrics create(CacheService.CacheType cacheType, CacheSize cache)
     {
-        super(new DefaultNameFactory(TYPE_NAME, type), type);
-        capacity = Metrics.register(factory.createMetricName("Capacity"), cache::capacity);
-        size = Metrics.register(factory.createMetricName("Size"), cache::weightedSize);
-        entries = Metrics.register(factory.createMetricName("Entries"), cache::size);
+        return USE_MICROMETER.getBoolean()
+               ? new MicrometerCacheMetrics(cacheType.micrometerMetricsPrefix(), cache)
+               : new CodahaleCacheMetrics(cacheType.toString(), cache);
     }
+
+    long requests();
+
+    long capacity();
+
+    long size();
+
+    long entries();
+
+    long hits();
+
+    long misses();
+
+    double hitRate();
+
+    double hitOneMinuteRate();
+    double hitFiveMinuteRate();
+    double hitFifteenMinuteRate();
+
+    double requestsFifteenMinuteRate();
+
+    void recordHits(int count);
+
+    void recordMisses(int count);
 }

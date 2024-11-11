@@ -19,51 +19,78 @@ package org.apache.cassandra;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import org.junit.After;
+import org.junit.BeforeClass;
 
+import org.apache.cassandra.auth.AuthKeyspace;
 import org.apache.cassandra.auth.AuthSchemaChangeListener;
 import org.apache.cassandra.auth.IAuthenticator;
 import org.apache.cassandra.auth.IAuthorizer;
-import org.apache.cassandra.auth.ICIDRAuthorizer;
 import org.apache.cassandra.auth.INetworkAuthorizer;
 import org.apache.cassandra.auth.IRoleManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.statements.schema.CreateTableStatement;
+import org.apache.cassandra.cql3.statements.schema.CreateTypeStatement;
 import org.apache.cassandra.cql3.statements.schema.IndexTarget;
 import org.apache.cassandra.db.RowUpdateBuilder;
-import org.apache.cassandra.db.marshal.*;
+import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.AsciiType;
+import org.apache.cassandra.db.marshal.BytesType;
+import org.apache.cassandra.db.marshal.CompositeType;
+import org.apache.cassandra.db.marshal.CounterColumnType;
+import org.apache.cassandra.db.marshal.DoubleType;
+import org.apache.cassandra.db.marshal.DynamicCompositeType;
+import org.apache.cassandra.db.marshal.Int32Type;
+import org.apache.cassandra.db.marshal.IntegerType;
+import org.apache.cassandra.db.marshal.LongType;
+import org.apache.cassandra.db.marshal.ReversedType;
+import org.apache.cassandra.db.marshal.TimeUUIDType;
+import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.db.marshal.UUIDType;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.index.StubIndex;
 import org.apache.cassandra.index.sasi.SASIIndex;
 import org.apache.cassandra.index.sasi.disk.OnDiskIndexBuilder;
-import org.apache.cassandra.schema.*;
+import org.apache.cassandra.schema.CachingParams;
+import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.CompactionParams;
+import org.apache.cassandra.schema.CompressionParams;
+import org.apache.cassandra.schema.UserFunctions;
+import org.apache.cassandra.schema.IndexMetadata;
+import org.apache.cassandra.schema.Indexes;
+import org.apache.cassandra.schema.KeyspaceMetadata;
+import org.apache.cassandra.schema.KeyspaceParams;
+import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.schema.SchemaTestUtil;
+import org.apache.cassandra.schema.SchemaTransformation;
+import org.apache.cassandra.schema.SchemaTransformations;
+import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.schema.Tables;
+import org.apache.cassandra.schema.Types;
+import org.apache.cassandra.schema.Views;
+import org.apache.cassandra.tools.nodetool.Compact;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.ALLOW_UNSAFE_JOIN;
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_COMPRESSION;
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_COMPRESSION_ALGO;
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
-
 public class SchemaLoader
 {
-    public static void loadSchema()
+    @BeforeClass
+    public static void loadSchema() throws ConfigurationException
     {
         prepareServer();
-    }
 
-    public static void prepareServer()
-    {
-        ServerTestUtils.prepareServer();
+        // Migrations aren't happy if gossiper is not started.  Even if we don't use migrations though,
+        // some tests now expect us to start gossip for them.
+        startGossiper();
     }
 
     @After
@@ -75,12 +102,18 @@ public class SchemaLoader
         Thread.sleep(10);
     }
 
+    public static void prepareServer()
+    {
+        ServerTestUtils.daemonInitialization();
+        ServerTestUtils.prepareServer();
+    }
+
     public static void startGossiper()
     {
         // skip shadow round and endpoint collision check in tests
-        ALLOW_UNSAFE_JOIN.setBoolean(true);
+        System.setProperty("cassandra.allow_unsafe_join", "true");
         if (!Gossiper.instance.isEnabled())
-            Gossiper.instance.start((int) (currentTimeMillis() / 1000));
+            Gossiper.instance.start((int) (System.currentTimeMillis() / 1000));
     }
 
     public static void schemaDefinition(String testName) throws ConfigurationException
@@ -97,12 +130,23 @@ public class SchemaLoader
         String ks7 = testName + "Keyspace7";
         String ks_kcs = testName + "KeyCacheSpace";
         String ks_rcs = testName + "RowCacheSpace";
+        String ks_ccs = testName + "CounterCacheSpace";
         String ks_nocommit = testName + "NoCommitlogSpace";
+        String ks_prsi = testName + "PerRowSecondaryIndex";
         String ks_cql = testName + "cql_keyspace";
         String ks_cql_replicated = testName + "cql_keyspace_replicated";
         String ks_with_transient = testName + "ks_with_transient";
 
         AbstractType bytes = BytesType.instance;
+
+        AbstractType<?> composite = CompositeType.getInstance(Arrays.asList(new AbstractType<?>[]{BytesType.instance, TimeUUIDType.instance, IntegerType.instance}));
+        AbstractType<?> compositeMaxMin = CompositeType.getInstance(Arrays.asList(new AbstractType<?>[]{BytesType.instance, IntegerType.instance}));
+        Map<Byte, AbstractType<?>> aliases = new HashMap<Byte, AbstractType<?>>();
+        aliases.put((byte)'b', BytesType.instance);
+        aliases.put((byte)'t', TimeUUIDType.instance);
+        aliases.put((byte)'B', ReversedType.getInstance(BytesType.instance));
+        aliases.put((byte)'T', ReversedType.getInstance(TimeUUIDType.instance));
+        AbstractType<?> dynamicComposite = DynamicCompositeType.getInstance(aliases);
 
         // Make it easy to test compaction
         Map<String, String> compactionOptions = new HashMap<String, String>();
@@ -234,7 +278,7 @@ public class SchemaLoader
         for (KeyspaceMetadata ksm : schema)
             SchemaTestUtil.announceNewKeyspace(ksm);
 
-        if (TEST_COMPRESSION.getBoolean())
+        if (Boolean.parseBoolean(System.getProperty("cassandra.test.compression", "false")))
             useCompression(schema, compressionParams(CompressionParams.DEFAULT_CHUNK_LENGTH));
     }
 
@@ -262,20 +306,17 @@ public class SchemaLoader
         SchemaTestUtil.announceNewKeyspace(KeyspaceMetadata.create(name, params, tables, Views.none(), types, UserFunctions.none()));
     }
 
-    public static void setupAuth(IRoleManager roleManager, IAuthenticator authenticator, IAuthorizer authorizer, INetworkAuthorizer networkAuthorizer,
-                                 ICIDRAuthorizer cidrAuthorizer)
+    public static void setupAuth(IRoleManager roleManager, IAuthenticator authenticator, IAuthorizer authorizer, INetworkAuthorizer networkAuthorizer)
     {
         DatabaseDescriptor.setRoleManager(roleManager);
         DatabaseDescriptor.setAuthenticator(authenticator);
         DatabaseDescriptor.setAuthorizer(authorizer);
         DatabaseDescriptor.setNetworkAuthorizer(networkAuthorizer);
-        DatabaseDescriptor.setCIDRAuthorizer(cidrAuthorizer);
+        SchemaTestUtil.announceNewKeyspace(AuthKeyspace.metadata());
         DatabaseDescriptor.getRoleManager().setup();
         DatabaseDescriptor.getAuthenticator().setup();
-        DatabaseDescriptor.getInternodeAuthenticator().setupInternode();
         DatabaseDescriptor.getAuthorizer().setup();
         DatabaseDescriptor.getNetworkAuthorizer().setup();
-        DatabaseDescriptor.getCIDRAuthorizer().setup();
         Schema.instance.registerListener(new AuthSchemaChangeListener());
     }
 
@@ -286,8 +327,7 @@ public class SchemaLoader
                                   ColumnIdentifier.getInterned(IntegerType.instance.fromString("42"), IntegerType.instance),
                                   UTF8Type.instance,
                                   ColumnMetadata.NO_POSITION,
-                                  ColumnMetadata.Kind.REGULAR,
-                                  null);
+                                  ColumnMetadata.Kind.REGULAR);
     }
 
     public static ColumnMetadata utf8Column(String ksName, String cfName)
@@ -297,8 +337,7 @@ public class SchemaLoader
                                   ColumnIdentifier.getInterned("fortytwo", true),
                                   UTF8Type.instance,
                                   ColumnMetadata.NO_POSITION,
-                                  ColumnMetadata.Kind.REGULAR,
-                                  null);
+                                  ColumnMetadata.Kind.REGULAR);
     }
 
     public static TableMetadata perRowIndexedCFMD(String ksName, String cfName)
@@ -712,7 +751,7 @@ public static TableMetadata.Builder clusteringSASICFMD(String ksName, String cfN
 
     public static CompressionParams getCompressionParameters(Integer chunkSize)
     {
-        if (TEST_COMPRESSION.getBoolean())
+        if (Boolean.parseBoolean(System.getProperty("cassandra.test.compression", "false")))
             return chunkSize != null ? compressionParams(chunkSize) : compressionParams(CompressionParams.DEFAULT_CHUNK_LENGTH);
 
         return CompressionParams.noCompression();
@@ -744,9 +783,40 @@ public static TableMetadata.Builder clusteringSASICFMD(String ksName, String cfN
         ServerTestUtils.cleanupSavedCaches();
     }
 
-    private static CompressionParams compressionParams(int chunkLength)
+    /**
+     * Simple method that allows creating a table given it's CQL definition.
+     *
+     * <p>The method also creates the keyspace of the table if needs be (using a simple strategy with 1 replica) and
+     * can also create a few UDT (also from their CQL definition) if needed for the created table.
+     *
+     * <p>This method does not complain if any of the created entity already exists.
+     */
+    public static void load(String keyspace, String schemaCQL, String... typesCQL)
     {
-        String algo = toLowerCaseLocalized(TEST_COMPRESSION_ALGO.getString());
+        KeyspaceMetadata ksm = KeyspaceMetadata.create(keyspace,
+                                                       KeyspaceParams.simple(1),
+                                                       Tables.none(),
+                                                       Views.none(),
+                                                       Types.none(),
+                                                       UserFunctions.none());
+        Schema.instance.transform(SchemaTransformations.addKeyspace(ksm, true));
+
+        for (String typeCQL : typesCQL)
+        {
+            Types types = Schema.instance.getKeyspaceMetadata(keyspace).types;
+            SchemaTransformation t = SchemaTransformations.addOrUpdateType(CreateTypeStatement.parse(typeCQL,
+                                                                                                     keyspace, types));
+            Schema.instance.transform(t);
+        }
+
+        Types types = Schema.instance.getKeyspaceMetadata(keyspace).types;
+        TableMetadata metadata = CreateTableStatement.parse(schemaCQL, keyspace, types).build();
+        Schema.instance.transform(SchemaTransformations.addTable(metadata, true));
+    }
+
+    public static CompressionParams compressionParams(int chunkLength)
+    {
+        String algo = System.getProperty("cassandra.test.compression.algo", "lz4").toLowerCase();
         switch (algo)
         {
             case "deflate":

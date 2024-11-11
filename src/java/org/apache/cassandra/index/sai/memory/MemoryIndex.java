@@ -18,43 +18,44 @@
 
 package org.apache.cassandra.index.sai.memory;
 
+import java.nio.ByteBuffer;
+import java.util.Iterator;
+import java.util.function.LongConsumer;
+
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.dht.AbstractBounds;
-import org.apache.cassandra.index.sai.QueryContext;
-import org.apache.cassandra.index.sai.StorageAttachedIndex;
-import org.apache.cassandra.index.sai.disk.format.IndexDescriptor;
-import org.apache.cassandra.index.sai.utils.IndexIdentifier;
-import org.apache.cassandra.index.sai.disk.v1.segment.SegmentMetadata;
+import org.apache.cassandra.index.sai.IndexContext;
 import org.apache.cassandra.index.sai.iterators.KeyRangeIterator;
 import org.apache.cassandra.index.sai.plan.Expression;
-import org.apache.cassandra.index.sai.utils.PrimaryKey;
+import org.apache.cassandra.index.sai.plan.Orderer;
+import org.apache.cassandra.index.sai.utils.PrimaryKeyWithSortKey;
 import org.apache.cassandra.index.sai.utils.PrimaryKeys;
+import org.apache.cassandra.utils.CloseableIterator;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.util.Iterator;
-import java.util.function.Function;
-
-public abstract class MemoryIndex implements MemtableOrdering
+public abstract class MemoryIndex
 {
-    protected final StorageAttachedIndex index;
+    protected final IndexContext indexContext;
 
-    protected MemoryIndex(StorageAttachedIndex index)
+    protected MemoryIndex(IndexContext indexContext)
     {
-        this.index = index;
+        this.indexContext = indexContext;
     }
 
-    public abstract long add(DecoratedKey key, Clustering<?> clustering, ByteBuffer value);
+    public abstract void add(DecoratedKey key,
+                             Clustering clustering,
+                             ByteBuffer value,
+                             LongConsumer onHeapAllocationsTracker,
+                             LongConsumer offHeapAllocationsTracker);
 
-    public abstract long update(DecoratedKey key, Clustering<?> clustering, ByteBuffer oldValue, ByteBuffer newValue);
+    public abstract CloseableIterator<PrimaryKeyWithSortKey> orderBy(Orderer orderer, Expression slice);
 
-    public abstract KeyRangeIterator search(QueryContext queryContext, Expression expression, AbstractBounds<PartitionPosition> keyRange);
+    public abstract KeyRangeIterator search(Expression expression, AbstractBounds<PartitionPosition> keyRange);
 
-    public abstract boolean isEmpty();
+    public abstract long estimateMatchingRowsCount(Expression expression, AbstractBounds<PartitionPosition> keyRange);
 
     public abstract ByteBuffer getMinTerm();
 
@@ -64,8 +65,4 @@ public abstract class MemoryIndex implements MemtableOrdering
      * Iterate all Term->PrimaryKeys mappings in sorted order
      */
     public abstract Iterator<Pair<ByteComparable, PrimaryKeys>> iterator();
-
-    public abstract SegmentMetadata.ComponentMetadataMap writeDirect(IndexDescriptor indexDescriptor,
-                                                                     IndexIdentifier indexIdentifier,
-                                                                     Function<PrimaryKey, Integer> postingTransformer) throws IOException;
 }

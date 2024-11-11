@@ -22,36 +22,34 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.common.annotations.VisibleForTesting;
 
+import org.apache.cassandra.db.DataRange;
+import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.commitlog.CommitLogPosition;
+import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.db.partitions.Partition;
+import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.rows.EncodingStats;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableMetadataRef;
-import org.github.jamm.Unmetered;
 
 public abstract class AbstractMemtable implements Memtable
 {
-    private final AtomicReference<LifecycleTransaction> flushTransaction = new AtomicReference<>(null);
     protected final AtomicLong currentOperations = new AtomicLong(0);
     protected final ColumnsCollector columnsCollector;
     protected final StatsCollector statsCollector = new StatsCollector();
     // The smallest timestamp for all partitions stored in this memtable
     protected AtomicLong minTimestamp = new AtomicLong(Long.MAX_VALUE);
-    // The smallest local deletion time for all partitions in this memtable
-    protected AtomicLong minLocalDeletionTime = new AtomicLong(Long.MAX_VALUE);
-    // Note: statsCollector has corresponding statistics to the two above, but starts with an epoch value which is not
-    // correct for their usage.
 
-    @Unmetered
+    private final AtomicReference<LifecycleTransaction> flushTransaction = new AtomicReference<>(null);
     protected TableMetadataRef metadata;
 
     public AbstractMemtable(TableMetadataRef metadataRef)
@@ -68,50 +66,36 @@ public abstract class AbstractMemtable implements Memtable
         this.minTimestamp = new AtomicLong(minTimestamp);
     }
 
-    @Override
     public TableMetadata metadata()
     {
         return metadata.get();
     }
 
-    @Override
-    public long operationCount()
+    public long getOperations()
     {
         return currentOperations.get();
     }
 
-    @Override
+    /**
+     * Returns the minTS if one available, otherwise NO_MIN_TIMESTAMP.
+     * 
+     * EncodingStats uses a synthetic epoch TS at 2015. We don't want to leak that (CASSANDRA-18118) so we return NO_MIN_TIMESTAMP instead.
+     * 
+     * @return The minTS or NO_MIN_TIMESTAMP if none available
+     */
     public long getMinTimestamp()
     {
         return minTimestamp.get() != EncodingStats.NO_STATS.minTimestamp ? minTimestamp.get() : NO_MIN_TIMESTAMP;
     }
 
-    @Override
-    public long getMinLocalDeletionTime()
-    {
-        return minLocalDeletionTime.get();
-    }
-
-    protected static void updateMin(AtomicLong minTracker, long newValue)
+    protected void updateMin(AtomicLong minTracker, long newValue)
     {
         while (true)
         {
-            long existing = minTracker.get();
-            if (existing <= newValue)
+            long memtableMinTimestamp = minTracker.get();
+            if (memtableMinTimestamp <= newValue)
                 break;
-            if (minTracker.compareAndSet(existing, newValue))
-                break;
-        }
-    }
-
-    protected static void updateMin(AtomicInteger minTracker, int newValue)
-    {
-        while (true)
-        {
-            int existing = minTracker.get();
-            if (existing <= newValue)
-                break;
-            if (minTracker.compareAndSet(existing, newValue))
+            if (minTracker.compareAndSet(memtableMinTimestamp, newValue))
                 break;
         }
     }
@@ -126,13 +110,11 @@ public abstract class AbstractMemtable implements Memtable
         return statsCollector.get();
     }
 
-    @Override
     public LifecycleTransaction getFlushTransaction()
     {
         return flushTransaction.get();
     }
 
-    @Override
     public LifecycleTransaction setFlushTransaction(LifecycleTransaction flushTransaction)
     {
         return this.flushTransaction.getAndSet(flushTransaction);
@@ -221,33 +203,28 @@ public abstract class AbstractMemtable implements Memtable
         }
     }
 
-    protected abstract class AbstractFlushablePartitionSet<P extends Partition> implements FlushablePartitionSet<P>
+    protected abstract class AbstractFlushCollection<P extends Partition> implements FlushCollection<P>
     {
-        @Override
         public long dataSize()
         {
             return getLiveDataSize();
         }
 
-        @Override
         public CommitLogPosition commitLogLowerBound()
         {
             return AbstractMemtable.this.getCommitLogLowerBound();
         }
 
-        @Override
         public LastCommitLogPosition commitLogUpperBound()
         {
             return AbstractMemtable.this.getFinalCommitLogUpperBound();
         }
 
-        @Override
         public EncodingStats encodingStats()
         {
             return AbstractMemtable.this.encodingStats();
         }
 
-        @Override
         public RegularAndStaticColumns columns()
         {
             return AbstractMemtable.this.columns();

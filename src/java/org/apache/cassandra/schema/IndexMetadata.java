@@ -36,20 +36,15 @@ import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.CqlBuilder;
 import org.apache.cassandra.cql3.statements.schema.IndexTarget;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.exceptions.RequestValidationException;
 import org.apache.cassandra.exceptions.UnknownIndexException;
 import org.apache.cassandra.index.Index;
 import org.apache.cassandra.index.internal.CassandraIndex;
 import org.apache.cassandra.index.sai.StorageAttachedIndex;
-import org.apache.cassandra.index.sasi.SASIIndex;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDSerializer;
-
-import static org.apache.cassandra.db.TypeSizes.sizeof;
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 
 /**
  * An immutable representation of secondary index metadata.
@@ -63,7 +58,6 @@ public final class IndexMetadata
 
 
     public static final Serializer serializer = new Serializer();
-    public static final MetadataSerializer metadataSerializer = new MetadataSerializer();
 
     /**
      * A mapping of user-friendly index names to their fully qualified index class names.
@@ -72,9 +66,7 @@ public final class IndexMetadata
 
     static
     {
-        indexNameAliases.put(StorageAttachedIndex.NAME, StorageAttachedIndex.class.getCanonicalName());
-        indexNameAliases.put(toLowerCaseLocalized(StorageAttachedIndex.class.getSimpleName()), StorageAttachedIndex.class.getCanonicalName());
-        indexNameAliases.put(SASIIndex.class.getSimpleName(), SASIIndex.class.getCanonicalName());
+        indexNameAliases.put(StorageAttachedIndex.class.getSimpleName(), StorageAttachedIndex.class.getCanonicalName());
     }
 
     public enum Kind
@@ -144,9 +136,8 @@ public final class IndexMetadata
             if (options == null || !options.containsKey(IndexTarget.CUSTOM_INDEX_OPTION_NAME))
                 throw new ConfigurationException(String.format("Required option missing for index %s : %s",
                                                                name, IndexTarget.CUSTOM_INDEX_OPTION_NAME));
-
-            // Get the fully qualified class name:
-            String className = getIndexClassName();
+            // Find any aliases to the fully qualified index class name:
+            String className = expandAliases(options.get(IndexTarget.CUSTOM_INDEX_OPTION_NAME));
 
             Class<Index> indexerClass = FBUtilities.classForName(className, "custom indexer");
             if (!Index.class.isAssignableFrom(indexerClass))
@@ -158,11 +149,13 @@ public final class IndexMetadata
     public String getIndexClassName()
     {
         if (isCustom())
-        {
-            String className = options.get(IndexTarget.CUSTOM_INDEX_OPTION_NAME);
-            return indexNameAliases.getOrDefault(toLowerCaseLocalized(className), className);
-        }
+            return expandAliases(options.get(IndexTarget.CUSTOM_INDEX_OPTION_NAME));
         return CassandraIndex.class.getName();
+    }
+
+    public static String expandAliases(String className)
+    {
+        return indexNameAliases.getOrDefault(className, className);
     }
 
     private void validateCustomIndexOptions(TableMetadata table, Class<? extends Index> indexerClass, Map<String, String> options)
@@ -194,11 +187,11 @@ public final class IndexMetadata
         }
         catch (InvocationTargetException e)
         {
-            if (e.getTargetException() instanceof InvalidRequestException)
-                throw (InvalidRequestException) e.getTargetException();
+            if (e.getTargetException() instanceof RequestValidationException)
+                throw (RequestValidationException) e.getTargetException();
             if (e.getTargetException() instanceof ConfigurationException)
                 throw (ConfigurationException) e.getTargetException();
-            throw new ConfigurationException("Failed to validate custom indexer options: " + options);
+            throw new ConfigurationException("Failed to validate custom indexer options: " + options, e);
         }
         catch (ConfigurationException e)
         {
@@ -315,10 +308,6 @@ public final class IndexMetadata
                    .append(" (")
                    .append(options.get(IndexTarget.TARGET_OPTION_NAME))
                    .append(')');
-
-            builder.append(" USING '")
-                   .append(CassandraIndex.NAME)
-                   .append("'");
         }
         builder.append(';');
     }
@@ -339,43 +328,6 @@ public final class IndexMetadata
         public long serializedSize(IndexMetadata metadata, int version)
         {
             return UUIDSerializer.serializer.serializedSize(metadata.id, version);
-        }
-    }
-
-    public static class MetadataSerializer implements org.apache.cassandra.tcm.serialization.MetadataSerializer<IndexMetadata>
-    {
-        public void serialize(IndexMetadata t, DataOutputPlus out, Version version) throws IOException
-        {
-            out.writeUTF(t.name);
-            out.writeUTF(t.kind.name());
-            out.writeInt(t.options.size());
-            for (Map.Entry<String, String> entry : t.options.entrySet())
-            {
-                out.writeUTF(entry.getKey());
-                out.writeUTF(entry.getValue());
-            }
-        }
-
-        public IndexMetadata deserialize(DataInputPlus in, Version version) throws IOException
-        {
-            String name = in.readUTF();
-            Kind kind = Kind.valueOf(in.readUTF());
-            int size = in.readInt();
-
-            Map<String, String> options = Maps.newHashMapWithExpectedSize(size);
-            for (int i = 0; i < size; i++)
-                options.put(in.readUTF(), in.readUTF());
-            return new IndexMetadata(name, options, kind);
-        }
-
-        public long serializedSize(IndexMetadata t, Version version)
-        {
-            int size = sizeof(t.name) + sizeof(t.kind.name()) + sizeof(t.options.size());
-
-            for (Map.Entry<String, String> entry : t.options.entrySet())
-                size = size + sizeof(entry.getKey()) + sizeof(entry.getValue());
-
-            return size;
         }
     }
 }

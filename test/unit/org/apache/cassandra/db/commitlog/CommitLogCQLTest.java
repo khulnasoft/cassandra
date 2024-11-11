@@ -21,9 +21,11 @@ package org.apache.cassandra.db.commitlog;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.Assert;
@@ -32,6 +34,8 @@ import org.junit.Test;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.db.ColumnFamilyStore;
+
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 
 public class CommitLogCQLTest extends CQLTester
 {
@@ -52,15 +56,15 @@ public class CommitLogCQLTest extends CQLTester
         // Calling switchMemtable directly applies Flush even though memtable is empty. This can happen with some races
         // (flush with recycling by segment manager). It should still tell commitlog that the memtable's region is clean.
         // CASSANDRA-12436
-        cfs.switchMemtable(ColumnFamilyStore.FlushReason.UNIT_TESTS);
+        cfs.switchMemtable(UNIT_TESTS);
 
         execute("INSERT INTO %s (idx, data) VALUES (?, ?)", 15, Integer.toString(17));
 
-        Collection<CommitLogSegment> active = new ArrayList<>(CommitLog.instance.segmentManager.getActiveSegments());
+        Collection<CommitLogSegment> active = new ArrayList<>(CommitLog.instance.getSegmentManager().getActiveSegments());
         CommitLog.instance.forceRecycleAllSegments();
 
         // If one of the previous segments remains, it wasn't clean.
-        active.retainAll(CommitLog.instance.segmentManager.getActiveSegments());
+        active.retainAll(CommitLog.instance.getSegmentManager().getActiveSegments());
         assert active.isEmpty();
     }
     
@@ -89,7 +93,7 @@ public class CommitLogCQLTest extends CQLTester
                             {
                                 QueryProcessor.executeInternal(stmt, i, Integer.toString(i));
                             }
-                            cfs.dumpMemtable();
+                            cfs.dumpMemtable(ColumnFamilyStore.FlushReason.UNIT_TESTS);
                         }
                     }
                     catch (Throwable t)

@@ -45,7 +45,7 @@ public class ClientResourceLimits
 
     public static final NonBlockingRateLimiter GLOBAL_REQUEST_LIMITER = new NonBlockingRateLimiter(getNativeTransportMaxRequestsPerSecond());
 
-    public enum Overload { NONE, REQUESTS, BYTES_IN_FLIGHT, QUEUE_TIME }
+    public enum Overload { NONE, REQUESTS, BYTES_IN_FLIGHT }
     
     public static Allocator getAllocatorForEndpoint(InetAddress endpoint)
     {
@@ -61,12 +61,12 @@ public class ClientResourceLimits
 
     public static long getGlobalLimit()
     {
-        return DatabaseDescriptor.getNativeTransportMaxRequestDataInFlightInBytes();
+        return DatabaseDescriptor.getNativeTransportMaxConcurrentRequestsInBytes();
     }
 
     public static void setGlobalLimit(long newLimit)
     {
-        DatabaseDescriptor.setNativeTransportConcurrentRequestDataInFlightInBytes(newLimit);
+        DatabaseDescriptor.setNativeTransportMaxConcurrentRequestsInBytes(newLimit);
         long existingLimit = GLOBAL_LIMIT.setLimit(getGlobalLimit());
         logger.info("Changed native_max_transport_requests_in_bytes from {} to {}", existingLimit, newLimit);
     }
@@ -78,13 +78,13 @@ public class ClientResourceLimits
 
     public static long getEndpointLimit()
     {
-        return DatabaseDescriptor.getNativeTransportMaxRequestDataInFlightPerIpInBytes();
+        return DatabaseDescriptor.getNativeTransportMaxConcurrentRequestsInBytesPerIp();
     }
 
     public static void setEndpointLimit(long newLimit)
     {
-        long existingLimit = DatabaseDescriptor.getNativeTransportMaxRequestDataInFlightPerIpInBytes();
-        DatabaseDescriptor.setNativeTransportMaxRequestDataInFlightPerIpInBytes(newLimit); // ensure new instances get the new limit
+        long existingLimit = DatabaseDescriptor.getNativeTransportMaxConcurrentRequestsInBytesPerIp();
+        DatabaseDescriptor.setNativeTransportMaxConcurrentRequestsInBytesPerIp(newLimit); // ensure new instances get the new limit
         for (Allocator allocator : PER_ENDPOINT_ALLOCATORS.values())
             existingLimit = allocator.endpointAndGlobal.endpoint().setLimit(newLimit);
         logger.info("Changed native_max_transport_requests_in_bytes_per_ip from {} to {}", existingLimit, newLimit);

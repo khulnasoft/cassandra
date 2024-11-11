@@ -26,19 +26,15 @@ import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
  */
 public class ReadRepairMetrics
 {
-    public static final String TYPE_NAME = "ReadRepair";
-    private static final MetricNameFactory factory = new DefaultNameFactory(TYPE_NAME);
+    private static final MetricNameFactory factory = new DefaultNameFactory("ReadRepair");
 
     public static final Meter repairedBlocking = Metrics.meter(factory.createMetricName("RepairedBlocking"));
     public static final Meter reconcileRead = Metrics.meter(factory.createMetricName("ReconcileRead"));
 
-    /** @deprecated See CASSANDRA-13910 */
-    @Deprecated(since = "4.0")
+    @Deprecated
     public static final Meter repairedBackground = Metrics.meter(factory.createMetricName("RepairedBackground"));
-    /** @deprecated See CASSANDRA-13910 */
-    @Deprecated(since = "4.0")
+    @Deprecated
     public static final Meter attempted = Metrics.meter(factory.createMetricName("Attempted"));
-    public static final Meter timedOut = Metrics.meter(factory.createMetricName("RepairTimedOut"));
 
     // Incremented when additional requests were sent during blocking read repair due to unavailable or slow nodes
     public static final Meter speculatedRead = Metrics.meter(factory.createMetricName("SpeculatedRead"));

@@ -17,15 +17,14 @@
  */
 package org.apache.cassandra.db.compaction;
 
-import org.apache.cassandra.utils.Shared;
-
-@Shared
 public class CompactionInterruptedException extends RuntimeException
 {
     private static final long serialVersionUID = -8651427062512310398L;
 
-    public CompactionInterruptedException(Object info)
+    public CompactionInterruptedException(AbstractTableOperation.OperationProgress info, TableOperation.StopTrigger trigger)
     {
-        super("Compaction interrupted: " + info);
+        super(String.format("Compaction interrupted due to %s: %s",
+                            (trigger == null ? TableOperation.StopTrigger.NONE : trigger).toString().toLowerCase(),
+                            info));
     }
 }

@@ -17,14 +17,9 @@
  */
 package org.apache.cassandra.auth;
 
-import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-import com.google.common.collect.ImmutableSet;
-
-import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.cql3.statements.schema.CreateTableStatement;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.SchemaConstants;
@@ -33,15 +28,12 @@ import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.Tables;
 
 import static java.lang.String.format;
-import static org.apache.cassandra.config.CassandraRelevantProperties.SUPERUSER_SETUP_DELAY_MS;
 
 public final class AuthKeyspace
 {
     private AuthKeyspace()
     {
     }
-
-    public static final int DEFAULT_RF = CassandraRelevantProperties.SYSTEM_AUTH_DEFAULT_RF.getInt();
 
     /**
      * Generation is used as a timestamp for automatic table creation on startup.
@@ -58,96 +50,52 @@ public final class AuthKeyspace
     public static final String ROLE_PERMISSIONS = "role_permissions";
     public static final String RESOURCE_ROLE_INDEX = "resource_role_permissons_index";
     public static final String NETWORK_PERMISSIONS = "network_permissions";
-    public static final String CIDR_PERMISSIONS = "cidr_permissions";
-    public static final String CIDR_GROUPS = "cidr_groups";
-    public static final String IDENTITY_TO_ROLES = "identity_to_role";
-    public static final Set<String> TABLE_NAMES = ImmutableSet.of(ROLES, ROLE_MEMBERS, ROLE_PERMISSIONS,
-                                                                  RESOURCE_ROLE_INDEX, NETWORK_PERMISSIONS,
-                                                                  CIDR_PERMISSIONS, CIDR_GROUPS,
-                                                                  IDENTITY_TO_ROLES);
 
-    public static final long SUPERUSER_SETUP_DELAY = SUPERUSER_SETUP_DELAY_MS.getLong();
+    public static final long SUPERUSER_SETUP_DELAY = Long.getLong("cassandra.superuser_setup_delay_ms", 10000);
 
-    public static String ROLES_CQL = "CREATE TABLE IF NOT EXISTS %s ("
-                                     + "role text,"
-                                     + "is_superuser boolean,"
-                                     + "can_login boolean,"
-                                     + "salted_hash text,"
-                                     + "member_of set<text>,"
-                                     + "PRIMARY KEY(role))";
     private static final TableMetadata Roles =
         parse(ROLES,
               "role definitions",
-              ROLES_CQL);
+              "CREATE TABLE %s ("
+              + "role text,"
+              + "is_superuser boolean,"
+              + "can_login boolean,"
+              + "salted_hash text,"
+              + "member_of set<text>,"
+              + "PRIMARY KEY(role))");
 
-    public static String IDENTITY_TO_ROLES_CQL = "CREATE TABLE IF NOT EXISTS %s ("
-                                                 + "identity text," // opaque identity string for use by role authenticators
-                                                 + "role text,"
-                                                 + "PRIMARY KEY(identity))";
-
-    private static final TableMetadata IdentityToRoles =
-        parse(IDENTITY_TO_ROLES,
-              "mtls authorized identities lookup table",
-              IDENTITY_TO_ROLES_CQL
-          );
-
-    public static String ROLE_MEMBERS_CQL = "CREATE TABLE IF NOT EXISTS %s ("
-                                            + "role text,"
-                                            + "member text,"
-                                            + "PRIMARY KEY(role, member))";
     private static final TableMetadata RoleMembers =
         parse(ROLE_MEMBERS,
               "role memberships lookup table",
-              ROLE_MEMBERS_CQL);
+              "CREATE TABLE %s ("
+              + "role text,"
+              + "member text,"
+              + "PRIMARY KEY(role, member))");
 
-    public static String ROLE_PERMISSIONS_CQL = "CREATE TABLE IF NOT EXISTS %s ("
-                                                + "role text,"
-                                                + "resource text,"
-                                                + "permissions set<text>,"
-                                                + "PRIMARY KEY(role, resource))";
     private static final TableMetadata RolePermissions =
         parse(ROLE_PERMISSIONS,
               "permissions granted to db roles",
-              ROLE_PERMISSIONS_CQL);
+              "CREATE TABLE %s ("
+              + "role text,"
+              + "resource text,"
+              + "permissions set<text>,"
+              + "PRIMARY KEY(role, resource))");
 
-    public static String RESOURCE_ROLE_INDEX_CQL = "CREATE TABLE IF NOT EXISTS %s ("
-                                               + "resource text,"
-                                               + "role text,"
-                                               + "PRIMARY KEY(resource, role))";
     private static final TableMetadata ResourceRoleIndex =
         parse(RESOURCE_ROLE_INDEX,
               "index of db roles with permissions granted on a resource",
-              RESOURCE_ROLE_INDEX_CQL);
+              "CREATE TABLE %s ("
+              + "resource text,"
+              + "role text,"
+              + "PRIMARY KEY(resource, role))");
 
-    public static String NETWORK_PERMISSIONS_CQL = "CREATE TABLE IF NOT EXISTS %s ("
-                                                   + "role text, "
-                                                   + "dcs frozen<set<text>>, "
-                                                   + "PRIMARY KEY(role))";
     private static final TableMetadata NetworkPermissions =
         parse(NETWORK_PERMISSIONS,
               "user network permissions",
-              NETWORK_PERMISSIONS_CQL);
-
-    public static String CIDR_PERMISSIONS_CQL = "CREATE TABLE %s ("
-                                                + "role text, "
-                                                + "cidr_groups frozen<set<text>>, "
-                                                + "PRIMARY KEY(role))";
-
-    private static final TableMetadata CIDRPermissions =
-    parse(CIDR_PERMISSIONS,
-          "user cidr permissions",
-          CIDR_PERMISSIONS_CQL
-    );
-
-    public static String CIDR_GROUPS_CQL = "CREATE TABLE %s ("
-                                           + "cidr_group text, "
-                                           + "cidrs frozen<set<tuple<inet, smallint>>>, "
-                                           + "PRIMARY KEY(cidr_group))";
-    private static final TableMetadata CIDRGroups =
-    parse(CIDR_GROUPS,
-          "cidr groups to cidrs mapping",
-          CIDR_GROUPS_CQL
-    );
+              "CREATE TABLE %s ("
+              + "role text, "
+              + "dcs frozen<set<text>>, "
+              + "PRIMARY KEY(role))");
 
     private static TableMetadata parse(String name, String description, String cql)
     {
@@ -161,9 +109,7 @@ public final class AuthKeyspace
     public static KeyspaceMetadata metadata()
     {
         return KeyspaceMetadata.create(SchemaConstants.AUTH_KEYSPACE_NAME,
-                                       KeyspaceParams.simple(Math.max(DEFAULT_RF, DatabaseDescriptor.getDefaultKeyspaceRF())),
-                                       Tables.of(Roles, RoleMembers, RolePermissions,
-                                                 ResourceRoleIndex, NetworkPermissions,
-                                                 CIDRPermissions, CIDRGroups, IdentityToRoles));
+                                       KeyspaceParams.systemDistributed(1),
+                                       Tables.of(Roles, RoleMembers, RolePermissions, ResourceRoleIndex, NetworkPermissions));
     }
 }

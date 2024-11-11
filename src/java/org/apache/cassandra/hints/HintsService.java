@@ -21,39 +21,35 @@ import java.net.UnknownHostException;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
-import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.io.util.File;
-import org.apache.cassandra.locator.ReplicaLayout;
-import org.apache.cassandra.utils.concurrent.Future;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.ParameterizedClass;
-import org.apache.cassandra.gms.FailureDetector;
-import org.apache.cassandra.gms.IFailureDetector;
+import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.locator.EndpointsForToken;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.locator.ReplicaLayout;
 import org.apache.cassandra.metrics.HintedHandoffMetrics;
 import org.apache.cassandra.metrics.StorageMetrics;
-import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.service.StorageProxy;
-import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.MBeanWrapper;
-import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static com.google.common.collect.Iterables.filter;
 import static com.google.common.collect.Iterables.transform;
@@ -64,7 +60,6 @@ import static com.google.common.collect.Iterables.transform;
  * - a single-threaded write executor
  * - a multi-threaded dispatch executor
  * - the buffer pool for writing hints into
- * - an optional scheduled task to clean up the applicable hints files
  *
  * The front-end for everything hints related.
  */
@@ -89,17 +84,16 @@ public final class HintsService implements HintsServiceMBean
 
     private final ScheduledFuture triggerFlushingFuture;
     private volatile ScheduledFuture triggerDispatchFuture;
-    private final ScheduledFuture triggerCleanupFuture;
 
     public final HintedHandoffMetrics metrics;
 
     private HintsService()
     {
-        this(FailureDetector.instance);
+        this(HintsEndpointProvider.instance::isAlive);
     }
 
     @VisibleForTesting
-    HintsService(IFailureDetector failureDetector)
+    HintsService(Predicate<UUID> isAlive)
     {
         File hintsDirectory = DatabaseDescriptor.getHintsDirectory();
         int maxDeliveryThreads = DatabaseDescriptor.getMaxHintsDeliveryThreads();
@@ -111,7 +105,7 @@ public final class HintsService implements HintsServiceMBean
         bufferPool = new HintsBufferPool(bufferSize, writeExecutor::flushBuffer);
 
         isDispatchPaused = new AtomicBoolean(true);
-        dispatchExecutor = new HintsDispatchExecutor(hintsDirectory, maxDeliveryThreads, isDispatchPaused, failureDetector::isAlive);
+        dispatchExecutor = new HintsDispatchExecutor(hintsDirectory, maxDeliveryThreads, isDispatchPaused, isAlive);
 
         // periodically empty the current content of the buffers
         int flushPeriod = DatabaseDescriptor.getHintsFlushPeriodInMS();
@@ -119,11 +113,6 @@ public final class HintsService implements HintsServiceMBean
                                                                                         flushPeriod,
                                                                                         flushPeriod,
                                                                                         TimeUnit.MILLISECONDS);
-
-        // periodically cleanup the expired hints
-        HintsCleanupTrigger cleanupTrigger = new HintsCleanupTrigger(catalog, dispatchExecutor);
-        triggerCleanupFuture = ScheduledExecutors.optionalTasks.scheduleWithFixedDelay(cleanupTrigger, 1, 1, TimeUnit.HOURS);
-
         metrics = new HintedHandoffMetrics();
     }
 
@@ -163,6 +152,9 @@ public final class HintsService implements HintsServiceMBean
         if (isShutDown)
             throw new IllegalStateException("HintsService is shut down and can't accept new hints");
 
+        if (hostIds.isEmpty())
+            return;
+
         // we have to make sure that the HintsStore instances get properly initialized - otherwise dispatch will not trigger
         catalog.maybeLoadStores(hostIds);
 
@@ -187,16 +179,16 @@ public final class HintsService implements HintsServiceMBean
      */
     void writeForAllReplicas(Hint hint)
     {
-        String keyspaceName = hint.mutation.getKeyspaceName();
-        Token token = hint.mutation.key().getToken();
+        String keyspaceName = hint.mutation().getKeyspaceName();
+        Token token = hint.mutation().key().getToken();
 
         EndpointsForToken replicas = ReplicaLayout.forTokenWriteLiveAndDown(Keyspace.open(keyspaceName), token).all();
 
         // judicious use of streams: eagerly materializing probably cheaper
         // than performing filters / translations 2x extra via Iterables.filter/transform
         List<UUID> hostIds = replicas.stream()
-                .filter(replica -> StorageProxy.shouldHint(replica, false))
-                .map(replica -> StorageService.instance.getHostIdForEndpoint(replica.endpoint()))
+                .filter(StorageProxy::shouldHint)
+                .map(replica -> HintsEndpointProvider.instance.hostForEndpoint(replica.endpoint()))
                 .collect(Collectors.toList());
 
         write(hostIds, hint);
@@ -246,19 +238,6 @@ public final class HintsService implements HintsServiceMBean
     }
 
     /**
-     * Get the total size in bytes of all the hints files associating with the host on disk.
-     * @param hostId belonging host
-     * @return total file size, in bytes
-     */
-    public long getTotalHintsSize(UUID hostId)
-    {
-        HintsStore store = catalog.getNullable(hostId);
-        if (store == null)
-            return 0;
-        return store.getTotalFileSize();
-    }
-
-    /**
      * Gracefully and blockingly shut down the service.
      *
      * Will abort dispatch sessions that are currently in progress (which is okay, it's idempotent),
@@ -276,8 +255,6 @@ public final class HintsService implements HintsServiceMBean
 
         triggerFlushingFuture.cancel(false);
 
-        triggerCleanupFuture.cancel(false);
-
         writeExecutor.flushBufferPool(bufferPool).get();
         writeExecutor.closeAllWriters().get();
 
@@ -286,32 +263,6 @@ public final class HintsService implements HintsServiceMBean
 
         HintsServiceDiagnostics.dispatchingShutdown(this);
         bufferPool.close();
-    }
-
-    /**
-     * Returns all pending hints that this node has.
-     *
-     * @return a list of {@link PendingHintsInfo}
-     */
-    public List<PendingHintsInfo> getPendingHintsInfo()
-    {
-        return catalog.stores()
-                      .filter(HintsStore::hasFiles)
-                      .map(HintsStore::getPendingHintsInfo)
-                      .filter(Objects::nonNull)
-                      .collect(Collectors.toList());
-    }
-
-    /**
-     * Returns all pending hints that this node has.
-     *
-     * @return a list of maps with endpoints' ids, total number of hint files, their oldest and newest timestamps.
-     */
-    public List<Map<String, String>> getPendingHints()
-    {
-        return getPendingHintsInfo().stream()
-                                    .map(PendingHintsInfo::asMap)
-                                    .collect(Collectors.toList());
     }
 
     /**
@@ -348,7 +299,7 @@ public final class HintsService implements HintsServiceMBean
      */
     public void deleteAllHintsForEndpoint(InetAddressAndPort target)
     {
-        UUID hostId = StorageService.instance.getHostIdForEndpoint(target);
+        UUID hostId = HintsEndpointProvider.instance.hostForEndpoint(target);
         if (hostId == null)
             throw new IllegalArgumentException("Can't delete hints for unknown address " + target);
         catalog.deleteAllHints(hostId);
@@ -385,11 +336,7 @@ public final class HintsService implements HintsServiceMBean
             flushFuture.get();
             closeFuture.get();
         }
-        catch (InterruptedException e)
-        {
-            throw new UncheckedInterruptedException(e);
-        }
-        catch (ExecutionException e)
+        catch (InterruptedException | ExecutionException e)
         {
             throw new RuntimeException(e);
         }
@@ -426,11 +373,7 @@ public final class HintsService implements HintsServiceMBean
             flushFuture.get();
             closeFuture.get();
         }
-        catch (InterruptedException e)
-        {
-            throw new UncheckedInterruptedException(e);
-        }
-        catch (ExecutionException e)
+        catch (InterruptedException | ExecutionException e)
         {
             throw new RuntimeException(e);
         }
@@ -445,15 +388,38 @@ public final class HintsService implements HintsServiceMBean
     }
 
     /**
-     * Find the oldest hint written for a particular node by looking into descriptors
-     * and current open writer, if any.
-     *
-     * @param hostId UUID of the node to check its hints.
-     * @return the oldest hint of the given host id or Long.MAX_VALUE when not found
+     * Get the total size in bytes of all the hints files on disk.
+     * @return total file size, in bytes
      */
-    public long findOldestHintTimestamp(UUID hostId)
+    public long getTotalHintsSize()
     {
-        return catalog.get(hostId).findOldestHintTimestamp();
+        return catalog.stores().mapToLong(HintsStore::getTotalFileSize).sum();
+    }
+
+    /**
+     * @return the number of all hint files on disk, including corrupted files
+     */
+    public int getTotalFilesNum()
+    {
+        return catalog.stores().mapToInt(HintsStore::getTotalFilesNum).sum();
+    }
+
+    /**
+     * @return the number of corrupted hint files on disk.
+     */
+    public int getCorruptedFilesNum()
+    {
+        return catalog.stores().mapToInt(HintsStore::getCorruptedFilesNum).sum();
+    }
+
+    /**
+     * Checks hints files total size on disk exceeds the total maximum.
+     * @return true if the max is exceeded
+     */
+    public boolean exceedsMaxHintsSize()
+    {
+        long maxTotalHintsSize = DatabaseDescriptor.getMaxTotalHintsSize();
+        return maxTotalHintsSize > 0 && getTotalHintsSize() > maxTotalHintsSize;
     }
 
     HintsCatalog getCatalog()
@@ -473,5 +439,29 @@ public final class HintsService implements HintsServiceMBean
     public boolean isDispatchPaused()
     {
         return isDispatchPaused.get();
+    }
+
+    @VisibleForTesting
+    public HintsDispatchExecutor dispatcherExecutor()
+    {
+        return dispatchExecutor;
+    }
+
+    // used by CNDB
+    public void updateDispatcherConcurrency(int concurrency)
+    {
+        dispatchExecutor.updateDispatcherConcurrency(concurrency);
+    }
+
+    // used by CNDB
+    public int getDispatcherCorePoolSize()
+    {
+        return dispatchExecutor.getDispatcherCorePoolSize();
+    }
+
+    // used by CNDB
+    public int getDispatcherMaxPoolSize()
+    {
+        return dispatchExecutor.getDispatcherMaxPoolSize();
     }
 }

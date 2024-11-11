@@ -19,9 +19,11 @@ package org.apache.cassandra.index.sai.disk.v1.postings;
 
 import java.io.IOException;
 
-import org.apache.cassandra.index.sai.postings.OrdinalPostingList;
-import org.apache.cassandra.index.sai.postings.PostingList;
+import com.google.common.base.Preconditions;
+
+import org.apache.cassandra.index.sai.disk.PostingList;
 import org.apache.lucene.util.FixedBitSet;
+
 
 /**
  * A wrapper that iterates over a delegate {@link PostingList}, filtering out postings at
@@ -37,12 +39,15 @@ public class FilteringPostingList implements PostingList
     public FilteringPostingList(FixedBitSet filter, OrdinalPostingList delegate)
     {
         cardinality = filter.cardinality();
+
+        Preconditions.checkArgument(cardinality > 0, "Filter must contain at least one match.");
+
         this.filter = filter;
         this.delegate = delegate;
     }
 
     @Override
-    public void close()
+    public void close() throws IOException
     {
         delegate.close();
     }
@@ -52,11 +57,11 @@ public class FilteringPostingList implements PostingList
      * @return the segment row ID of the next match
      */
     @Override
-    public long nextPosting() throws IOException
+    public int nextPosting() throws IOException
     {
         while (true)
         {
-            long segmentRowId = delegate.nextPosting();
+            int segmentRowId = delegate.nextPosting();
 
             if (segmentRowId == PostingList.END_OF_STREAM)
             {
@@ -71,23 +76,23 @@ public class FilteringPostingList implements PostingList
     }
 
     @Override
-    public long size()
+    public int size()
     {
         return cardinality;
     }
 
     @Override
-    public  long advance(long targetRowID) throws IOException
+    public int advance(int targetRowID) throws IOException
     {
-        long segmentRowId = delegate.advance(targetRowID);
+        int segmentRowId = delegate.advance(targetRowID);
 
         if (segmentRowId == PostingList.END_OF_STREAM)
         {
             return PostingList.END_OF_STREAM;
         }
 
-        // these are always for leaf balanced tree postings so the max is 1024
-        position = (int)delegate.getOrdinal();
+        // these are always for leaf kdtree postings so the max is 1024
+        position = delegate.getOrdinal();
 
         // If the ordinal of the ID we just read satisfies the filter, just return it...
         if (filter.get(position - 1))

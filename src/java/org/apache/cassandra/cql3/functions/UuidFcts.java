@@ -22,6 +22,7 @@ import java.util.*;
 
 import org.apache.cassandra.db.marshal.UUIDType;
 import org.apache.cassandra.serializers.UUIDSerializer;
+import org.apache.cassandra.transport.ProtocolVersion;
 
 public abstract class UuidFcts
 {
@@ -32,8 +33,7 @@ public abstract class UuidFcts
 
     public static final NativeFunction uuidFct = new NativeScalarFunction("uuid", UUIDType.instance)
     {
-        @Override
-        public ByteBuffer execute(Arguments arguments)
+        public ByteBuffer execute(ProtocolVersion protocolVersion, List<ByteBuffer> parameters)
         {
             return UUIDSerializer.instance.serialize(UUID.randomUUID());
         }

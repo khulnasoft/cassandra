@@ -187,18 +187,11 @@ public class MatcherResponse
                         Message<?> response = fnResponse.apply(message, to);
                         if (response != null)
                         {
-                            if (response.verb().isResponse())
-                            {
-                                RequestCallbacks.CallbackInfo cb = MessagingService.instance().callbacks.get(message.id(), to);
-                                if (cb != null)
-                                    cb.callback.onResponse(response);
-                                else
-                                    processResponse(response);
-                            }
+                            RequestCallbacks.CallbackInfo cb = MessagingService.instance().callbacks.get(message.id(), to);
+                            if (cb != null)
+                                cb.callback.onResponse(response);
                             else
-                            {
                                 processResponse(response);
-                            }
 
                             spy.matchingResponse(response);
                         }

@@ -63,7 +63,7 @@ import org.apache.cassandra.index.sasi.disk.PerSSTableIndexWriter;
 import org.apache.cassandra.index.sasi.plan.SASIIndexSearcher;
 import org.apache.cassandra.index.transactions.IndexTransaction;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.SSTableFlushObserver;
+import org.apache.cassandra.io.sstable.format.SSTableFlushObserver;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.notifications.INotification;
 import org.apache.cassandra.notifications.INotificationConsumer;
@@ -76,7 +76,6 @@ import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.concurrent.OpOrder;
@@ -135,7 +134,7 @@ public class SASIIndex implements Index, INotificationConsumer
 
         SortedMap<SSTableReader, Map<ColumnMetadata, ColumnIndex>> toRebuild = new TreeMap<>(SSTableReader.idComparator);
 
-        for (SSTableReader sstable : index.init(tracker.getView().liveSSTables()))
+        for (SSTableReader sstable : index.init(tracker.getLiveSSTables()))
         {
             Map<ColumnMetadata, ColumnIndex> perSSTable = toRebuild.get(sstable);
             if (perSSTable == null)
@@ -184,10 +183,9 @@ public class SASIIndex implements Index, INotificationConsumer
         return Collections.emptyMap();
     }
 
-    @Override
     public void register(IndexRegistry registry)
     {
-        registry.registerIndex(this, new Group.Key(this), () -> new SASIIndexGroup(this));
+        registry.registerIndex(this);
     }
 
     public IndexMetadata getIndexMetadata()
@@ -223,7 +221,6 @@ public class SASIIndex implements Index, INotificationConsumer
         };
     }
 
-    @Override
     public boolean shouldBuildBlocking()
     {
         return true;
@@ -267,12 +264,16 @@ public class SASIIndex implements Index, INotificationConsumer
         return Long.MIN_VALUE;
     }
 
-    @Override
-    public void validate(PartitionUpdate update, ClientState state) throws InvalidRequestException
+    public void validate(PartitionUpdate update) throws InvalidRequestException
     {}
 
     @Override
-    public Indexer indexerFor(DecoratedKey key, RegularAndStaticColumns columns, long nowInSec, WriteContext context, IndexTransaction.Type transactionType, Memtable memtable)
+    public boolean supportsReplicaFilteringProtection(RowFilter rowFilter)
+    {
+        return false;
+    }
+
+    public Indexer indexerFor(DecoratedKey key, RegularAndStaticColumns columns, int nowInSec, WriteContext context, IndexTransaction.Type transactionType, Memtable memtable)
     {
         return new Indexer()
         {

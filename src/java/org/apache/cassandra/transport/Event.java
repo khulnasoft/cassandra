@@ -17,13 +17,16 @@
  */
 package org.apache.cassandra.transport;
 
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.Iterator;
 import java.util.List;
+import java.util.function.UnaryOperator;
 
 import com.google.common.base.Objects;
 
 import io.netty.buffer.ByteBuf;
+import org.apache.cassandra.cql3.Constants;
 import org.apache.cassandra.cql3.functions.UDAggregate;
 import org.apache.cassandra.cql3.functions.UDFunction;
 import org.apache.cassandra.locator.InetAddressAndPort;
@@ -115,17 +118,17 @@ public abstract class Event
 
         public static TopologyChange newNode(InetAddressAndPort address)
         {
-            return new TopologyChange(Change.NEW_NODE, new InetSocketAddress(address.getAddress(), address.getPort()));
+            return new TopologyChange(Change.NEW_NODE, new InetSocketAddress(address.address, address.port));
         }
 
         public static TopologyChange removedNode(InetAddressAndPort address)
         {
-            return new TopologyChange(Change.REMOVED_NODE, new InetSocketAddress(address.getAddress(), address.getPort()));
+            return new TopologyChange(Change.REMOVED_NODE, new InetSocketAddress(address.address, address.port));
         }
 
         public static TopologyChange movedNode(InetAddressAndPort address)
         {
-            return new TopologyChange(Change.MOVED_NODE, new InetSocketAddress(address.getAddress(), address.getPort()));
+            return new TopologyChange(Change.MOVED_NODE, new InetSocketAddress(address.address, address.port));
         }
 
         // Assumes the type has already been deserialized
@@ -186,12 +189,12 @@ public abstract class Event
 
         public static StatusChange nodeUp(InetAddressAndPort address)
         {
-            return new StatusChange(Status.UP, new InetSocketAddress(address.getAddress(), address.getPort()));
+            return new StatusChange(Status.UP, new InetSocketAddress(address.address, address.port));
         }
 
         public static StatusChange nodeDown(InetAddressAndPort address)
         {
-            return new StatusChange(Status.DOWN, new InetSocketAddress(address.getAddress(), address.getPort()));
+            return new StatusChange(Status.DOWN, new InetSocketAddress(address.address, address.port));
         }
 
         // Assumes the type has already been deserialized
@@ -268,6 +271,15 @@ public abstract class Event
         public SchemaChange(Change change, String keyspace)
         {
             this(change, Target.KEYSPACE, keyspace, null);
+        }
+
+        public SchemaChange withOverriddenKeyspace(UnaryOperator<String> keyspaceMapper)
+        {
+            if (keyspaceMapper == Constants.IDENTITY_STRING_MAPPER)
+                return this;
+
+            String newKeyspaceName = keyspaceMapper.apply(keyspace);
+            return keyspace.equals(newKeyspaceName) ? this : new SchemaChange(change, target, newKeyspaceName, name, argTypes);
         }
 
         public static SchemaChange forFunction(Change change, UDFunction function)

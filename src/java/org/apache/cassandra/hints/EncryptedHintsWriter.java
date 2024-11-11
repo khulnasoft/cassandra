@@ -25,9 +25,9 @@ import javax.crypto.Cipher;
 
 import com.google.common.annotations.VisibleForTesting;
 
+import org.apache.cassandra.io.compress.ICompressor;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.security.EncryptionUtils;
-import org.apache.cassandra.io.compress.ICompressor;
 
 import static org.apache.cassandra.utils.FBUtilities.updateChecksum;
 

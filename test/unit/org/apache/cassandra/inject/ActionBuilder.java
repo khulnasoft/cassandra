@@ -36,9 +36,9 @@ import static org.apache.cassandra.inject.Expression.quote;
 public class ActionBuilder
 {
     private Class<?> helperClass = Helper.class;
-    private final ConditionsBuilder conditionsBuilder = new ConditionsBuilder();
-    private final BindingsBuilder bindingsBuilder = new BindingsBuilder();
-    private final ActionsBuilder actionsBuilder = new ActionsBuilder();
+    private ConditionsBuilder conditionsBuilder = new ConditionsBuilder();
+    private BindingsBuilder bindingsBuilder = new BindingsBuilder();
+    private ActionsBuilder actionsBuilder = new ActionsBuilder();
 
     public static ActionBuilder newActionBuilder() {
         return new ActionBuilder();
@@ -127,7 +127,7 @@ public class ActionBuilder
 
         public ConditionsBuilder not()
         {
-            if (!(elements.getLast() instanceof LogicOp))
+            if (!elements.isEmpty() && !(elements.getLast() instanceof LogicOp))
             {
                 elements.add(LogicOp.AND);
             }
@@ -207,7 +207,7 @@ public class ActionBuilder
             }
             else
             {
-                return String.format("DO %s", String.join(";\n", actions));
+                return String.format("DO %s", actions.stream().collect(Collectors.joining(";\n")));
             }
         }
     }

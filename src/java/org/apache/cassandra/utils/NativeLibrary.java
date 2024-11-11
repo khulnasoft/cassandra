@@ -20,38 +20,31 @@ package org.apache.cassandra.utils;
 import java.io.FileDescriptor;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.AsynchronousFileChannel;
 import java.nio.channels.FileChannel;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.cassandra.io.util.File;
-import org.apache.cassandra.io.util.FileInputStreamPlus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.sun.jna.LastErrorException;
-
+import com.sun.jna.Native;
+import com.sun.jna.Pointer;
 import org.apache.cassandra.io.FSWriteError;
+import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.io.util.FileInputStreamPlus;
+import org.apache.cassandra.utils.NativeLibraryWrapper.NativeError;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.IGNORE_MISSING_NATIVE_FILE_HINTS;
 import static org.apache.cassandra.config.CassandraRelevantProperties.OS_ARCH;
 import static org.apache.cassandra.config.CassandraRelevantProperties.OS_NAME;
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
-import static org.apache.cassandra.utils.NativeLibrary.OSType.LINUX;
-import static org.apache.cassandra.utils.NativeLibrary.OSType.MAC;
-import static org.apache.cassandra.utils.NativeLibrary.OSType.AIX;
+import static org.apache.cassandra.utils.INativeLibrary.OSType.AIX;
+import static org.apache.cassandra.utils.INativeLibrary.OSType.LINUX;
+import static org.apache.cassandra.utils.INativeLibrary.OSType.MAC;
+import static org.apache.cassandra.utils.INativeLibrary.OSType.WINDOWS;
 
-public final class NativeLibrary
+public class NativeLibrary implements INativeLibrary
 {
     private static final Logger logger = LoggerFactory.getLogger(NativeLibrary.class);
-    private static final boolean REQUIRE = !IGNORE_MISSING_NATIVE_FILE_HINTS.getBoolean();
-
-    public enum OSType
-    {
-        LINUX,
-        MAC,
-        AIX,
-        OTHER;
-    }
 
     public static final OSType osType;
 
@@ -73,11 +66,18 @@ public final class NativeLibrary
     private static final int POSIX_FADV_DONTNEED   = 4; /* fadvise.h */
     private static final int POSIX_FADV_NOREUSE    = 5; /* fadvise.h */
 
+    private static final int MADV_NORMAL     = 0; /* mman.h */
+    private static final int MADV_RANDOM     = 1; /* mman.h */
+    private static final int MADV_SEQUENTIAL = 2; /* mman.h */
+    private static final int MADV_WILLNEED   = 3; /* mman.h */
+    private static final int MADV_DONTNEED   = 4; /* mman.h */
+
     private static final NativeLibraryWrapper wrappedLibrary;
     private static boolean jnaLockable = false;
 
     private static final Field FILE_DESCRIPTOR_FD_FIELD;
     private static final Field FILE_CHANNEL_FD_FIELD;
+    private static final Field FILE_ASYNC_CHANNEL_FD_FIELD;
 
     static
     {
@@ -85,6 +85,7 @@ public final class NativeLibrary
         try
         {
             FILE_CHANNEL_FD_FIELD = FBUtilities.getProtectedField(Class.forName("sun.nio.ch.FileChannelImpl"), "fd");
+            FILE_ASYNC_CHANNEL_FD_FIELD = FBUtilities.getProtectedField(Class.forName("sun.nio.ch.AsynchronousFileChannelImpl"), "fdObj");
         }
         catch (ClassNotFoundException e)
         {
@@ -97,13 +98,14 @@ public final class NativeLibrary
         switch (osType)
         {
             case MAC: wrappedLibrary = new NativeLibraryDarwin(); break;
+            case WINDOWS: wrappedLibrary = new NativeLibraryWindows(); break;
             case LINUX:
             case AIX:
             case OTHER:
             default: wrappedLibrary = new NativeLibraryLinux();
         }
 
-        if (toLowerCaseLocalized(OS_ARCH.getString()).contains("ppc"))
+        if (OS_ARCH.getString().toLowerCase().contains("ppc"))
         {
             if (osType == LINUX)
             {
@@ -128,20 +130,22 @@ public final class NativeLibrary
         }
     }
 
-    private NativeLibrary() {}
+    NativeLibrary() {}
 
     /**
      * @return the detected OSType of the Operating System running the JVM using crude string matching
      */
     private static OSType getOsType()
     {
-        String osName = toLowerCaseLocalized(OS_NAME.getString());
+        String osName = OS_NAME.getString().toLowerCase();
         if  (osName.contains("linux"))
             return LINUX;
         else if (osName.contains("mac"))
             return MAC;
+        else if (osName.contains("windows"))
+            return WINDOWS;
 
-        logger.warn("the current operating system, {}, is unsupported by Cassandra", osName);
+        logger.warn("the current operating system, {}, is unsupported by cassandra", osName);
         if (osName.contains("aix"))
             return AIX;
         else
@@ -149,36 +153,26 @@ public final class NativeLibrary
             return LINUX;
     }
 
-    private static int errno(RuntimeException e)
+    @Override
+    public boolean isOS(INativeLibrary.OSType type)
     {
-        assert e instanceof LastErrorException;
-        try
-        {
-            return ((LastErrorException) e).getErrorCode();
-        }
-        catch (NoSuchMethodError x)
-        {
-            if (REQUIRE)
-                logger.warn("Obsolete version of JNA present; unable to read errno. Upgrade to JNA 3.2.7 or later");
-            return 0;
-        }
+        return osType == type;
     }
 
-    /**
-     * Checks if the library has been successfully linked.
-     * @return {@code true} if the library has been successfully linked, {@code false} otherwise.
-     */
-    public static boolean isAvailable()
+    @Override
+    public boolean isAvailable()
     {
         return wrappedLibrary.isAvailable();
     }
 
-    public static boolean jnaMemoryLockable()
+    @Override
+    public boolean jnaMemoryLockable()
     {
         return jnaLockable;
     }
 
-    public static void tryMlockall()
+    @Override
+    public void tryMlockall()
     {
         try
         {
@@ -186,16 +180,9 @@ public final class NativeLibrary
             jnaLockable = true;
             logger.info("JNA mlockall successful");
         }
-        catch (UnsatisfiedLinkError e)
+        catch (NativeError e)
         {
-            // this will have already been logged by CLibrary, no need to repeat it
-        }
-        catch (RuntimeException e)
-        {
-            if (!(e instanceof LastErrorException))
-                throw e;
-
-            if (errno(e) == ENOMEM && osType == LINUX)
+            if (e.getErrno() == ENOMEM && osType == LINUX)
             {
                 logger.warn("Unable to lock JVM memory (ENOMEM)."
                         + " This can result in part of the JVM being swapped out, especially with mmapped I/O enabled."
@@ -204,125 +191,141 @@ public final class NativeLibrary
             else if (osType != MAC)
             {
                 // OS X allows mlockall to be called, but always returns an error
-                logger.warn("Unknown mlockall error {}", errno(e));
+                logger.error("Unknown mlockall error", e);
             }
         }
     }
 
-    public static void trySkipCache(String path, long offset, long len)
+    @Override
+    public void trySkipCache(File f, long offset, long len)
     {
-        File f = new File(path);
         if (!f.exists())
             return;
 
         try (FileInputStreamPlus fis = new FileInputStreamPlus(f))
         {
-            trySkipCache(getfd(fis.getChannel()), offset, len, path);
+            trySkipCache(getfd(fis.getChannel()), offset, len, f.path());
         }
         catch (IOException e)
         {
-            logger.warn("Could not skip cache", e);
+            logger.error("Could not open file to skip cache", e);
         }
     }
 
-    public static void trySkipCache(int fd, long offset, long len, String path)
+    @Override
+    public void trySkipCache(int fd, long offset, long len, String fileName)
     {
         if (len == 0)
-            trySkipCache(fd, 0, 0, path);
+            trySkipCache(fd, 0, 0, fileName);
 
         while (len > 0)
         {
             int sublen = (int) Math.min(Integer.MAX_VALUE, len);
-            trySkipCache(fd, offset, sublen, path);
+            trySkipCache(fd, offset, sublen, fileName);
             len -= sublen;
             offset -= sublen;
         }
     }
 
-    public static void trySkipCache(int fd, long offset, int len, String path)
+    @Override
+    public void trySkipCache(int fd, long offset, int len, String fileName)
     {
         if (fd < 0)
             return;
 
         try
         {
-            if (osType == LINUX)
-            {
-                int result = wrappedLibrary.callPosixFadvise(fd, offset, len, POSIX_FADV_DONTNEED);
-                if (result != 0)
-                    NoSpamLogger.log(
-                            logger,
-                            NoSpamLogger.Level.WARN,
-                            10,
-                            TimeUnit.MINUTES,
-                            "Failed trySkipCache on file: {} Error: " + wrappedLibrary.callStrerror(result).getString(0),
-                            path);
-            }
+            wrappedLibrary.callPosixFadvise(fd, offset, len, POSIX_FADV_DONTNEED);
         }
-        catch (UnsatisfiedLinkError e)
+        catch (NativeError e)
         {
-            // if JNA is unavailable just skipping Direct I/O
-            // instance of this class will act like normal RandomAccessFile
-        }
-        catch (RuntimeException e)
-        {
-            if (!(e instanceof LastErrorException))
-                throw e;
-
-            logger.warn("posix_fadvise({}, {}) failed, errno ({}).", fd, offset, errno(e));
+            NoSpamLogger.log(logger,
+                             NoSpamLogger.Level.ERROR,
+                             10,
+                             TimeUnit.MINUTES,
+                             "Failed trySkipCache on file: {} Error: " + e.getMessage(),
+                             fileName);
         }
     }
 
-    public static int tryFcntl(int fd, int command, int flags)
-    {
-        // fcntl return value may or may not be useful, depending on the command
-        int result = -1;
+    /**
+     * @param buffer
+     * @param length
+     * @param filename -- source file backing buffer; logged on error
+     * <p>
+     * adviseRandom works even on buffers that are not aligned to page boundaries (which is the
+     * common case for how MmappedRegions is used).
+     */
+    public void adviseRandom(MappedByteBuffer buffer, long length, String filename) {
+        assert buffer != null;
+
+        var rawAddress = Native.getDirectBufferPointer(buffer);
+        // align to the nearest lower page boundary
+        var alignedAddress = new Pointer(Pointer.nativeValue(rawAddress) & -PageAware.PAGE_SIZE);
+        // we want to advise the whole buffer, so if the aligned address is lower than the raw one,
+        // we need to pad the length accordingly.  (we do not need to align `length`, Linux
+        // takes care of rounding it up for us.)
+        length += Pointer.nativeValue(rawAddress) - Pointer.nativeValue(alignedAddress);
 
         try
         {
-            result = wrappedLibrary.callFcntl(fd, command, flags);
+            wrappedLibrary.callPosixMadvise(alignedAddress, length, MADV_RANDOM);
+        }
+        catch (NativeError e)
+        {
+            NoSpamLogger.log(logger,
+                             NoSpamLogger.Level.ERROR,
+                             10,
+                             TimeUnit.MINUTES,
+                             "Failed madvise on file: {}. Error: " + e.getMessage(),
+                             filename);
+        }
+    }
+
+    @Override
+    public int tryFcntl(int fd, int command, int flags)
+    {
+        try
+        {
+            return wrappedLibrary.callFcntl(fd, command, flags);
         }
         catch (UnsatisfiedLinkError e)
         {
-            // if JNA is unavailable just skipping
+            // Unsupported on this platform
         }
-        catch (RuntimeException e)
+        catch (NativeError e)
         {
-            if (!(e instanceof LastErrorException))
-                throw e;
-
-            if (REQUIRE)
-                logger.warn("fcntl({}, {}, {}) failed, errno ({}).", fd, command, flags, errno(e));
+            logger.error("fcntl({}, {}, {}) failed, error {}", fd, command, flags, e.getMessage());
         }
-
-        return result;
+        return -1;
     }
 
-    public static int tryOpenDirectory(String path)
+    @Override
+    public int tryOpenDirectory(File file)
     {
-        int fd = -1;
+        return tryOpenDirectory(file.path());
+    }
 
+    @Override
+    public int tryOpenDirectory(String path)
+    {
         try
         {
             return wrappedLibrary.callOpen(path, O_RDONLY);
         }
         catch (UnsatisfiedLinkError e)
         {
-            // JNA is unavailable just skipping Direct I/O
+            // Unsupported on this platform
         }
-        catch (RuntimeException e)
+        catch (NativeError e)
         {
-            if (!(e instanceof LastErrorException))
-                throw e;
-
-            if (REQUIRE)
-                logger.warn("open({}, O_RDONLY) failed, errno ({}).", path, errno(e));
+            logger.error("open({}, O_RDONLY) failed, error {}", path, e.getMessage());
         }
-
-        return fd;
+        return -1;
     }
 
-    public static void trySync(int fd)
+    @Override
+    public void trySync(int fd)
     {
         if (fd == -1)
             return;
@@ -331,25 +334,15 @@ public final class NativeLibrary
         {
             wrappedLibrary.callFsync(fd);
         }
-        catch (UnsatisfiedLinkError e)
+        catch (NativeError e)
         {
-            // JNA is unavailable just skipping Direct I/O
-        }
-        catch (RuntimeException e)
-        {
-            if (!(e instanceof LastErrorException))
-                throw e;
-
-            if (REQUIRE)
-            {
-                String errMsg = String.format("fsync(%s) failed, errno (%s) %s", fd, errno(e), e.getMessage());
-                logger.warn(errMsg);
-                throw new FSWriteError(e, errMsg);
-            }
+            String errMsg = String.format("fsync(%s) failed, error %s", fd, e.getMessage());
+            throw new FSWriteError(e, errMsg);
         }
     }
 
-    public static void tryCloseFD(int fd)
+    @Override
+    public void tryCloseFD(int fd)
     {
         if (fd == -1)
             return;
@@ -358,25 +351,42 @@ public final class NativeLibrary
         {
             wrappedLibrary.callClose(fd);
         }
-        catch (UnsatisfiedLinkError e)
+        catch (NativeError e)
         {
-            // JNA is unavailable just skipping Direct I/O
-        }
-        catch (RuntimeException e)
-        {
-            if (!(e instanceof LastErrorException))
-                throw e;
-
-            if (REQUIRE)
-            {
-                String errMsg = String.format("close(%d) failed, errno (%d).", fd, errno(e));
-                logger.warn(errMsg);
-                throw new FSWriteError(e, errMsg);
-            }
+            String errMsg = String.format("close(%d) failed, error %s", fd, e.getMessage());
+            throw new FSWriteError(e, errMsg);
         }
     }
 
-    public static int getfd(FileChannel channel)
+    @Override
+    public int getfd(AsynchronousFileChannel channel)
+    {
+        try
+        {
+            return getfd((FileDescriptor) FILE_ASYNC_CHANNEL_FD_FIELD.get(channel));
+        }
+        catch (IllegalArgumentException|IllegalAccessException e)
+        {
+            logger.error("Unable to read fd field from FileChannel");
+        }
+        return -1;
+    }
+
+    @Override
+    public FileDescriptor getFileDescriptor(AsynchronousFileChannel channel)
+    {
+        try
+        {
+            return (FileDescriptor) FILE_ASYNC_CHANNEL_FD_FIELD.get(channel);
+        }
+        catch (IllegalArgumentException | IllegalAccessException e)
+        {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public int getfd(FileChannel channel)
     {
         try
         {
@@ -384,8 +394,7 @@ public final class NativeLibrary
         }
         catch (IllegalArgumentException|IllegalAccessException e)
         {
-            if (REQUIRE)
-                logger.warn("Unable to read fd field from FileChannel", e);
+            logger.error("Unable to read fd field from FileChannel");
         }
         return -1;
     }
@@ -395,7 +404,8 @@ public final class NativeLibrary
      * @param descriptor - FileDescriptor objec to get fd from
      * @return file descriptor, -1 or error
      */
-    public static int getfd(FileDescriptor descriptor)
+    @Override
+    public int getfd(FileDescriptor descriptor)
     {
         try
         {
@@ -403,11 +413,8 @@ public final class NativeLibrary
         }
         catch (Exception e)
         {
-            if (REQUIRE)
-            {
-                JVMStabilityInspector.inspectThrowable(e);
-                logger.warn("Unable to read fd field from FileDescriptor", e);
-            }
+            JVMStabilityInspector.inspectThrowable(e);
+            logger.error("Unable to read fd field from FileDescriptor");
         }
 
         return -1;
@@ -416,27 +423,31 @@ public final class NativeLibrary
     /**
      * @return the PID of the JVM or -1 if we failed to get the PID
      */
-    public static long getProcessID()
+    @Override
+    public long getProcessID()
     {
         try
         {
             return wrappedLibrary.callGetpid();
         }
-        catch (UnsatisfiedLinkError e)
+        catch (NativeError e)
         {
-            // if JNA is unavailable just skipping
-        }
-        catch (Exception e)
-        {
-            if (REQUIRE)
-                logger.info("Failed to get PID from JNA", e);
+            logger.error("Failed to get PID from JNA", e);
         }
 
         return -1;
     }
 
-    public static boolean isEnabled()
+    @Override
+    public FileDescriptor getFileDescriptor(FileChannel channel)
     {
-        return REQUIRE;
+        try
+        {
+            return (FileDescriptor)FILE_CHANNEL_FD_FIELD.get(channel);
+        }
+        catch (IllegalArgumentException | IllegalAccessException e)
+        {
+            throw new RuntimeException(e);
+        }
     }
 }

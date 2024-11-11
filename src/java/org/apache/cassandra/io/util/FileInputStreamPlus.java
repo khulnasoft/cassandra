@@ -27,29 +27,39 @@ import java.nio.file.Path;
 public class FileInputStreamPlus extends RebufferingInputStream
 {
     final FileChannel channel;
-    public final File file;
+    public final Path path;
 
     public FileInputStreamPlus(String file) throws NoSuchFileException
     {
         this(new File(file));
     }
 
-    public FileInputStreamPlus(Path path) throws NoSuchFileException
-    {
-        this(new File(path));
-    }
-
     public FileInputStreamPlus(File file) throws NoSuchFileException
     {
-        this(file, 1 << 14);
+        this(file.newReadChannel(), file.toPath());
     }
 
-    public FileInputStreamPlus(File file, int bufferSize) throws NoSuchFileException
+    public FileInputStreamPlus(Path path) throws NoSuchFileException
+    {
+        this(PathUtils.newReadChannel(path), path);
+    }
+
+    public FileInputStreamPlus(Path path, int bufferSize) throws NoSuchFileException
+    {
+        this(PathUtils.newReadChannel(path), bufferSize, path);
+    }
+
+    private FileInputStreamPlus(FileChannel channel, Path path)
+    {
+        this(channel, 1 << 14, path);
+    }
+
+    private FileInputStreamPlus(FileChannel channel, int bufferSize, Path path)
     {
         super(ByteBuffer.allocateDirect(bufferSize));
-        this.channel = file.newReadChannel();
+        this.channel = channel;
         this.buffer.limit(0);
-        this.file = file;
+        this.path = path;
     }
 
     @Override
@@ -83,5 +93,11 @@ public class FileInputStreamPlus extends RebufferingInputStream
                 channel.close();
             }
         }
+    }
+
+    @Override
+    public String toString()
+    {
+        return path.toString();
     }
 }

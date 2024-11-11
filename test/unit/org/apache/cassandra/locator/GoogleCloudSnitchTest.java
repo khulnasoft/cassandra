@@ -20,53 +20,68 @@ package org.apache.cassandra.locator;
 
 
 import java.io.IOException;
+import java.util.EnumMap;
+import java.util.Map;
 
+import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
+import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.locator.AbstractCloudMetadataServiceConnector.DefaultCloudMetadataServiceConnector;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.utils.Pair;
+import org.apache.cassandra.gms.ApplicationState;
+import org.apache.cassandra.gms.Gossiper;
+import org.apache.cassandra.gms.VersionedValue;
+import org.apache.cassandra.service.StorageService;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.GOSSIP_DISABLE_THREAD_VALIDATION;
-import static org.apache.cassandra.locator.AbstractCloudMetadataServiceConnector.METADATA_URL_PROPERTY;
-import static org.apache.cassandra.locator.AlibabaCloudSnitch.DEFAULT_METADATA_SERVICE_URL;
+import static org.apache.cassandra.ServerTestUtils.cleanup;
+import static org.apache.cassandra.ServerTestUtils.mkdirs;
 import static org.junit.Assert.assertEquals;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyMap;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.spy;
 
 public class GoogleCloudSnitchTest
 {
+    private static String az;
+
     @BeforeClass
     public static void setup() throws Exception
     {
-        GOSSIP_DISABLE_THREAD_VALIDATION.setBoolean(true);
+        System.setProperty(Gossiper.Props.DISABLE_THREAD_VALIDATION, "true");
         DatabaseDescriptor.daemonInitialization();
-        ClusterMetadataTestHelper.setInstanceForTest();
+        ServerTestUtils.cleanupAndLeaveDirs();
+        Keyspace.setInitialized();
+        StorageService.instance.initServer(0);
+    }
+
+    private class TestGoogleCloudSnitch extends GoogleCloudSnitch
+    {
+        public TestGoogleCloudSnitch() throws IOException, ConfigurationException
+        {
+            super();
+        }
+
+        @Override
+        String gceApiCall(String url) throws IOException, ConfigurationException
+        {
+            return az;
+        }
     }
 
     @Test
     public void testRac() throws IOException, ConfigurationException
     {
-        String az = "us-central1-a";
-
-        DefaultCloudMetadataServiceConnector spiedConnector = spy(new DefaultCloudMetadataServiceConnector(
-        new SnitchProperties(Pair.create(METADATA_URL_PROPERTY, DEFAULT_METADATA_SERVICE_URL))));
-
-        doReturn(az).when(spiedConnector).apiCall(any(), anyMap());
-
-        GoogleCloudSnitch snitch = new GoogleCloudSnitch(spiedConnector);
+        az = "us-central1-a";
+        GoogleCloudSnitch snitch = new TestGoogleCloudSnitch();
         InetAddressAndPort local = InetAddressAndPort.getByName("127.0.0.1");
         InetAddressAndPort nonlocal = InetAddressAndPort.getByName("127.0.0.7");
 
-        Token t1 = ClusterMetadata.current().partitioner.getRandomToken();
-        ClusterMetadataTestHelper.addEndpoint(nonlocal, t1, "europe-west1", "a");
+        Gossiper.instance.addSavedEndpoint(nonlocal);
+        Map<ApplicationState, VersionedValue> stateMap = new EnumMap<>(ApplicationState.class);
+        stateMap.put(ApplicationState.DC, StorageService.instance.valueFactory.datacenter("europe-west1"));
+        stateMap.put(ApplicationState.RACK, StorageService.instance.valueFactory.datacenter("a"));
+        Gossiper.instance.getEndpointStateForEndpoint(nonlocal).addApplicationStates(stateMap);
 
         assertEquals("europe-west1", snitch.getDatacenter(nonlocal));
         assertEquals("a", snitch.getRack(nonlocal));
@@ -74,20 +89,20 @@ public class GoogleCloudSnitchTest
         assertEquals("us-central1", snitch.getDatacenter(local));
         assertEquals("a", snitch.getRack(local));
     }
-
+    
     @Test
     public void testNewRegions() throws IOException, ConfigurationException
     {
-        String az = "asia-east1-a";
-
-        DefaultCloudMetadataServiceConnector spiedConnector = spy(new DefaultCloudMetadataServiceConnector(
-        new SnitchProperties(Pair.create(METADATA_URL_PROPERTY, DEFAULT_METADATA_SERVICE_URL))));
-
-        doReturn(az).when(spiedConnector).apiCall(any(), anyMap());
-
-        GoogleCloudSnitch snitch = new GoogleCloudSnitch(spiedConnector);
+        az = "asia-east1-a";
+        GoogleCloudSnitch snitch = new TestGoogleCloudSnitch();
         InetAddressAndPort local = InetAddressAndPort.getByName("127.0.0.1");
         assertEquals("asia-east1", snitch.getDatacenter(local));
         assertEquals("a", snitch.getRack(local));
+    }
+
+    @AfterClass
+    public static void tearDown()
+    {
+        StorageService.instance.stopClient();
     }
 }

@@ -29,7 +29,6 @@ import org.junit.Test;
 
 import org.apache.cassandra.utils.ByteBufferUtil;
 
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -39,7 +38,7 @@ public class FileSegmentInputStreamTest
     private ByteBuffer allocateBuffer(int size)
     {
         ByteBuffer ret = ByteBuffer.allocate(Ints.checkedCast(size));
-        long seed = nanoTime();
+        long seed = System.nanoTime();
         //seed = 365238103404423L;
         System.out.println("Seed " + seed);
 
@@ -60,8 +59,8 @@ public class FileSegmentInputStreamTest
         final ByteBuffer buffer = allocateBuffer(size);
         final String path = buffer.toString();
 
-        FileSegmentInputStream reader = new FileSegmentInputStream(buffer.duplicate(), path, offset);
-        assertEquals(path, reader.getPath());
+        FileSegmentInputStream reader = new FileSegmentInputStream(buffer.duplicate(), new File(path), offset);
+        assertEquals(path, reader.getFile().path());
 
         for (int i = offset; i < (size + offset); i += checkInterval)
         {
@@ -89,7 +88,7 @@ public class FileSegmentInputStreamTest
     @Test(expected = UnsupportedOperationException.class)
     public void testMarkNotSupported() throws Exception
     {
-        try (FileSegmentInputStream reader = new FileSegmentInputStream(allocateBuffer(1024), "", 0))
+        try (FileSegmentInputStream reader = new FileSegmentInputStream(allocateBuffer(1024), new File(""), 0))
         {
             assertFalse(reader.markSupported());
             assertEquals(0, reader.bytesPastMark(null));
@@ -100,7 +99,7 @@ public class FileSegmentInputStreamTest
     @Test(expected = UnsupportedOperationException.class)
     public void testResetNotSupported() throws Exception
     {
-        try (FileSegmentInputStream reader = new FileSegmentInputStream(allocateBuffer(1024), "", 0))
+        try (FileSegmentInputStream reader = new FileSegmentInputStream(allocateBuffer(1024), new File(""), 0))
         {
             reader.reset(null);
         }
@@ -109,7 +108,7 @@ public class FileSegmentInputStreamTest
     @Test(expected = IllegalArgumentException.class)
     public void testSeekNegative() throws Exception
     {
-        try (FileSegmentInputStream reader = new FileSegmentInputStream(allocateBuffer(1024), "", 0))
+        try (FileSegmentInputStream reader = new FileSegmentInputStream(allocateBuffer(1024), new File(""), 0))
         {
             reader.seek(-1);
         }
@@ -118,7 +117,7 @@ public class FileSegmentInputStreamTest
     @Test(expected = IllegalArgumentException.class)
     public void testSeekBeforeOffset() throws Exception
     {
-        try (FileSegmentInputStream reader = new FileSegmentInputStream(allocateBuffer(1024), "", 1024))
+        try (FileSegmentInputStream reader = new FileSegmentInputStream(allocateBuffer(1024), new File(""), 1024))
         {
             reader.seek(1023);
         }
@@ -127,7 +126,7 @@ public class FileSegmentInputStreamTest
     @Test(expected = IllegalArgumentException.class)
     public void testSeekPastLength() throws Exception
     {
-        try (FileSegmentInputStream reader = new FileSegmentInputStream(allocateBuffer(1024), "", 1024))
+        try (FileSegmentInputStream reader = new FileSegmentInputStream(allocateBuffer(1024), new File(""), 1024))
         {
             reader.seek(2049);
         }
@@ -136,7 +135,7 @@ public class FileSegmentInputStreamTest
     @Test(expected = EOFException.class)
     public void testReadBytesTooMany() throws Exception
     {
-        try (FileSegmentInputStream reader = new FileSegmentInputStream(allocateBuffer(1024), "", 1024))
+        try (FileSegmentInputStream reader = new FileSegmentInputStream(allocateBuffer(1024), new File(""), 1024))
         {
             ByteBufferUtil.read(reader, 2049);
         }

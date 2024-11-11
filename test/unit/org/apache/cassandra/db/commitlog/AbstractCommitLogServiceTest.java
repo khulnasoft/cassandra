@@ -29,9 +29,8 @@ import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.commitlog.AbstractCommitLogService.SyncRunnable;
 import org.apache.cassandra.utils.FreeRunningClock;
+import org.apache.cassandra.utils.MonotonicClock;
 
-import static org.apache.cassandra.concurrent.Interruptible.State.NORMAL;
-import static org.apache.cassandra.concurrent.Interruptible.State.SHUTTING_DOWN;
 import static org.apache.cassandra.db.commitlog.AbstractCommitLogService.DEFAULT_MARKER_INTERVAL_MILLIS;
 
 public class AbstractCommitLogServiceTest
@@ -102,7 +101,7 @@ public class AbstractCommitLogServiceTest
     {
         FakeCommitLogService(long syncIntervalMillis)
         {
-            super(new FakeCommitLog(), "This is not a real commit log", syncIntervalMillis, true);
+            super(new FakeCommitLog(), "This is not a real commit log", syncIntervalMillis, MonotonicClock.preciseTime, true);
             lastSyncedAt = 0;
         }
 
@@ -113,7 +112,7 @@ public class AbstractCommitLogServiceTest
     }
 
     @Test
-    public void testSync() throws InterruptedException
+    public void testSync()
     {
         long syncTimeMillis = AbstractCommitLogService.DEFAULT_MARKER_INTERVAL_MILLIS * 2;
         FreeRunningClock clock = new FreeRunningClock();
@@ -122,25 +121,26 @@ public class AbstractCommitLogServiceTest
         FakeCommitLog commitLog = (FakeCommitLog) commitLogService.commitLog;
 
         // at time 0
-        syncRunnable.run(NORMAL);
+        Assert.assertTrue(syncRunnable.sync());
         Assert.assertEquals(1, commitLog.markCount.get());
         Assert.assertEquals(0, commitLog.syncCount.get());
 
         // at time DEFAULT_MARKER_INTERVAL_MILLIS
         clock.advance(DEFAULT_MARKER_INTERVAL_MILLIS, TimeUnit.MILLISECONDS);
-        syncRunnable.run(NORMAL);
+        Assert.assertTrue(syncRunnable.sync());
         Assert.assertEquals(2, commitLog.markCount.get());
         Assert.assertEquals(0, commitLog.syncCount.get());
 
         // at time DEFAULT_MARKER_INTERVAL_MILLIS * 2
         clock.advance(DEFAULT_MARKER_INTERVAL_MILLIS, TimeUnit.MILLISECONDS);
-        syncRunnable.run(NORMAL);
+        Assert.assertTrue(syncRunnable.sync());
         Assert.assertEquals(2, commitLog.markCount.get());
         Assert.assertEquals(1, commitLog.syncCount.get());
 
         // at time DEFAULT_MARKER_INTERVAL_MILLIS * 3, but with shutdown!
         clock.advance(DEFAULT_MARKER_INTERVAL_MILLIS, TimeUnit.MILLISECONDS);
-        syncRunnable.run(SHUTTING_DOWN);
+        commitLogService.shutdown();
+        Assert.assertFalse(syncRunnable.sync());
         Assert.assertEquals(2, commitLog.markCount.get());
         Assert.assertEquals(2, commitLog.syncCount.get());
     }

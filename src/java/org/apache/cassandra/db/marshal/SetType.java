@@ -20,19 +20,20 @@ package org.apache.cassandra.db.marshal;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Consumer;
+import java.util.function.Function;
 
-import org.apache.cassandra.cql3.terms.MultiElements;
-import org.apache.cassandra.cql3.terms.Term;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
+
+import org.apache.cassandra.cql3.Json;
+import org.apache.cassandra.cql3.Sets;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.db.rows.Cell;
-import org.apache.cassandra.db.rows.CellPath;
-import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.serializers.SetSerializer;
 import org.apache.cassandra.transport.ProtocolVersion;
-import org.apache.cassandra.utils.JsonUtils;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 import org.apache.cassandra.utils.bytecomparable.ByteSource;
 
@@ -42,9 +43,7 @@ public class SetType<T> extends CollectionType<Set<T>>
     private static final ConcurrentHashMap<AbstractType<?>, SetType> instances = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<AbstractType<?>, SetType> frozenInstances = new ConcurrentHashMap<>();
 
-    private final AbstractType<T> elements;
     private final SetSerializer<T> serializer;
-    private final boolean isMultiCell;
 
     public static SetType<?> getInstance(TypeParser parser) throws ConfigurationException, SyntaxException
     {
@@ -52,57 +51,64 @@ public class SetType<T> extends CollectionType<Set<T>>
         if (l.size() != 1)
             throw new ConfigurationException("SetType takes exactly 1 type parameter");
 
-        return getInstance(l.get(0).freeze(), true);
+        return getInstance(l.get(0), true);
     }
 
+    @SuppressWarnings("unchecked")
     public static <T> SetType<T> getInstance(AbstractType<T> elements, boolean isMultiCell)
     {
-        ConcurrentHashMap<AbstractType<?>, SetType> internMap = isMultiCell ? instances : frozenInstances;
-        SetType<T> t = internMap.get(elements);
-        return null == t
-             ? internMap.computeIfAbsent(elements, k -> new SetType<>(k, isMultiCell))
-             : t;
-    }
-
-    public SetType(AbstractType<T> elements, boolean isMultiCell)
-    {
-        super(ComparisonType.CUSTOM, Kind.SET);
-        this.elements = elements;
-        this.serializer = SetSerializer.getInstance(elements.getSerializer(), elements.comparatorSet);
-        this.isMultiCell = isMultiCell;
+        return getInstance(isMultiCell ? instances : frozenInstances,
+                           elements,
+                           () -> new SetType<>(elements, isMultiCell));
     }
 
     @Override
-    public <V> boolean referencesUserType(V name, ValueAccessor<V> accessor)
+    public SetType<T> overrideKeyspace(Function<String, String> overrideKeyspace)
     {
-        return elements.referencesUserType(name, accessor);
+        AbstractType<T> oldType = getElementsType();
+        AbstractType<T> newType = oldType.overrideKeyspace(overrideKeyspace);
+
+        if (newType == oldType)
+            return this;
+
+        return getInstance(newType, isMultiCell());
+    }
+
+    private SetType(AbstractType<T> elements, boolean isMultiCell)
+    {
+        super(Kind.SET, ImmutableList.of(elements), isMultiCell);
+        this.serializer = SetSerializer.getInstance(elements.getSerializer(), elements.comparatorSet);
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public SetType<T> with(ImmutableList<AbstractType<?>> subTypes, boolean isMultiCell)
+    {
+        Preconditions.checkArgument(subTypes.size() == 1,
+                                    "Invalid number of subTypes for SetType (got %s)", subTypes.size());
+        return getInstance((AbstractType<T>) subTypes.get(0), isMultiCell);
     }
 
     @Override
     public SetType<?> withUpdatedUserType(UserType udt)
     {
-        if (!referencesUserType(udt.name))
-            return this;
+        // If our subtypes do contain the UDT and this is requested, there is a fair chance we won't be re-using an
+        // instance with our own exact subtypes, so clean up the interned instance.
+        if (referencesUserType(udt.name))
+            (isMultiCell() ? instances : frozenInstances).remove(getElementsType());
 
-        (isMultiCell ? instances : frozenInstances).remove(elements);
-
-        return getInstance(elements.withUpdatedUserType(udt), isMultiCell);
+        return (SetType<?>) super.withUpdatedUserType(udt);
     }
 
-    @Override
-    public AbstractType<?> expandUserTypes()
-    {
-        return getInstance(elements.expandUserTypes(), isMultiCell);
-    }
-
+    @SuppressWarnings("unchecked")
     public AbstractType<T> getElementsType()
     {
-        return elements;
+        return (AbstractType<T>) subTypes.get(0);
     }
 
     public AbstractType<T> nameComparator()
     {
-        return elements;
+        return getElementsType();
     }
 
     public AbstractType<?> valueComparator()
@@ -111,71 +117,21 @@ public class SetType<T> extends CollectionType<Set<T>>
     }
 
     @Override
-    public boolean isMultiCell()
-    {
-        return isMultiCell;
-    }
-
-    @Override
-    public AbstractType<?> freeze()
-    {
-        // freeze elements to match org.apache.cassandra.cql3.CQL3Type.Raw.RawCollection.freeze
-        return isMultiCell ? getInstance(this.elements.freeze(), false) : this;
-    }
-
-    @Override
-    public AbstractType<?> unfreeze()
-    {
-        return isMultiCell ? this : getInstance(this.elements, true);
-    }
-
-    @Override
-    public List<AbstractType<?>> subTypes()
-    {
-        return Collections.singletonList(elements);
-    }
-
-    @Override
-    public AbstractType<?> freezeNestedMulticellTypes()
-    {
-        if (!isMultiCell())
-            return this;
-
-        if (elements.isFreezable() && elements.isMultiCell())
-            return getInstance(elements.freeze(), isMultiCell);
-
-        return getInstance(elements.freezeNestedMulticellTypes(), isMultiCell);
-    }
-
-    @Override
-    public boolean isCompatibleWithFrozen(CollectionType<?> previous)
-    {
-        assert !isMultiCell;
-        return this.elements.isCompatibleWith(((SetType<?>) previous).elements);
-    }
-
-    @Override
-    public boolean isValueCompatibleWithFrozen(CollectionType<?> previous)
-    {
-        // because sets are ordered, any changes to the type must maintain the ordering
-        return isCompatibleWithFrozen(previous);
-    }
-
     public <VL, VR> int compareCustom(VL left, ValueAccessor<VL> accessorL, VR right, ValueAccessor<VR> accessorR)
     {
-        return compareListOrSet(elements, left, accessorL, right, accessorR);
+        return ListType.compareListOrSet(getElementsType(), left, accessorL, right, accessorR);
     }
 
     @Override
     public <V> ByteSource asComparableBytes(ValueAccessor<V> accessor, V data, ByteComparable.Version version)
     {
-        return asComparableBytesListOrSet(getElementsType(), accessor, data, version);
+        return ListType.asComparableBytesListOrSet(getElementsType(), accessor, data, version);
     }
 
     @Override
     public <V> V fromComparableBytes(ValueAccessor<V> accessor, ByteSource.Peekable comparableBytes, ByteComparable.Version version)
     {
-        return fromComparableBytesListOrSet(accessor, comparableBytes, version, getElementsType());
+        return ListType.fromComparableBytesListOrSet(accessor, comparableBytes, version, getElementsType());
     }
 
     public SetSerializer<T> getSerializer()
@@ -190,11 +146,11 @@ public class SetType<T> extends CollectionType<Set<T>>
 
         StringBuilder sb = new StringBuilder();
         if (includeFrozenType)
-            sb.append(FrozenType.class.getName()).append("(");
+            sb.append(FrozenType.class.getName()).append('(');
         sb.append(getClass().getName());
-        sb.append(TypeParser.stringifyTypeParameters(Collections.<AbstractType<?>>singletonList(elements), ignoreFreezing || !isMultiCell));
+        sb.append(TypeParser.stringifyTypeParameters(subTypes, ignoreFreezing || !isMultiCell()));
         if (includeFrozenType)
-            sb.append(")");
+            sb.append(')');
         return sb.toString();
     }
 
@@ -210,14 +166,15 @@ public class SetType<T> extends CollectionType<Set<T>>
     public Term fromJSONObject(Object parsed) throws MarshalException
     {
         if (parsed instanceof String)
-            parsed = JsonUtils.decodeJson((String) parsed);
+            parsed = Json.decodeJson((String) parsed);
 
         if (!(parsed instanceof List))
             throw new MarshalException(String.format(
                     "Expected a list (representing a set), but got a %s: %s", parsed.getClass().getSimpleName(), parsed));
 
         List<?> list = (List<?>) parsed;
-        List<Term> terms = new ArrayList<>(list.size());
+        Set<Term> terms = new HashSet<>(list.size());
+        AbstractType<T> elements = getElementsType();
         for (Object element : list)
         {
             if (element == null)
@@ -225,50 +182,12 @@ public class SetType<T> extends CollectionType<Set<T>>
             terms.add(elements.fromJSONObject(element));
         }
 
-        return new MultiElements.DelayedValue(this, terms);
+        return new Sets.DelayedValue(elements, terms);
     }
 
     @Override
     public String toJSONString(ByteBuffer buffer, ProtocolVersion protocolVersion)
     {
-        return setOrListToJsonString(buffer, elements, protocolVersion);
-    }
-
-    @Override
-    public void forEach(ByteBuffer input, Consumer<ByteBuffer> action)
-    {
-        serializer.forEach(input, action);
-    }
-
-    @Override
-    public ByteBuffer getMaskedValue()
-    {
-        return decompose(Collections.emptySet());
-    }
-
-    @Override
-    public List<ByteBuffer> filterSortAndValidateElements(List<ByteBuffer> buffers)
-    {
-        SortedSet<ByteBuffer> sorted = new TreeSet<>(elements);
-        for (ByteBuffer buffer: buffers)
-        {
-            if (buffer == null)
-                throw new MarshalException("null is not supported inside collections");
-            elements.validate(buffer);
-            sorted.add(buffer);
-        }
-        return new ArrayList<>(sorted);
-    }
-
-    @Override
-    protected int compareNextCell(Iterator<Cell<?>> cellIterator, Iterator<ByteBuffer> elementIter)
-    {
-        return getElementsType().compare(cellIterator.next().path().get(0), elementIter.next());
-    }
-
-    @Override
-    public boolean contains(ComplexColumnData columnData, ByteBuffer value)
-    {
-        return columnData.getCell(CellPath.create(value)) != null;
+        return ListType.setOrListToJsonString(buffer, getElementsType(), protocolVersion);
     }
 }

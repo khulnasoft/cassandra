@@ -1,13 +1,11 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Copyright KhulnaSoft, Ltd.
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -133,10 +131,20 @@ public enum Direction
         this.increase = increase;
     }
 
-    /** Returns the result of the operation corresponding to a &lt; b for the forward direction */
+    /** Returns the result of the operation corresponding to a<b for the forward direction */
     public abstract boolean lt(int a, int b);
-    /** Returns the result of the operation corresponding to a &le; b for the forward direction */
+    /** Returns the result of the operation corresponding to a>b for the forward direction */
+    public boolean gt(int a, int b)
+    {
+        return lt(b, a);
+    }
+    /** Returns the result of the operation corresponding to a<=b for the forward direction */
     public abstract boolean le(int a, int b);
+    /** Returns the result of the operation corresponding to a>=b for the forward direction */
+    public boolean ge(int a, int b)
+    {
+        return le(b, a);
+    }
     /** Returns the result of the operation corresponding to min(a, b) for the forward direction */
     public abstract int min(int a, int b);
     /** Returns the result of the operation corresponding to max(a, b) for the forward direction */
@@ -165,4 +173,9 @@ public enum Direction
     public abstract boolean isForward();
 
     public abstract Direction opposite();
+
+    public static Direction fromBoolean(boolean reversed)
+    {
+        return reversed ? REVERSE : FORWARD;
+    }
 }

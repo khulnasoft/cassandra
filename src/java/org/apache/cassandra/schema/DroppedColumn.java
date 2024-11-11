@@ -17,30 +17,37 @@
  */
 package org.apache.cassandra.schema;
 
-import java.io.IOException;
-
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 
-import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.tcm.serialization.UDTAndFunctionsAwareMetadataSerializer;
-import org.apache.cassandra.tcm.serialization.Version;
+import org.apache.cassandra.cql3.CQL3Type;
+import org.apache.cassandra.cql3.ColumnIdentifier;
+import org.apache.cassandra.db.marshal.AbstractType;
 
-import static org.apache.cassandra.db.TypeSizes.sizeof;
-
+import static org.apache.cassandra.cql3.statements.RequestValidations.invalidRequest;
 
 public final class DroppedColumn
 {
-    public static final Serializer serializer = new Serializer();
-
     public final ColumnMetadata column;
     public final long droppedTime; // drop timestamp, in microseconds, yet with millisecond granularity
 
+    /**
+     * Creates a new dropped column record.
+     *
+     * @param column the metadata for the dropped column. This <b>must</b> be a dropped metadata, that is we should
+     * have {@code column.isDropped() == true}.
+     * @param droppedTime the time at which the column was dropped, in microseconds.
+     */
     public DroppedColumn(ColumnMetadata column, long droppedTime)
     {
+        assert column.isDropped() : column.debugString() + " should be dropped";
         this.column = column;
         this.droppedTime = droppedTime;
+    }
+
+    public DroppedColumn withNewKeyspace(String newKeyspace, Types udts)
+    {
+        return new DroppedColumn(column.withNewKeyspace(newKeyspace, udts), droppedTime);
     }
 
     @Override
@@ -63,31 +70,53 @@ public final class DroppedColumn
         return Objects.hashCode(column, droppedTime);
     }
 
+    public String toCQLString()
+    {
+        return String.format("DROPPED COLUMN RECORD %s %s%s USING TIMESTAMP %d",
+                             column.name.toCQLString(),
+                             column.type.asCQL3Type().toSchemaString(),
+                             column.isStatic() ? " static" : "",
+                             droppedTime);
+    }
+
     @Override
     public String toString()
     {
         return MoreObjects.toStringHelper(this).add("column", column).add("droppedTime", droppedTime).toString();
     }
 
-    public static class Serializer implements UDTAndFunctionsAwareMetadataSerializer<DroppedColumn>
+    /**
+     * A parsed dropped column record (from CREATE TABLE ... WITH DROPPED COLUMN RECORD ...).
+     */
+    public static final class Raw
     {
-        public void serialize(DroppedColumn t, DataOutputPlus out, Version version) throws IOException
+        private final ColumnIdentifier name;
+        private final CQL3Type.Raw type;
+        private final boolean isStatic;
+        private final long timestamp;
+
+        public Raw(ColumnIdentifier name, CQL3Type.Raw type, boolean isStatic, long timestamp)
         {
-            out.writeLong(t.droppedTime);
-            ColumnMetadata.serializer.serialize(t.column, out, version);
+            this.name = name;
+            this.type = type;
+            this.isStatic = isStatic;
+            this.timestamp = timestamp;
         }
 
-        public DroppedColumn deserialize(DataInputPlus in, Types types, UserFunctions functions, Version version) throws IOException
+        public DroppedColumn prepare(String keyspace, String table, Types types)
         {
-            long droppedTime = in.readLong();
-            ColumnMetadata column = ColumnMetadata.serializer.deserialize(in, types, functions, version);
-            return new DroppedColumn(column, droppedTime);
-        }
+            ColumnMetadata.Kind kind = isStatic ? ColumnMetadata.Kind.STATIC : ColumnMetadata.Kind.REGULAR;
+            AbstractType<?> parsedType = type.prepare(keyspace, types).getType();
+            if (parsedType.referencesUserTypes())
+                throw invalidRequest("Invalid type %s for DROPPED COLUMN RECORD on %s: dropped column types should "
+                                     + "not have user types", type, name);
 
-        public long serializedSize(DroppedColumn t, Version version)
-        {
-            return sizeof(t.droppedTime)
-                   + ColumnMetadata.serializer.serializedSize(t.column, version);
+            ColumnMetadata droppedColumn = ColumnMetadata.droppedColumn(keyspace,
+                                                                        table,
+                                                                        name,
+                                                                        parsedType,
+                                                                        kind);
+            return new DroppedColumn(droppedColumn, timestamp);
         }
     }
 }

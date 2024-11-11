@@ -27,29 +27,28 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.ScheduledExecutors;
+import org.apache.cassandra.config.Config;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
-import static org.apache.cassandra.config.CassandraRelevantProperties.APPROXIMATE_TIME_PRECISION_MS;
-import static org.apache.cassandra.config.CassandraRelevantProperties.CLOCK_MONOTONIC_APPROX;
-import static org.apache.cassandra.config.CassandraRelevantProperties.CLOCK_MONOTONIC_PRECISE;
-import static org.apache.cassandra.config.CassandraRelevantProperties.NANOTIMETOMILLIS_TIMESTAMP_UPDATE_INTERVAL;
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
-import static org.apache.cassandra.utils.Shared.Scope.SIMULATION;
 
 /**
  * Wrapper around time related functions that are either implemented by using the default JVM calls
  * or by using a custom implementation for testing purposes.
  *
- * See {@link Global#preciseTime} for how to use a custom implementation.
+ * See {@link #preciseTime} for how to use a custom implementation.
  *
  * Please note that {@link java.time.Clock} wasn't used, as it would not be possible to provide an
  * implementation for {@link #now()} with the exact same properties of {@link System#nanoTime()}.
- *
- * TODO better rationalise MonotonicClock/Clock
  */
-@Shared(scope = SIMULATION)
 public interface MonotonicClock
 {
+    /**
+     * Static singleton object that will be instantiated by default with a system clock
+     * implementation. Set <code>cassandra.clock</code> system property to a FQCN to use a
+     * different implementation instead.
+     */
+    public static final MonotonicClock preciseTime = Defaults.precise();
+    public static final MonotonicClock approxTime = Defaults.approx(preciseTime);
 
     /**
      * @see System#nanoTime()
@@ -71,21 +70,15 @@ public interface MonotonicClock
     public boolean isAfter(long instant);
     public boolean isAfter(long now, long instant);
 
-    public static class Global
+    static class Defaults
     {
         private static final Logger logger = LoggerFactory.getLogger(MonotonicClock.class);
 
-        /**
-         * Static singleton object that will be instantiated by default with a system clock
-         * implementation. Set <code>cassandra.clock</code> system property to a FQCN to use a
-         * different implementation instead.
-         */
-        public static final MonotonicClock preciseTime = precise();
-        public static final MonotonicClock approxTime = approx(preciseTime);
-
         private static MonotonicClock precise()
         {
-            String sclock = CLOCK_MONOTONIC_PRECISE.getString();
+            String sclock = System.getProperty("cassandra.clock");
+            if (sclock == null)
+                sclock = System.getProperty("cassandra.monotonic_clock.precise");
 
             if (sclock != null)
             {
@@ -105,7 +98,7 @@ public interface MonotonicClock
 
         private static MonotonicClock approx(MonotonicClock precise)
         {
-            String sclock = CLOCK_MONOTONIC_APPROX.getString();
+            String sclock = System.getProperty("cassandra.monotonic_clock.approx");
             if (sclock != null)
             {
                 try
@@ -140,17 +133,18 @@ public interface MonotonicClock
     static abstract class AbstractEpochSamplingClock implements MonotonicClock
     {
         private static final Logger logger = LoggerFactory.getLogger(AbstractEpochSamplingClock.class);
-        private static final long UPDATE_INTERVAL_MS = NANOTIMETOMILLIS_TIMESTAMP_UPDATE_INTERVAL.getLong();
+        private static final String UPDATE_INTERVAL_PROPERTY = Config.PROPERTY_PREFIX + "NANOTIMETOMILLIS_TIMESTAMP_UPDATE_INTERVAL";
+        private static final long UPDATE_INTERVAL_MS = Long.getLong(UPDATE_INTERVAL_PROPERTY, 10000);
 
         @VisibleForTesting
-        public static class AlmostSameTime implements MonotonicClockTranslation
+        static class AlmostSameTime implements MonotonicClockTranslation
         {
             final long millisSinceEpoch;
             final long monotonicNanos;
             final long error; // maximum error of millis measurement (in nanos)
 
             @VisibleForTesting
-            public AlmostSameTime(long millisSinceEpoch, long monotonicNanos, long errorNanos)
+            AlmostSameTime(long millisSinceEpoch, long monotonicNanos, long errorNanos)
             {
                 this.millisSinceEpoch = millisSinceEpoch;
                 this.monotonicNanos = monotonicNanos;
@@ -205,7 +199,7 @@ public interface MonotonicClock
             if (almostSameTimeUpdater != null)
                 throw new IllegalStateException("Already running");
             updateAlmostSameTime();
-            logger.info("Scheduling approximate time conversion task with an interval of {} milliseconds", UPDATE_INTERVAL_MS);
+            logger.debug("Scheduling approximate time conversion task with an interval of {} milliseconds", UPDATE_INTERVAL_MS);
             almostSameTimeUpdater = ScheduledExecutors.scheduledFastTasks.scheduleWithFixedDelay(this::updateAlmostSameTime, UPDATE_INTERVAL_MS, UPDATE_INTERVAL_MS, MILLISECONDS);
         }
 
@@ -213,7 +207,7 @@ public interface MonotonicClock
         {
             final int tries = 3;
             long[] samples = new long[2 * tries + 1];
-            samples[0] = nanoTime();
+            samples[0] = System.nanoTime();
             for (int i = 1 ; i < samples.length ; i += 2)
             {
                 samples[i] = millisSinceEpoch.getAsLong();
@@ -248,22 +242,15 @@ public interface MonotonicClock
 
     public static class SystemClock extends AbstractEpochSamplingClock
     {
-        // Without making this constructor public you may start getting the following exception in the simulator:
-        //    java.lang.IncompatibleClassChangeError: Type
-        //       org.apache.cassandra.utils.MonotonicClock$Global is not a nest member of
-        //       org.apache.cassandra.utils.MonotonicClock: types are in different packages
-        // There might be a problem with a simulator and how we allow access, but I verified the change access
-        // flags on <init> method of the org/apache/cassandra/utils/MonotonicClock$SystemClock
-        // class to ACC_PUBLIC, and ensured proper testing relationship from both the surrounding and nested class.
-        public SystemClock()
+        private SystemClock()
         {
-            super(Clock.Global::currentTimeMillis);
+            super(System::currentTimeMillis);
         }
 
         @Override
         public long now()
         {
-            return nanoTime();
+            return System.nanoTime();
         }
 
         @Override
@@ -275,20 +262,20 @@ public interface MonotonicClock
         @Override
         public boolean isAfter(long instant)
         {
-            return now() > instant;
+            return instant - now() < 0;
         }
 
         @Override
         public boolean isAfter(long now, long instant)
         {
-            return now > instant;
+            return instant - now < 0;
         }
     }
 
     public static class SampledClock implements MonotonicClock
     {
         private static final Logger logger = LoggerFactory.getLogger(SampledClock.class);
-        private static final int UPDATE_INTERVAL_MS = Math.max(1, APPROXIMATE_TIME_PRECISION_MS.getInt());
+        private static final int UPDATE_INTERVAL_MS = Math.max(1, Integer.parseInt(System.getProperty(Config.PROPERTY_PREFIX + "approximate_time_precision_ms", "2")));
         private static final long ERROR_NANOS = MILLISECONDS.toNanos(UPDATE_INTERVAL_MS);
 
         private final MonotonicClock precise;
@@ -348,7 +335,7 @@ public interface MonotonicClock
                 throw new IllegalStateException("Already running");
 
             almostNow = precise.now();
-            logger.info("Scheduling approximate time-check task with a precision of {} milliseconds", UPDATE_INTERVAL_MS);
+            logger.debug("Scheduling approximate time-check task with a precision of {} milliseconds", UPDATE_INTERVAL_MS);
             almostNowUpdater = ScheduledExecutors.scheduledFastTasks.scheduleWithFixedDelay(() -> almostNow = precise.now(), UPDATE_INTERVAL_MS, UPDATE_INTERVAL_MS, MILLISECONDS);
         }
 

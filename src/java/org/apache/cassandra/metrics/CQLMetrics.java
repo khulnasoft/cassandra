@@ -26,14 +26,11 @@ import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
 
 public class CQLMetrics
 {
-    public static final String TYPE_NAME = "CQL";
-    private static final MetricNameFactory factory = new DefaultNameFactory(TYPE_NAME);
+    private static final MetricNameFactory factory = new DefaultNameFactory("CQL");
 
     public final Counter regularStatementsExecuted;
     public final Counter preparedStatementsExecuted;
     public final Counter preparedStatementsEvicted;
-
-    public final Counter useStatementsExecuted;
 
     public final Gauge<Integer> preparedStatementsCount;
     public final Gauge<Double> preparedStatementsRatio;
@@ -44,9 +41,13 @@ public class CQLMetrics
         preparedStatementsExecuted = Metrics.counter(factory.createMetricName("PreparedStatementsExecuted"));
         preparedStatementsEvicted = Metrics.counter(factory.createMetricName("PreparedStatementsEvicted"));
 
-        useStatementsExecuted = Metrics.counter(factory.createMetricName("UseStatementsExecuted"));
-
-        preparedStatementsCount = Metrics.register(factory.createMetricName("PreparedStatementsCount"), QueryProcessor::preparedStatementsCount);
+        preparedStatementsCount = Metrics.register(factory.createMetricName("PreparedStatementsCount"), new Gauge<Integer>()
+        {
+            public Integer getValue()
+            {
+                return QueryProcessor.preparedStatementsCount();
+            }
+        });
         preparedStatementsRatio = Metrics.register(factory.createMetricName("PreparedStatementsRatio"), new RatioGauge()
         {
             public Ratio getRatio()

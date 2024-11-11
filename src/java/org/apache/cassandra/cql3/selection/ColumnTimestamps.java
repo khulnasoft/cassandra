@@ -27,10 +27,9 @@ import com.google.common.collect.BoundType;
 import com.google.common.collect.Range;
 
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.marshal.ListType;
-import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.db.rows.Cell;
+import org.apache.cassandra.serializers.CollectionSerializer;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -92,7 +91,7 @@ abstract class ColumnTimestamps
     /**
      * Appends the timestamp of the specified cell at the end of this list.
      */
-    public abstract void addTimestampFrom(Cell<?> cell, long nowInSecond);
+    public abstract void addTimestampFrom(Cell<?> cell, int nowInSecond);
 
     /**
      * Creates a new {@link ColumnTimestamps} instance for the specified column type.
@@ -121,7 +120,7 @@ abstract class ColumnTimestamps
         WRITETIMES
         {
             @Override
-            long getTimestamp(Cell<?> cell, long nowInSecond)
+            long getTimestamp(Cell<?> cell, int nowInSecond)
             {
                 return cell.timestamp();
             }
@@ -141,12 +140,12 @@ abstract class ColumnTimestamps
         TTLS
         {
             @Override
-            long getTimestamp(Cell<?> cell, long nowInSecond)
+            long getTimestamp(Cell<?> cell, int nowInSecond)
             {
                 if (!cell.isExpiring())
                     return defaultValue();
 
-                long remaining = cell.localDeletionTime() - nowInSecond;
+                int remaining = cell.localDeletionTime() - nowInSecond;
                 return remaining >= 0 ? remaining : defaultValue();
             }
 
@@ -167,10 +166,10 @@ abstract class ColumnTimestamps
          * Extracts the timestamp from the specified cell.
          *
          * @param cell        the cell
-         * @param nowInSecond the query timestamp insecond
+         * @param nowInSecond the query timestamp in seconds
          * @return the timestamp corresponding to this type
          */
-        abstract long getTimestamp(Cell<?> cell, long nowInSecond);
+        abstract long getTimestamp(Cell<?> cell, int nowInSecond);
 
         /**
          * Returns the value to use when there is no timestamp.
@@ -224,7 +223,7 @@ abstract class ColumnTimestamps
         }
 
         @Override
-        public void addTimestampFrom(Cell<?> cell, long nowInSecond)
+        public void addTimestampFrom(Cell<?> cell, int nowInSecond)
         {
             throw new UnsupportedOperationException();
         }
@@ -237,11 +236,11 @@ abstract class ColumnTimestamps
     };
 
     /**
-     * A {@link ColumnTimestamps} that can contains a single timestamp (for columns that aren't multicell).
+     * A {@link ColumnTimestamps} that can contain a single timestamp (for columns that aren't multicell).
      */
     private static class SingleTimestamps extends ColumnTimestamps
     {
-        protected long timestamp;
+        private long timestamp;
 
         public SingleTimestamps(TimestampsType type)
         {
@@ -261,7 +260,7 @@ abstract class ColumnTimestamps
         }
 
         @Override
-        public void addTimestampFrom(Cell<?> cell, long nowInSecond)
+        public void addTimestampFrom(Cell<?> cell, int nowInSecond)
         {
             timestamp = type.getTimestamp(cell, nowInSecond);
         }
@@ -304,7 +303,6 @@ abstract class ColumnTimestamps
      */
     private static final class MultipleTimestamps extends ColumnTimestamps
     {
-        private static final ListType<Long> LONG_LIST_TYPE = ListType.getInstance(LongType.instance, false);
         private final List<Long> timestamps;
 
         public MultipleTimestamps(TimestampsType type, int initialCapacity)
@@ -325,7 +323,7 @@ abstract class ColumnTimestamps
         }
 
         @Override
-        public void addTimestampFrom(Cell<?> cell, long nowInSecond)
+        public void addTimestampFrom(Cell<?> cell, int nowInSecond)
         {
             timestamps.add(type.getTimestamp(cell, nowInSecond));
         }
@@ -384,7 +382,7 @@ abstract class ColumnTimestamps
             List<ByteBuffer> buffers = new ArrayList<>(timestamps.size());
             timestamps.forEach(timestamp -> buffers.add(type.toByteBuffer(timestamp)));
 
-            return LONG_LIST_TYPE.pack(buffers);
+            return CollectionSerializer.pack(buffers, timestamps.size(), protocolVersion);
         }
 
         @Override

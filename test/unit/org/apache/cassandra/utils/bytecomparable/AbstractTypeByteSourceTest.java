@@ -41,7 +41,7 @@ import java.util.stream.Stream;
 
 import com.google.common.collect.ImmutableList;
 
-import org.apache.cassandra.cql3.terms.Term;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.db.marshal.*;
 import org.junit.Assert;
 import org.junit.Test;
@@ -57,7 +57,6 @@ import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.serializers.SimpleDateSerializer;
 import org.apache.cassandra.serializers.TypeSerializer;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.UUIDGen;
 
 @RunWith(Parameterized.class)
@@ -68,7 +67,8 @@ public class AbstractTypeByteSourceTest
     @Parameterized.Parameters(name = "version={0}")
     public static Iterable<ByteComparable.Version> versions()
     {
-        return ImmutableList.of(ByteComparable.Version.OSS50);
+        return ImmutableList.of(ByteComparable.Version.OSS41,
+                                ByteComparable.Version.OSS50);
     }
 
     private final ByteComparable.Version version;
@@ -195,7 +195,7 @@ public class AbstractTypeByteSourceTest
         for (int i = 0; i < 1000; ++i)
         {
             String randomString = newRandomAlphanumeric(prng, 10);
-            TimeUUID randomUuid = TimeUUID.Generator.nextTimeUUID();
+            UUID randomUuid = UUIDGen.getTimeUUID();
             BigInteger randomVarint = BigInteger.probablePrime(80, prng);
             byteBuffers.add(compType.decompose(randomString, randomUuid, randomVarint));
         }
@@ -212,7 +212,7 @@ public class AbstractTypeByteSourceTest
         // Test with incomplete CompositeType rows, where only the last element is not present
         incompleteComposite = new ByteBuffer[2];
         incompleteComposite[0] = UTF8Type.instance.decompose(newRandomAlphanumeric(prng, 10));
-        incompleteComposite[1] = TimeUUIDType.instance.decompose(TimeUUID.Generator.nextTimeUUID());
+        incompleteComposite[1] = TimeUUIDType.instance.decompose(UUIDGen.getTimeUUID());
         byteBuffers.add(CompositeType.build(ByteBufferAccessor.instance, true, incompleteComposite));
         byteBuffers.add(CompositeType.build(ByteBufferAccessor.instance, false, incompleteComposite));
         // ...and the last end-of-component byte is not 0.
@@ -353,7 +353,7 @@ public class AbstractTypeByteSourceTest
         {
             String randomString = newRandomAlphanumeric(prng, 10);
             allValues.add(ByteBufferUtil.bytes(randomString));
-            UUID randomUuid = TimeUUID.Generator.nextTimeAsUUID();
+            UUID randomUuid = UUIDGen.getTimeUUID();
             allValues.add(ByteBuffer.wrap(UUIDGen.decompose(randomUuid)));
             byte randomByte = (byte) prng.nextInt();
             allValues.add(ByteBuffer.allocate(1).put(randomByte));
@@ -543,15 +543,13 @@ public class AbstractTypeByteSourceTest
         for (int i = 0; i < testUuids.length / 3; ++i)
         {
             testUuids[3 * i] = UUID.randomUUID();
-            testUuids[3 * i + 1] = TimeUUID.Generator.nextTimeAsUUID();
-            testUuids[3 * i + 2] = TimeUUID.atUnixMicrosWithLsbAsUUID(prng.nextLong(), prng.nextLong());
+            testUuids[3 * i + 1] = UUIDGen.getTimeUUID();
+            testUuids[3 * i + 2] = UUIDGen.getRandomTimeUUIDFromMicros(prng.nextLong());
         }
         testUuids[testUuids.length - 1] = null;
         testValuesForType(UUIDType.instance, testUuids);
         testValuesForType(LexicalUUIDType.instance, testUuids);
-        testValuesForType(TimeUUIDType.instance, Arrays.stream(testUuids)
-                                                       .filter(u -> u == null || u.version() == 1)
-                                                       .map(u -> u != null ? TimeUUID.fromUuid(u) : null));
+        testValuesForType(TimeUUIDType.instance, Arrays.stream(testUuids).filter(u -> u == null || u.version() == 1));
     }
 
     private static <E, C extends Collection<E>> List<C> newRandomElementCollections(Supplier<? extends C> collectionProducer,
@@ -687,7 +685,7 @@ public class AbstractTypeByteSourceTest
         );
         for (IPartitioner partitioner : partitioners)
         {
-            AbstractType<?> partitionOrdering = partitioner.partitionOrdering(null);
+            AbstractType<?> partitionOrdering = partitioner.partitionOrdering();
             Assert.assertTrue(partitionOrdering instanceof PartitionerDefinedOrder);
             for (ByteBuffer input : byteBuffers)
             {
@@ -708,8 +706,8 @@ public class AbstractTypeByteSourceTest
     {
         // Test how ReversedType handles null ByteSource.Peekable - here the choice of base type is important, as
         // the base type should also be able to handle null ByteSource.Peekable.
-        ReversedType<BigInteger> reversedVarintType = ReversedType.getInstance(IntegerType.instance);
-        ByteBuffer decodedNull = reversedVarintType.fromComparableBytes(null, ByteComparable.Version.OSS50);
+        ReversedType<BigInteger> reversedVarintType = (ReversedType<BigInteger>) ReversedType.getInstance(IntegerType.instance);
+        ByteBuffer decodedNull = reversedVarintType.fromComparableBytes(null, version);
         Assert.assertEquals(ByteBufferUtil.EMPTY_BYTE_BUFFER, decodedNull);
 
         // Test how ReversedType handles random data with some common and important base types.
@@ -745,14 +743,14 @@ public class AbstractTypeByteSourceTest
         Random prng = new Random();
         for (Map.Entry<AbstractType<?>, BiFunction<Random, Integer, ByteBuffer>> entry : bufferGeneratorByType.entrySet())
         {
-            ReversedType<?> reversedType = ReversedType.getInstance(entry.getKey());
+            ReversedType<?> reversedType = (ReversedType<?>) ReversedType.getInstance(entry.getKey());
             for (int length = 32; length <= 512; length *= 4)
             {
                 for (int i = 0; i < 100; ++i)
                 {
                     ByteBuffer initial = entry.getValue().apply(prng, length);
-                    ByteSource.Peekable reversedPeekable = ByteSource.peekable(reversedType.asComparableBytes(initial, ByteComparable.Version.OSS50));
-                    ByteBuffer decoded = reversedType.fromComparableBytes(reversedPeekable, ByteComparable.Version.OSS50);
+                    ByteSource.Peekable reversedPeekable = ByteSource.peekable(reversedType.asComparableBytes(initial, ByteComparable.Version.OSS41));
+                    ByteBuffer decoded = reversedType.fromComparableBytes(reversedPeekable, ByteComparable.Version.OSS41);
                     Assert.assertEquals(initial, decoded);
                 }
             }
@@ -909,11 +907,11 @@ public class AbstractTypeByteSourceTest
                 {
                     for (byte[] bytes : bytesValues)
                     {
-                        ByteBuffer tupleData = tt.pack(UTF8Type.instance.decompose(utf8),
-                                                       decimal != null ? DecimalType.instance.decompose(decimal) : null,
-                                                       varint != null ? IntegerType.instance.decompose(varint) : null,
-                                                       // We could also use the wrapped bytes directly
-                                                       BytesType.instance.decompose(ByteBuffer.wrap(bytes)));
+                        ByteBuffer tupleData = TupleType.buildValue(UTF8Type.instance.decompose(utf8),
+                                                                    decimal != null ? DecimalType.instance.decompose(decimal) : null,
+                                                                    varint != null ? IntegerType.instance.decompose(varint) : null,
+                                                                    // We could also use the wrapped bytes directly
+                                                                    BytesType.instance.decompose(ByteBuffer.wrap(bytes)));
                         tuplesData.add(tupleData);
                     }
                 }

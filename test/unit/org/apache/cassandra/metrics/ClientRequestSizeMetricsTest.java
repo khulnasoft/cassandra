@@ -29,7 +29,7 @@ import org.junit.runners.Parameterized;
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Snapshot;
-import com.datastax.driver.core.QueryOptions;
+import com.khulnasoft.driver.core.QueryOptions;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.metrics.DecayingEstimatedHistogramReservoir.EstimatedHistogramReservoirSnapshot;
 import org.apache.cassandra.metrics.DecayingEstimatedHistogramReservoir.Range;
@@ -69,8 +69,10 @@ public class ClientRequestSizeMetricsTest extends CQLTester
         // We explicitly disable scheme fetching to avoid that effect
         try
         {
-            reinitializeNetwork(builder -> {}, builder -> builder.withQueryOptions(new QueryOptions().setMetadataEnabled(false)));
-            sessionNet(version); // Ensure that the connection is open
+            reinitializeNetwork(builder -> builder.withQueryOptions(new QueryOptions().setMetadataEnabled(false)));
+
+            // Ensure the driver session has been connected
+            sessionNet(version);
 
             // We want to ignore all the messages sent by the driver upon connection as well as
             // the event sent upon schema updates

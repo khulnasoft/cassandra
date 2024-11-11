@@ -55,10 +55,10 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.db.commitlog.CommitLog;
-import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
 import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.exceptions.UnknownColumnException;
 import org.apache.cassandra.io.IVersionedAsymmetricSerializer;
@@ -66,23 +66,21 @@ import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.transport.TlsTestUtils;
 import org.apache.cassandra.utils.FBUtilities;
 
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.apache.cassandra.config.EncryptionOptions.ClientAuth.NOT_REQUIRED;
+import static org.apache.cassandra.net.MessagingService.VERSION_30;
+import static org.apache.cassandra.net.MessagingService.VERSION_3014;
 import static org.apache.cassandra.net.MessagingService.VERSION_40;
 import static org.apache.cassandra.net.NoPayload.noPayload;
 import static org.apache.cassandra.net.MessagingService.current_version;
+import static org.apache.cassandra.net.ConnectionUtils.*;
 import static org.apache.cassandra.net.ConnectionType.LARGE_MESSAGES;
 import static org.apache.cassandra.net.ConnectionType.SMALL_MESSAGES;
-import static org.apache.cassandra.net.ConnectionUtils.*;
 import static org.apache.cassandra.net.OutboundConnectionSettings.Framing.LZ4;
 import static org.apache.cassandra.net.OutboundConnections.LARGE_MESSAGE_THRESHOLD;
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
-import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
+import static org.apache.cassandra.utils.MonotonicClock.approxTime;
 
 public class ConnectionTest
 {
@@ -103,6 +101,11 @@ public class ConnectionTest
         handlers.putIfAbsent(verb, verb.unsafeSetHandler(supplier));
     }
 
+    private void unsafeSetExpiration(Verb verb, ToLongFunction<TimeUnit> expiration) throws Throwable
+    {
+        timeouts.putIfAbsent(verb, verb.unsafeSetExpiration(expiration));
+    }
+
     @After
     public void resetVerbs() throws Throwable
     {
@@ -121,7 +124,6 @@ public class ConnectionTest
     public static void startup()
     {
         DatabaseDescriptor.daemonInitialization();
-        ClusterMetadataTestHelper.setInstanceForTest();
         CommitLog.instance.start();
     }
 
@@ -180,14 +182,19 @@ public class ConnectionTest
             .withLegacySslStoragePort(true)
             .withOptional(true)
             .withInternodeEncryption(EncryptionOptions.ServerEncryptionOptions.InternodeEncryption.all)
-            .withKeyStore(TlsTestUtils.SERVER_KEYSTORE_PATH)
-            .withKeyStorePassword(TlsTestUtils.SERVER_KEYSTORE_PASSWORD)
-            .withTrustStore(TlsTestUtils.SERVER_TRUSTSTORE_PATH)
-            .withTrustStorePassword(TlsTestUtils.SERVER_TRUSTSTORE_PASSWORD)
-            .withRequireClientAuth(NOT_REQUIRED)
+            .withKeyStore("test/conf/cassandra_ssl_test.keystore")
+            .withKeyStorePassword("cassandra")
+            .withTrustStore("test/conf/cassandra_ssl_test.truststore")
+            .withTrustStorePassword("cassandra")
+            .withRequireClientAuth(false)
             .withCipherSuites("TLS_RSA_WITH_AES_128_CBC_SHA");
 
+    // 30 is used for CNDB compatibility
+    static final AcceptVersions legacy = new AcceptVersions(VERSION_3014, VERSION_3014);
+
     static final List<Function<Settings, Settings>> MODIFIERS = ImmutableList.of(
+        settings -> settings.outbound(outbound -> outbound.withAcceptVersions(legacy))
+                            .inbound(inbound -> inbound.withAcceptMessaging(legacy)),
         settings -> settings.outbound(outbound -> outbound.withEncryption(encryptionOptions))
                             .inbound(inbound -> inbound.withEncryption(encryptionOptions)),
         settings -> settings.outbound(outbound -> outbound.withFraming(LZ4))
@@ -330,7 +337,7 @@ public class ConnectionTest
             });
             unsafeSetHandler(Verb._TEST_1, () -> msg -> receiveDone.countDown());
             Message<?> message = Message.builder(Verb._TEST_1, new Object())
-                                        .withExpiresAt(nanoTime() + SECONDS.toNanos(30L))
+                                        .withExpiresAt(System.nanoTime() + SECONDS.toNanos(30L))
                                         .build();
             for (int i = 0 ; i < count ; ++i)
                 outbound.enqueue(message);
@@ -363,25 +370,6 @@ public class ConnectionTest
                                          .withApplicationSendQueueCapacityInBytes(1 << 16)),
              (inbound, outbound, endpoint) -> {
 
-            unsafeSetSerializer(Verb._TEST_1, () -> new IVersionedSerializer<Object>()
-            {
-                public void serialize(Object o, DataOutputPlus out, int version) throws IOException
-                {
-                    for (int i = 0; i <= 4 << 16; i += 8L)
-                        out.writeLong(1L);
-                }
-
-                public Object deserialize(DataInputPlus in, int version) throws IOException
-                {
-                    in.skipBytesFully(4 << 16);
-                    return null;
-                }
-
-                public long serializedSize(Object o, int version)
-                {
-                    return 4 << 16;
-                }
-            });
             CountDownLatch done = new CountDownLatch(1);
             Message<?> message = Message.out(Verb._TEST_1, new Object());
             MessagingService.instance().callbacks.addWithExpiration(new RequestCallback()
@@ -406,7 +394,25 @@ public class ConnectionTest
 
             }, message, endpoint);
             AtomicInteger delivered = new AtomicInteger();
+            unsafeSetSerializer(Verb._TEST_1, () -> new IVersionedSerializer<Object>()
+            {
+                public void serialize(Object o, DataOutputPlus out, int version) throws IOException
+                {
+                    for (int i = 0 ; i <= 4 << 16 ; i += 8L)
+                        out.writeLong(1L);
+                }
 
+                public Object deserialize(DataInputPlus in, int version) throws IOException
+                {
+                    in.skipBytesFully(4 << 16);
+                    return null;
+                }
+
+                public long serializedSize(Object o, int version)
+                {
+                    return 4 << 16;
+                }
+            });
             unsafeSetHandler(Verb._TEST_1, () -> msg -> delivered.incrementAndGet());
             outbound.enqueue(message);
             Assert.assertTrue(done.await(10, SECONDS));
@@ -438,6 +444,9 @@ public class ConnectionTest
             CountDownLatch receiveDone = new CountDownLatch(90);
 
             AtomicInteger serialized = new AtomicInteger();
+            Message<?> message = Message.builder(Verb._TEST_1, new Object())
+                                        .withExpiresAt(System.nanoTime() + SECONDS.toNanos(30L))
+                                        .build();
             unsafeSetSerializer(Verb._TEST_1, () -> new IVersionedSerializer<Object>()
             {
                 public void serialize(Object o, DataOutputPlus out, int version) throws IOException
@@ -465,9 +474,6 @@ public class ConnectionTest
                     return 1;
                 }
             });
-            Message<?> message = Message.builder(Verb._TEST_1, new Object())
-                                        .withExpiresAt(nanoTime() + SECONDS.toNanos(30L))
-                                        .build();
 
             unsafeSetHandler(Verb._TEST_1, () -> msg -> receiveDone.countDown());
             for (int i = 0 ; i < count ; ++i)
@@ -538,11 +544,127 @@ public class ConnectionTest
     }
 
     @Test
+    public void testPre40() throws Throwable
+    {
+        MessagingService.instance().versions.set(FBUtilities.getBroadcastAddressAndPort(),
+                                                 MessagingService.VERSION_3014);
+
+        try
+        {
+            test((inbound, outbound, endpoint) -> {
+                     CountDownLatch done = new CountDownLatch(1);
+                     unsafeSetHandler(Verb._TEST_1,
+                                      () -> (msg) -> done.countDown());
+
+                     Message<?> message = Message.out(Verb._TEST_1, noPayload);
+                     outbound.enqueue(message);
+                     Assert.assertTrue(done.await(1, MINUTES));
+                     Assert.assertTrue(outbound.isConnected());
+                 });
+        }
+        finally
+        {
+            MessagingService.instance().versions.set(FBUtilities.getBroadcastAddressAndPort(),
+                                                     current_version);
+        }
+    }
+
+    @Test
+    public void testPendingOutboundConnectionUpdatesMessageVersionOnReconnectAttempt() throws Throwable
+    {
+        final String storagePortProperty = Config.PROPERTY_PREFIX + "ssl_storage_port";
+        final String originalStoragePort = System.getProperty(storagePortProperty);
+        try
+        {
+            // Set up an inbound connection listening *only* on the SSL storage port to
+            // replicate a 3.x node.  Force the messaging version to be incorrectly set to 4.0
+            // before the outbound connection attempt.
+            final Settings settings = Settings.LARGE;
+            final InetAddressAndPort endpoint = FBUtilities.getBroadcastAddressAndPort();
+
+            MessagingService.instance().versions.set(FBUtilities.getBroadcastAddressAndPort(),
+                                                     MessagingService.VERSION_40);
+
+            System.setProperty(storagePortProperty, "7011");
+            final InetAddressAndPort legacySSLAddrsAndPort = endpoint.withPort(DatabaseDescriptor.getSSLStoragePort());
+            InboundConnectionSettings inboundSettings = settings.inbound.apply(new InboundConnectionSettings().withEncryption(encryptionOptions))
+                                                                        .withBindAddress(legacySSLAddrsAndPort)
+                                                                        .withAcceptMessaging(new AcceptVersions(VERSION_30, VERSION_3014))
+                                                                        .withSocketFactory(factory);
+            InboundSockets inbound = new InboundSockets(Collections.singletonList(inboundSettings));
+            OutboundConnectionSettings outboundTemplate = settings.outbound.apply(new OutboundConnectionSettings(endpoint).withEncryption(encryptionOptions))
+                                                                           .withDefaultReserveLimits()
+                                                                           .withSocketFactory(factory)
+                                                                           .withDefaults(ConnectionCategory.MESSAGING);
+            ResourceLimits.EndpointAndGlobal reserveCapacityInBytes = new ResourceLimits.EndpointAndGlobal(new ResourceLimits.Concurrent(outboundTemplate.applicationSendQueueReserveEndpointCapacityInBytes), outboundTemplate.applicationSendQueueReserveGlobalCapacityInBytes);
+            OutboundConnection outbound = new OutboundConnection(settings.type, outboundTemplate, reserveCapacityInBytes);
+            try
+            {
+                logger.info("Running {} {} -> {}", outbound.messagingVersion(), outbound.settings(), inboundSettings);
+                inbound.open().sync();
+
+                CountDownLatch done = new CountDownLatch(1);
+                unsafeSetHandler(Verb._TEST_1,
+                                 () -> (msg) -> done.countDown());
+
+                // Enqueuing outbound message will initiate an outbound
+                // connection with pending data in the pipeline
+                Message<?> message = Message.out(Verb._TEST_1, noPayload);
+                outbound.enqueue(message);
+
+                // Wait until the first connection attempt has taken place
+                // before updating the endpoint messaging version so that the
+                // connection takes place to a 4.0 node.
+                int attempts = 0;
+                final long waitForAttemptMillis = TimeUnit.SECONDS.toMillis(15);
+                while (outbound.connectionAttempts() == 0 && attempts < waitForAttemptMillis / 10)
+                {
+                    Uninterruptibles.sleepUninterruptibly(10, TimeUnit.MILLISECONDS);
+                    attempts++;
+                }
+
+                // Now that the connection is being attempted, set the endpoint version so
+                // that on the reconnect attempt the messaging version is rechecked and the
+                // legacy ssl logic picks the storage port instead.  This should trigger a
+                // TRACE level log message "Endpoint version changed from 12 to 10 since
+                // connection initialized, updating."
+                outbound.settings().endpointToVersion.set(endpoint, VERSION_30);
+
+                // The connection should have successfully connected and delivered the _TEST_1
+                // message within the timout.
+                Assert.assertTrue(done.await(15, SECONDS));
+                Assert.assertTrue(outbound.isConnected());
+                Assert.assertTrue(String.format("expect less successful connections (%d) than attempts (%d)",
+                                                outbound.successfulConnections(), outbound.connectionAttempts()),
+                                  outbound.successfulConnections() < outbound.connectionAttempts());
+
+            }
+            finally
+            {
+                outbound.close(false);
+                inbound.close().get(30L, SECONDS);
+                outbound.close(false).get(30L, SECONDS);
+                resetVerbs();
+                MessagingService.instance().messageHandlers.clear();
+            }
+        }
+        finally
+        {
+            MessagingService.instance().versions.set(FBUtilities.getBroadcastAddressAndPort(),
+                                                     current_version);
+            if (originalStoragePort != null)
+                System.setProperty(storagePortProperty, originalStoragePort);
+            else
+                System.clearProperty(storagePortProperty);
+        }
+    }
+
+    @Test
     public void testCloseIfEndpointDown() throws Throwable
     {
         testManual((settings, inbound, outbound, endpoint) -> {
             Message<?> message = Message.builder(Verb._TEST_1, noPayload)
-                                        .withExpiresAt(nanoTime() + SECONDS.toNanos(30L))
+                                        .withExpiresAt(System.nanoTime() + SECONDS.toNanos(30L))
                                         .build();
 
             for (int i = 0 ; i < 1000 ; ++i)
@@ -562,12 +684,12 @@ public class ConnectionTest
                     for (int i = 0; i < 5; i++)
                     {
                         Message<?> message = Message.builder(Verb._TEST_1, noPayload)
-                                                    .withExpiresAt(nanoTime() + MILLISECONDS.toNanos(50L))
+                                                    .withExpiresAt(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(50L))
                                                     .build();
                         OutboundMessageQueue queue = outbound.queue;
                         while (true)
                         {
-                            try (OutboundMessageQueue.WithLock withLock = queue.lockOrCallback(nanoTime(), null))
+                            try (OutboundMessageQueue.WithLock withLock = queue.lockOrCallback(System.nanoTime(), null))
                             {
                                 if (withLock != null)
                                 {
@@ -633,7 +755,7 @@ public class ConnectionTest
                 unsafeSetHandler(Verb._TEST_1, () -> msg -> done.countDown());
                 outbound.enqueue(Message.out(Verb._TEST_1, noPayload));
                 Assert.assertTrue(done.await(10, SECONDS));
-                Assert.assertEquals(0, done.getCount());
+                Assert.assertEquals(done.getCount(), 0);
 
                 // Simulate disconnect
                 inbound.close().get(10, SECONDS);
@@ -646,7 +768,7 @@ public class ConnectionTest
                 outbound.enqueue(Message.out(Verb._TEST_1, noPayload));
 
                 latch2.await(10, SECONDS);
-                Assert.assertEquals(0, latch2.getCount());
+                Assert.assertEquals(latch2.getCount(), 0);
             }
             finally
             {
@@ -756,7 +878,7 @@ public class ConnectionTest
         // The reserved capacity (pendingBytes) at the end of the round should equal to K - N * M,
         //   which you can find in the assertion.
         test((inbound, outbound, endpoint) -> {
-            // max capacity equals to permit-free sendQueueCapacity + the minimun of endpoint and global reserve
+            // max capacity equals to permit-free sendQueueCapcity + the minimun of endpoint and global reserve
             double maxSendQueueCapacity = outbound.settings().applicationSendQueueCapacityInBytes +
                                           Double.min(outbound.settings().applicationSendQueueReserveEndpointCapacityInBytes,
                                                      outbound.settings().applicationSendQueueReserveGlobalCapacityInBytes.limit());

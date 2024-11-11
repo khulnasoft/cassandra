@@ -23,25 +23,29 @@ import java.util.List;
 
 import org.junit.Test;
 
+import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.marshal.FloatType;
 import org.apache.cassandra.db.marshal.VectorType;
-import org.apache.cassandra.index.sai.disk.v1.segment.SegmentBuilder;
+import org.apache.cassandra.index.sai.disk.v1.SegmentBuilder;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class VectorSegmentationTest extends VectorTester
 {
+    private static final int dimension = 100;
+    private double MIN_ACCEPTABLE_RECALL = 0.96;
+
     @Test
-    public void testMultipleSegmentsForCreatingIndex() throws Throwable
+    public void testMultipleSegmentsForCreatingIndex()
     {
-        createTable("CREATE TABLE %s (pk int, val vector<float, " + word2vec.dimension() + ">, PRIMARY KEY(pk))");
+        createTable("CREATE TABLE %s (pk int, val vector<float, " + dimension + ">, PRIMARY KEY(pk))");
 
         int vectorCount = 100;
         List<float[]> vectors = new ArrayList<>();
         for (int row = 0; row < vectorCount; row++)
         {
-            float[] vector = word2vec.vector(row);
+            float[] vector = randomVector();
             vectors.add(vector);
             execute("INSERT INTO %s (pk, val) VALUES (?, ?)", row, vector(vector));
         }
@@ -52,23 +56,22 @@ public class VectorSegmentationTest extends VectorTester
         createIndex("CREATE CUSTOM INDEX ON %s(val) USING 'StorageAttachedIndex'");
 
         int limit = 35;
-        float[] queryVector = word2vec.vector(getRandom().nextIntBetween(0, vectorCount));
+        float[] queryVector = randomVector();
         UntypedResultSet resultSet = execute("SELECT * FROM %s ORDER BY val ANN OF ? LIMIT " + limit, vector(queryVector));
         assertThat(resultSet.size()).isEqualTo(limit);
 
         List<float[]> resultVectors = getVectorsFromResult(resultSet);
         double recall = rawIndexedRecall(vectors, queryVector, resultVectors, limit);
-        assertThat(recall).isGreaterThanOrEqualTo(0.9);
+        assertThat(recall).isGreaterThanOrEqualTo(MIN_ACCEPTABLE_RECALL);
     }
 
     @Test
-    public void testMultipleSegmentsForCompaction() throws Throwable
+    public void testMultipleSegmentsForCompaction()
     {
-        createTable("CREATE TABLE %s (pk int, val vector<float, " + word2vec.dimension() + ">, PRIMARY KEY(pk))");
+        createTable("CREATE TABLE %s (pk int, val vector<float, " + dimension + ">, PRIMARY KEY(pk))");
         createIndex("CREATE CUSTOM INDEX ON %s(val) USING 'StorageAttachedIndex'");
 
         List<float[]> vectors = new ArrayList<>();
-        int vectorCount = 0;
         int rowsPerSSTable = 10;
         int sstables = 5;
         int pk = 0;
@@ -76,7 +79,7 @@ public class VectorSegmentationTest extends VectorTester
         {
             for (int row = 0; row < rowsPerSSTable; row++)
             {
-                float[] vector = word2vec.vector(vectorCount++);
+                float[] vector = randomVector();
                 execute("INSERT INTO %s (pk, val) VALUES (?, ?)", pk++, vector(vector));
                 vectors.add(vector);
             }
@@ -85,31 +88,36 @@ public class VectorSegmentationTest extends VectorTester
         }
 
         int limit = 30;
-        float[] queryVector = word2vec.vector(getRandom().nextIntBetween(0, vectorCount));
+        float[] queryVector = randomVector();
         UntypedResultSet resultSet = execute("SELECT * FROM %s ORDER BY val ANN OF ? LIMIT " + limit, vector(queryVector));
         assertThat(resultSet.size()).isEqualTo(limit);
 
         List<float[]> resultVectors = getVectorsFromResult(resultSet);
         double recall = rawIndexedRecall(vectors, queryVector, resultVectors, limit);
-        assertThat(recall).isGreaterThanOrEqualTo(0.99);
+        assertThat(recall).isGreaterThanOrEqualTo(MIN_ACCEPTABLE_RECALL);
 
 
         SegmentBuilder.updateLastValidSegmentRowId(11); // 11 rows per segment
         compact();
 
-        queryVector = word2vec.vector(getRandom().nextIntBetween(0, vectorCount));
+        queryVector = randomVector();
         resultSet = execute("SELECT * FROM %s ORDER BY val ANN OF ? LIMIT " + limit, vector(queryVector));
         assertThat(resultSet.size()).isEqualTo(limit);
 
         resultVectors = getVectorsFromResult(resultSet);
         recall = rawIndexedRecall(vectors, queryVector, resultVectors, limit);
-        assertThat(recall).isGreaterThanOrEqualTo(0.99);
+        assertThat(recall).isGreaterThanOrEqualTo(MIN_ACCEPTABLE_RECALL);
     }
 
-    private static List<float[]> getVectorsFromResult(UntypedResultSet result)
+    private float[] randomVector()
+    {
+        return CQLTester.randomVector(dimension);
+    }
+
+    private List<float[]> getVectorsFromResult(UntypedResultSet result)
     {
         List<float[]> vectors = new ArrayList<>();
-        VectorType<?> vectorType = VectorType.getInstance(FloatType.instance, word2vec.dimension());
+        VectorType<?> vectorType = VectorType.getInstance(FloatType.instance, dimension);
 
         // verify results are part of inserted vectors
         for (UntypedResultSet.Row row: result)

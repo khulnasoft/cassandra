@@ -21,6 +21,7 @@ package org.apache.cassandra.db.partitions;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.BeforeClass;
@@ -59,7 +60,6 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.btree.BTree;
-import org.apache.cassandra.utils.concurrent.ImmediateFuture;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import org.apache.cassandra.utils.memory.Cloner;
 import org.apache.cassandra.utils.memory.MemtableAllocator;
@@ -87,9 +87,9 @@ public class AtomicBTreePartitionMemtableAccountingTest
     public static final int EARLIER_TS = 1000;
     public static final int LATER_TS = 3000;
 
-    public static final long NOW_LDT = FBUtilities.nowInSeconds();
-    public static final long LATER_LDT = NOW_LDT + 1000;
-    public static final long EARLIER_LDT = NOW_LDT - 1000;
+    public static final int NOW_LDT = FBUtilities.nowInSeconds();
+    public static final int LATER_LDT = NOW_LDT + 1000;
+    public static final int EARLIER_LDT = NOW_LDT - 1000;
 
     public static final int EXPIRED_TTL = 1;
     public static final int EXPIRING_TTL = 10000;
@@ -97,7 +97,7 @@ public class AtomicBTreePartitionMemtableAccountingTest
     public static final long HEAP_LIMIT = 1 << 20;
     public static final long OFF_HEAP_LIMIT = 1 << 20;
     public static final float MEMTABLE_CLEANUP_THRESHOLD = 0.25f;
-    public static final MemtableCleaner DUMMY_CLEANER = () -> ImmediateFuture.failure(new IllegalStateException());
+    public static final MemtableCleaner DUMMY_CLEANER = () -> CompletableFuture.completedFuture(null);
 
     @Parameterized.Parameters(name="allocationType={0}")
     public static Iterable<? extends Object> data()
@@ -137,7 +137,7 @@ public class AtomicBTreePartitionMemtableAccountingTest
     @Test
     public void repro() // For running in the IDE, update with failing testCase parameters to run
     {
-        new TestCase(INITIAL_TS, Cell.NO_TTL, Cell.NO_DELETION_TIME, DeletionTime.build(EARLIER_TS, EARLIER_LDT), 1,
+        new TestCase(INITIAL_TS, Cell.NO_TTL, Cell.NO_DELETION_TIME, new DeletionTime(EARLIER_TS, EARLIER_LDT), 1,
                      EARLIER_TS, Cell.NO_TTL, Cell.NO_DELETION_TIME, DeletionTime.LIVE, 3).execute();
     }
 
@@ -148,25 +148,25 @@ public class AtomicBTreePartitionMemtableAccountingTest
         List<Integer> ttls = Arrays.asList(Cell.NO_TTL, EXPIRING_TTL, EXPIRED_TTL);
 
         // Initital local deleted times - a live cell, and a tombstone from now
-        List<Long> initialLDTs = Arrays.asList(Cell.NO_DELETION_TIME, NOW_LDT);
+        List<Integer> initialLDTs = Arrays.asList(Cell.NO_DELETION_TIME, NOW_LDT);
 
         // Initial complex deletion time for c2 - no deletion, earlier than c2 elements, or concurrent with c2 elements
         List<DeletionTime> initialComplexDeletionTimes = Arrays.asList(DeletionTime.LIVE,
-                                                                       DeletionTime.build(EARLIER_TS, EARLIER_LDT),
-                                                                       DeletionTime.build(INITIAL_TS, NOW_LDT));
+                                                                       new DeletionTime(EARLIER_TS, EARLIER_LDT),
+                                                                       new DeletionTime(INITIAL_TS, NOW_LDT));
 
         // Update timestamps - earlier - ignore update, same as initial, after initial - supercedes
         List<Integer> updateTimestamps = Arrays.asList(EARLIER_TS, INITIAL_TS, LATER_TS);
 
         // Update local deleted times - live cell, earlier tombstone, concurrent tombstone, or future deletion
-        List<Long> updateLDTs = Arrays.asList(Cell.NO_DELETION_TIME, EARLIER_LDT, NOW_LDT, LATER_LDT);
+        List<Integer> updateLDTs = Arrays.asList(Cell.NO_DELETION_TIME, EARLIER_LDT, NOW_LDT, LATER_LDT);
 
         // Update complex deletion time for c2 - no deletion, earlier than c2 elements,
         // or concurrent with c2 elements, after c2 elements
         List<DeletionTime> updateComplexDeletionTimes = Arrays.asList(DeletionTime.LIVE,
-                                                                      DeletionTime.build(EARLIER_TS, EARLIER_LDT),
-                                                                      DeletionTime.build(INITIAL_TS, NOW_LDT),
-                                                                      DeletionTime.build(LATER_TS, LATER_LDT));
+                                                                      new DeletionTime(EARLIER_TS, EARLIER_LDT),
+                                                                      new DeletionTime(INITIAL_TS, NOW_LDT),
+                                                                      new DeletionTime(LATER_TS, LATER_LDT));
 
         // Number of cells to put in the update collection - overlapping by one cell
         List<Integer> initialComplexCellCount = Arrays.asList(3, 1);
@@ -198,17 +198,17 @@ public class AtomicBTreePartitionMemtableAccountingTest
     {
         int initialTS;
         int initialTTL;
-        long initialLDT;
+        int initialLDT;
         DeletionTime initialCDT;
         int numC2InitialCells;
         int updateTS;
         int updateTTL;
-        long updateLDT;
+        int updateLDT;
         DeletionTime updateCDT;
         Integer numC2UpdateCells;
 
-        public TestCase(int initialTS, int initialTTL, long initialLDT, DeletionTime initialCDT, int numC2InitialCells,
-                        int updateTS, int updateTTL, long updateLDT, DeletionTime updateCDT, Integer numC2UpdateCells)
+        public TestCase(int initialTS, int initialTTL, int initialLDT, DeletionTime initialCDT, int numC2InitialCells,
+                        int updateTS, int updateTTL, int updateLDT, DeletionTime updateCDT, Integer numC2UpdateCells)
         {
             this.initialTS = initialTS;
             this.initialTTL = initialTTL;
@@ -226,14 +226,14 @@ public class AtomicBTreePartitionMemtableAccountingTest
         {
             // Test regular row updates
             Pair<Row, Row> regularRows = makeInitialAndUpdate(r1md, c2md);
-            PartitionUpdate initial = PartitionUpdate.singleRowUpdate(metadata, partitionKey, regularRows.left, null);
-            PartitionUpdate update = PartitionUpdate.singleRowUpdate(metadata, partitionKey, regularRows.right, null);
+            PartitionUpdate initial = PartitionUpdate.singleRowUpdate(metadata, partitionKey, regularRows.left);
+            PartitionUpdate update = PartitionUpdate.singleRowUpdate(metadata, partitionKey, regularRows.right);
             validateUpdates(metadata, partitionKey, Arrays.asList(initial, update));
 
             // Test static row updates
             Pair<Row, Row> staticRows = makeInitialAndUpdate(s3md, c4md);
-            PartitionUpdate staticInitial = PartitionUpdate.singleRowUpdate(metadata, partitionKey, null, staticRows.left);
-            PartitionUpdate staticUpdate = PartitionUpdate.singleRowUpdate(metadata, partitionKey, null, staticRows.right);
+            PartitionUpdate staticInitial = PartitionUpdate.singleRowUpdate(metadata, partitionKey, staticRows.left);
+            PartitionUpdate staticUpdate = PartitionUpdate.singleRowUpdate(metadata, partitionKey, staticRows.right);
             validateUpdates(metadata, partitionKey, Arrays.asList(staticInitial, staticUpdate));
         }
 
@@ -274,7 +274,7 @@ public class AtomicBTreePartitionMemtableAccountingTest
             return Pair.create(initialRow, updateRow);
         }
 
-        Cell<?> makeCell(ColumnMetadata column, long timestamp, int ttl, long localDeletionTime, ByteBuffer value, CellPath path)
+        Cell<?> makeCell(ColumnMetadata column, long timestamp, int ttl, int localDeletionTime, ByteBuffer value, CellPath path)
         {
             if (localDeletionTime != Cell.NO_DELETION_TIME) // never a ttl for a tombstone
             {
@@ -293,17 +293,18 @@ public class AtomicBTreePartitionMemtableAccountingTest
         opOrder.start();
         UpdateTransaction indexer = UpdateTransaction.NO_OP;
 
-        MemtablePool memtablePool = AbstractAllocatorMemtable.createMemtableAllocatorPoolInternal(allocationType,
-                                                                                                  HEAP_LIMIT, OFF_HEAP_LIMIT, MEMTABLE_CLEANUP_THRESHOLD, DUMMY_CLEANER);
-        MemtableAllocator allocator = memtablePool.newAllocator("test");
-        MemtableAllocator recreatedAllocator = memtablePool.newAllocator("recreated");
+        MemtablePool memtablePool = AbstractAllocatorMemtable.createMemtableAllocatorPool(allocationType,
+                                                                                 HEAP_LIMIT, OFF_HEAP_LIMIT, MEMTABLE_CLEANUP_THRESHOLD, DUMMY_CLEANER);
+        MemtableAllocator allocator = memtablePool.newAllocator();
+        MemtableAllocator recreatedAllocator = memtablePool.newAllocator();
         try
         {
             // Prepare a partition to receive updates
             AtomicBTreePartition partition = new AtomicBTreePartition(metadataRef, partitionKey, allocator);
 
             // For each update, apply it and verify the allocator is positive
-            long unreleasable = updates.stream().mapToLong(update -> {
+            long unreleasable = updates.stream().mapToLong(updateUntyped -> {
+                BTreePartitionUpdate update = BTreePartitionUpdate.asBTreeUpdate(updateUntyped);
                 DeletionTime exsDeletion = partition.deletionInfo().getPartitionDeletion();
                 DeletionTime updDeletion = update.deletionInfo().getPartitionDeletion();
                 long updateUnreleasable = 0;
@@ -331,10 +332,11 @@ public class AtomicBTreePartitionMemtableAccountingTest
             }).sum();
 
             // Now recreate the partition to see if there's a leak in the accounting
+
             AtomicBTreePartition recreated = new AtomicBTreePartition(metadataRef, partitionKey, recreatedAllocator);
             try (UnfilteredRowIterator iter = partition.unfilteredIterator())
             {
-                PartitionUpdate update = PartitionUpdate.fromIterator(iter, ColumnFilter.NONE);
+                BTreePartitionUpdate update = BTreePartitionUpdate.fromIterator(iter, ColumnFilter.NONE);
                 opOrder.newBarrier().issue();
                 OpOrder.Group writeOp = opOrder.getCurrent();
                 Cloner cloner = recreatedAllocator.cloner(writeOp);
@@ -345,7 +347,7 @@ public class AtomicBTreePartitionMemtableAccountingTest
             long unreleasableOnHeap = 0, unreleasableOffHeap = 0;
             if (allocator.offHeap().owns() > 0) unreleasableOffHeap = unreleasable;
             else unreleasableOnHeap = unreleasable;
-
+            
             assertThat(recreatedAllocator.offHeap().owns()).isEqualTo(allocator.offHeap().owns() - unreleasableOffHeap);
             assertThat(recreatedAllocator.onHeap().owns()).isEqualTo(allocator.onHeap().owns() - unreleasableOnHeap);
         }

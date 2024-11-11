@@ -49,7 +49,6 @@ public abstract class FunctionFactory
     protected final List<FunctionParameter> parameters;
 
     private final int numParameters;
-    private final int numMandatoryParameters;
 
     /**
      * @param name the name of the built functions
@@ -60,7 +59,6 @@ public abstract class FunctionFactory
         this.name = FunctionName.nativeFunction(name);
         this.parameters = Arrays.asList(parameters);
         this.numParameters = parameters.length;
-        this.numMandatoryParameters = (int) this.parameters.stream().filter(p -> !p.isOptional()).count();
     }
 
     public FunctionName name()
@@ -85,10 +83,7 @@ public abstract class FunctionFactory
                                               String receiverKeyspace,
                                               String receiverTable)
     {
-        // validate the number of arguments
-        int numArgs = args.size();
-        if (numArgs < numMandatoryParameters || numArgs > numParameters)
-            throw invalidNumberOfArgumentsException();
+        validateNumberOfArguments(args.size());
 
         // Do a first pass trying to infer the types of the arguments individually, without any context about the types
         // of the other arguments. We don't do any validation during this first pass.
@@ -102,7 +97,9 @@ public abstract class FunctionFactory
 
         // Do a second pass trying to infer the types of the arguments considering the types of other inferred types.
         // We can validate the inferred types during this second pass.
-        for (int i = 0; i < args.size(); i++)
+        // This is done in reverse order to favour a left-to-right reading, so arguments on the right have to match
+        // arguments on the left.
+        for (int i = args.size() - 1; i >= 0; i--)
         {
             AssignmentTestable arg = args.get(i);
             FunctionParameter parameter = parameters.get(i);
@@ -111,29 +108,33 @@ public abstract class FunctionFactory
                 throw new InvalidRequestException(String.format("Cannot infer type of argument %s in call to " +
                                                                 "function %s: use type casts to disambiguate",
                                                                 arg, this));
-            parameter.validateType(name, arg, type);
+            parameter.validateType(this, arg, type);
             type = type.udfType();
             types.set(i, type);
         }
 
-        return doGetOrCreateFunction(types, receiverType);
+        return doGetOrCreateFunction(args, types, receiverType);
     }
 
-    public InvalidRequestException invalidNumberOfArgumentsException()
+    protected void validateNumberOfArguments(int numArgs)
     {
-        return new InvalidRequestException("Invalid number of arguments for function " + this);
+        if (numArgs != numParameters)
+            throw new InvalidRequestException("Invalid number of arguments for function " + this);
     }
 
     /**
      * Returns a function compatible with the specified signature.
      *
+     * @param args the arguments in the function call for which the function is going to be built
      * @param argTypes the types of the function arguments
      * @param receiverType the expected return type of the function
      * @return a function compatible with the specified signature, or {@code null} if this cannot create a function for
      * the supplied arguments but there might be another factory with the same {@link #name()} able to do it.
      */
     @Nullable
-    protected abstract NativeFunction doGetOrCreateFunction(List<AbstractType<?>> argTypes, AbstractType<?> receiverType);
+    protected abstract NativeFunction doGetOrCreateFunction(List<? extends AssignmentTestable> args,
+                                                            List<AbstractType<?>> argTypes,
+                                                            AbstractType<?> receiverType);
 
     @Override
     public String toString()

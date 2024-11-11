@@ -17,22 +17,23 @@
  */
 package org.apache.cassandra.db.lifecycle;
 
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
+
+import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Functions;
 import com.google.common.base.Predicate;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterables;
+import com.google.common.collect.*;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.PartitionPosition;
+import org.apache.cassandra.db.compaction.CompactionSSTable;
 import org.apache.cassandra.db.memtable.Memtable;
+import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.utils.Interval;
@@ -60,6 +61,8 @@ import static org.apache.cassandra.db.lifecycle.Helpers.replace;
  */
 public class View
 {
+    private static final Logger logger = LoggerFactory.getLogger(View.class);
+
     /**
      * ordinarily a list of size 1, but when preparing to flush will contain both the memtable we will flush
      * and the new replacement memtable, until all outstanding write operations on the old table complete.
@@ -73,6 +76,7 @@ public class View
     public final List<Memtable> flushingMemtables;
     final Set<SSTableReader> compacting;
     final Set<SSTableReader> sstables;
+    final Map<String, SSTableReader> sstablesByFilename;
     // we use a Map here so that we can easily perform identity checks as well as equality checks.
     // When marking compacting, we now  indicate if we expect the sstables to be present (by default we do),
     // and we then check that not only are they all present in the live set, but that the exact instance present is
@@ -98,6 +102,9 @@ public class View
         this.compactingMap = compacting;
         this.compacting = compactingMap.keySet();
         this.intervalTree = intervalTree;
+        this.sstablesByFilename = Maps.newHashMapWithExpectedSize(sstables.size());
+        for (SSTableReader sstable : this.sstables)
+            this.sstablesByFilename.put(sstable.getDataFile().name(), sstable);
     }
 
     public Memtable getCurrentMemtable()
@@ -117,6 +124,15 @@ public class View
     public Set<SSTableReader> liveSSTables()
     {
         return sstables;
+    }
+
+    @Nullable
+    /**
+     * @return the sstable with the provided file name (not a full path), or null if it is not present in this view
+     */
+    public SSTableReader getLiveSSTable(String filename)
+    {
+        return sstablesByFilename.get(filename);
     }
 
     public Iterable<SSTableReader> sstables(SSTableSet sstableSet, Predicate<SSTableReader> filter)
@@ -175,15 +191,11 @@ public class View
         }
     }
 
-    public Iterable<SSTableReader> getUncompacting(Iterable<SSTableReader> candidates)
+
+    public <S extends CompactionSSTable>
+    Iterable<S> getNoncompacting(Iterable<S> candidates)
     {
-        return filter(candidates, new Predicate<SSTableReader>()
-        {
-            public boolean apply(SSTableReader sstable)
-            {
-                return !compacting.contains(sstable);
-            }
-        });
+        return filter(candidates, sstable -> !compacting.contains(sstable));
     }
 
     public boolean isEmpty()
@@ -191,7 +203,7 @@ public class View
         return sstables.isEmpty()
                && liveMemtables.size() <= 1
                && flushingMemtables.size() == 0
-               && (liveMemtables.size() == 0 || liveMemtables.get(0).operationCount() == 0);
+               && (liveMemtables.size() == 0 || liveMemtables.get(0).getOperations() == 0);
     }
 
     @Override
@@ -263,7 +275,8 @@ public class View
     // METHODS TO CONSTRUCT FUNCTIONS FOR MODIFYING A VIEW:
 
     // return a function to un/mark the provided readers compacting in a view
-    static Function<View, View> updateCompacting(final Set<? extends SSTableReader> unmark, final Iterable<? extends SSTableReader> mark)
+    @VisibleForTesting
+    public static Function<View, View> updateCompacting(final Set<? extends SSTableReader> unmark, final Iterable<? extends SSTableReader> mark)
     {
         if (unmark.isEmpty() && Iterables.isEmpty(mark))
             return Functions.identity();
@@ -289,7 +302,11 @@ public class View
             {
                 for (SSTableReader reader : readers)
                     if (view.compacting.contains(reader) || view.sstablesMap.get(reader) != reader || reader.isMarkedCompacted())
+                    {
+                        logger.debug("Refusing to compact {}, already compacting={}, suspect={}, compacted={}", reader,
+                                     view.compacting.contains(reader), reader.isMarkedSuspect(), reader.isMarkedCompacted());
                         return false;
+                    }
                 return true;
             }
         };

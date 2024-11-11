@@ -29,8 +29,6 @@ import org.apache.cassandra.db.Digest;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.service.paxos.Ballot;
-import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.ByteArrayUtil;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FastByteOperations;
@@ -207,18 +205,6 @@ public class ByteArrayAccessor implements ValueAccessor<byte[]>
     }
 
     @Override
-    public float getFloat(byte[] value, int offset)
-    {
-        return ByteArrayUtil.getFloat(value, offset);
-    }
-
-    @Override
-    public double getDouble(byte[] value, int offset)
-    {
-        return ByteArrayUtil.getDouble(value, offset);
-    }
-
-    @Override
     public long toLong(byte[] value)
     {
         return getLong(value, 0);
@@ -237,16 +223,9 @@ public class ByteArrayAccessor implements ValueAccessor<byte[]>
     }
 
     @Override
-    public float[] toFloatArray(byte[] value, int dimension)
+    public float getFloat(byte[] value, int offset)
     {
-        float[] array = new float[dimension];
-        int offset = 0;
-        for (int i = 0; i < dimension; i++)
-        {
-            array[i] = getFloat(value, offset);
-            offset += Float.BYTES;
-        }
-        return array;
+        return ByteArrayUtil.getFloat(value, offset);
     }
 
     @Override
@@ -259,18 +238,6 @@ public class ByteArrayAccessor implements ValueAccessor<byte[]>
     public UUID toUUID(byte[] value)
     {
         return new UUID(getLong(value, 0), getLong(value, 8));
-    }
-
-    @Override
-    public TimeUUID toTimeUUID(byte[] value)
-    {
-        return TimeUUID.fromBytes(getLong(value, 0), getLong(value, 8));
-    }
-
-    @Override
-    public Ballot toBallot(byte[] value)
-    {
-        return Ballot.deserialize(value);
     }
 
     @Override
@@ -299,13 +266,6 @@ public class ByteArrayAccessor implements ValueAccessor<byte[]>
     {
         ByteArrayUtil.putLong(dst, offset, value);
         return TypeSizes.LONG_SIZE;
-    }
-
-    @Override
-    public int putFloat(byte[] dst, int offset, float value)
-    {
-        ByteArrayUtil.putFloat(dst, offset, value);
-        return TypeSizes.FLOAT_SIZE;
     }
 
     @Override

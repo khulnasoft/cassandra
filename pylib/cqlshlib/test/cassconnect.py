@@ -20,23 +20,16 @@ import io
 import os.path
 import random
 import string
+import pytest
 
-from cassandra.cluster import Cluster
-from cassandra.metadata import maybe_escape_name as quote_name
-from cassandra.auth import PlainTextAuthProvider
-from cqlshlib.cql3handling import CqlRuleSet
-
-from .basecase import TEST_HOST, TEST_PORT, TEST_USER, TEST_PWD, cqlshlog, test_dir
+from .basecase import TEST_HOST, TEST_PORT, cql, cqlsh, cqlshlog, policy, quote_name, test_dir
 from .run_cqlsh import run_cqlsh, call_cqlsh
 
 test_keyspace_init = os.path.join(test_dir, 'test_keyspace_init.cql')
 
 
 def get_cassandra_connection(cql_version=None):
-
-    auth_provider = PlainTextAuthProvider(username=TEST_USER, password=TEST_PWD)
-    conn = Cluster((TEST_HOST,), TEST_PORT, auth_provider=auth_provider, cql_version=cql_version)
-
+    conn = cql((TEST_HOST,), TEST_PORT, cql_version=cql_version, load_balancing_policy=policy)
     # until the cql lib does this for us
     conn.cql_version = cql_version
     return conn
@@ -125,8 +118,7 @@ def cassandra_connection(cql_version=None):
     try:
         yield conn
     finally:
-        conn.shutdown()
-
+        conn.close()
 
 @contextlib.contextmanager
 def cassandra_cursor(cql_version=None, ks=''):
@@ -154,14 +146,14 @@ def cassandra_cursor(cql_version=None, ks=''):
 
 
 def cql_rule_set():
-    return CqlRuleSet
+    return cqlsh.cql3handling.CqlRuleSet
 
 
-class DEFAULTVAL:
-    pass
+class DEFAULTVAL: pass
 
 
-def cqlsh_testrun(keyspace=DEFAULTVAL, **kwargs):
+@pytest.mark.skip(reason="not a test")
+def testrun_cqlsh(keyspace=DEFAULTVAL, **kwargs):
     # use a positive default sentinel so that keyspace=None can be used
     # to override the default behavior
     if keyspace is DEFAULTVAL:
@@ -169,7 +161,8 @@ def cqlsh_testrun(keyspace=DEFAULTVAL, **kwargs):
     return run_cqlsh(keyspace=keyspace, **kwargs)
 
 
-def cqlsh_testcall(keyspace=None, **kwargs):
+@pytest.mark.skip(reason="not a test")
+def testcall_cqlsh(keyspace=None, **kwargs):
     if keyspace is None:
         keyspace = get_keyspace()
     if 'input' in kwargs.keys() and isinstance(kwargs['input'], str):

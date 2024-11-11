@@ -19,8 +19,6 @@ package org.apache.cassandra.cql3.functions.types;
 
 import org.apache.cassandra.cql3.ColumnIdentifier;
 
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
-
 /**
  * Keeps metadata on the connected cluster, including known nodes and schema definitions.
  */
@@ -67,7 +65,7 @@ public class Metadata
         }
         if (isAlphanumeric)
         {
-            return toLowerCaseLocalized(id);
+            return id.toLowerCase();
         }
 
         // Check if it's enclosed in quotes. If it is, remove them and unescape internal double quotes
@@ -111,7 +109,7 @@ public class Metadata
      * used to enclose such identifiers in double quotes, making them case sensitive.
      *
      * <p>Note that <a
-     * href="https://docs.datastax.com/en/cql/3.0/cql/cql_reference/keywords_r.html">reserved CQL
+     * href="https://docs.khulnasoft.com/en/cql/3.0/cql/cql_reference/keywords_r.html">reserved CQL
      * keywords</a> should also be quoted. You can check if a given identifier is a reserved keyword
      * by calling {@code #isReservedCqlKeyword(String)}.
      *

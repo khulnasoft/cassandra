@@ -19,56 +19,46 @@ package org.apache.cassandra.db.filter;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import com.google.common.base.Objects;
+import com.google.common.base.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.cql3.QueryOptions;
+import org.apache.cassandra.cql3.restrictions.ExternalRestriction;
+import org.apache.cassandra.cql3.restrictions.Restrictions;
 import org.apache.cassandra.cql3.restrictions.StatementRestrictions;
-import org.apache.cassandra.db.Clustering;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.DeletionPurger;
-import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.db.TypeSizes;
-import org.apache.cassandra.db.context.CounterContext;
-import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.marshal.ByteBufferAccessor;
-import org.apache.cassandra.db.marshal.BytesType;
-import org.apache.cassandra.db.marshal.CollectionType;
-import org.apache.cassandra.db.marshal.CompositeType;
-import org.apache.cassandra.db.marshal.ListType;
-import org.apache.cassandra.db.marshal.LongType;
-import org.apache.cassandra.db.marshal.MapType;
-import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.context.*;
+import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.db.partitions.PartitionIterator;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
-import org.apache.cassandra.db.rows.BaseRowIterator;
-import org.apache.cassandra.db.rows.Cell;
-import org.apache.cassandra.db.rows.CellPath;
-import org.apache.cassandra.db.rows.ComplexColumnData;
-import org.apache.cassandra.db.rows.Row;
-import org.apache.cassandra.db.rows.RowIterator;
-import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.transform.Transformation;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.index.IndexRegistry;
+import org.apache.cassandra.index.sai.utils.GeoUtil;
+import org.apache.cassandra.index.sai.utils.TypeUtil;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.NoSpamLogger;
+import org.apache.lucene.util.SloppyMath;
 
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkBindValueSet;
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkFalse;
@@ -82,97 +72,38 @@ import static org.apache.cassandra.cql3.statements.RequestValidations.checkNotNu
  * be handled by a 2ndary index, and the rest is simply filtered out from the
  * result set (the later can only happen if the query was using ALLOW FILTERING).
  */
-public class RowFilter implements Iterable<RowFilter.Expression>
+public abstract class RowFilter implements Iterable<RowFilter.Expression>
 {
     private static final Logger logger = LoggerFactory.getLogger(RowFilter.class);
+    private static final NoSpamLogger noSpamLogger = NoSpamLogger.getLogger(logger, 1, TimeUnit.MINUTES);
 
     public static final Serializer serializer = new Serializer();
-    private static final RowFilter NONE = new RowFilter(Collections.emptyList(), false);
+    public static final RowFilter NONE = CQLFilter.NONE;
 
-    protected final List<Expression> expressions;
+    protected final FilterElement root;
 
-    private final boolean needsReconciliation;
-
-    protected RowFilter(List<Expression> expressions, boolean needsReconciliation)
+    protected RowFilter(FilterElement root)
     {
-        this.expressions = expressions;
-        this.needsReconciliation = needsReconciliation;
+        this.root = root;
     }
 
-    /**
-     * 
-     * @param needsReconciliation whether or not this filter belongs to a read that requires coordinator reconciliation 
-     * 
-     * @return a new {@link RowFilter} with an empty {@link Expression} list
-     */
-    public static RowFilter create(boolean needsReconciliation)
+    public FilterElement root()
     {
-        return new RowFilter(new ArrayList<>(), needsReconciliation);
-    }
-
-    public static RowFilter none()
-    {
-        return NONE;
-    }
-
-    public SimpleExpression add(ColumnMetadata def, Operator op, ByteBuffer value)
-    {
-        SimpleExpression expression = new SimpleExpression(def, op, value);
-        add(expression);
-        return expression;
-    }
-
-    public void addMapEquality(ColumnMetadata def, ByteBuffer key, Operator op, ByteBuffer value)
-    {
-        add(new MapElementExpression(def, key, op, value));
-    }
-
-    public void addCustomIndexExpression(TableMetadata metadata, IndexMetadata targetIndex, ByteBuffer value)
-    {
-        add(new CustomExpression(metadata, targetIndex, value));
-    }
-
-    private void add(Expression expression)
-    {
-        expression.validate();
-        expressions.add(expression);
+        return root;
     }
 
     public List<Expression> getExpressions()
     {
-        return expressions;
+        warnIfFilterIsATree();
+        return root.expressions;
     }
 
     /**
-     * @return true if this filter belongs to a read that requires reconciliation at the coordinator
-     * @see StatementRestrictions#getRowFilter(IndexRegistry, QueryOptions)
+     * @return *all* the expressions from the RowFilter tree in pre-order.
      */
-    public boolean needsReconciliation()
+    public Stream<Expression> getExpressionsPreOrder()
     {
-        return needsReconciliation;
-    }
-
-    /**
-     * If this filter belongs to a read that requires reconciliation at the coordinator, and it contains an intersection
-     * on two or more non-key (and therefore mutable) columns, we cannot strictly apply it to local, unrepaired rows.
-     * When this occurs, we must downgrade the intersection of expressions to a union and leave the coordinator to 
-     * filter strictly before sending results to the client.
-     * 
-     * @return true if strict filtering is safe
-     *
-     * @see <a href="https://issues.apache.org/jira/browse/CASSANDRA-19018">CASSANDRA-19018</a>
-     */
-    public boolean isStrict()
-    {
-        return !needsReconciliation || !isMutableIntersection();
-    }
-
-    /**
-     * @return true if this filter contains an intersection on two or more mutable columns
-     */
-    public boolean isMutableIntersection()
-    {
-        return expressions.stream().filter(e -> !e.column.isPrimaryKeyColumn()).count() > 1;
+        return root.getExpressionsPreOrder();
     }
 
     /**
@@ -181,7 +112,8 @@ public class RowFilter implements Iterable<RowFilter.Expression>
      */
     public boolean hasExpressionOnClusteringOrRegularColumns()
     {
-        for (Expression expression : expressions)
+        warnIfFilterIsATree();
+        for (Expression expression : root)
         {
             ColumnMetadata column = expression.column();
             if (column.isClusteringColumn() || column.isRegular())
@@ -190,73 +122,19 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         return false;
     }
 
+    protected abstract Transformation<BaseRowIterator<?>> filter(TableMetadata metadata, int nowInSec);
+
     /**
-     * Note that the application of this transformation does not yet take {@link #isStrict()} into account. This means
-     * that even when strict filtering is not safe, expressions will be applied as intersections rather than unions.
-     * The filter will always be evaluated strictly in conjunction with replica filtering protection at the 
-     * coordinator, however, even after CASSANDRA-19007 is addressed.
-     * 
-     * @see <a href="https://issues.apache.org/jira/browse/CASSANDRA-190007">CASSANDRA-19007</a>
+     * Filters the provided iterator so that only the row satisfying the expression of this filter
+     * are included in the resulting iterator.
+     *
+     * @param iter the iterator to filter
+     * @param nowInSec the time of query in seconds.
+     * @return the filtered iterator.
      */
-    protected Transformation<BaseRowIterator<?>> filter(TableMetadata metadata, long nowInSec)
+    public UnfilteredPartitionIterator filter(UnfilteredPartitionIterator iter, int nowInSec)
     {
-        List<Expression> partitionLevelExpressions = new ArrayList<>();
-        List<Expression> rowLevelExpressions = new ArrayList<>();
-        for (Expression e: expressions)
-        {
-            if (e.column.isStatic() || e.column.isPartitionKey())
-                partitionLevelExpressions.add(e);
-            else
-                rowLevelExpressions.add(e);
-        }
-
-        long numberOfRegularColumnExpressions = rowLevelExpressions.size();
-        final boolean filterNonStaticColumns = numberOfRegularColumnExpressions > 0;
-
-        return new Transformation<>()
-        {
-            DecoratedKey pk;
-
-            @Override
-            protected BaseRowIterator<?> applyToPartition(BaseRowIterator<?> partition)
-            {
-                pk = partition.partitionKey();
-
-                // Short-circuit all partitions that won't match based on static and partition keys
-                for (Expression e : partitionLevelExpressions)
-                    if (!e.isSatisfiedBy(metadata, partition.partitionKey(), partition.staticRow()))
-                    {
-                        partition.close();
-                        return null;
-                    }
-
-                BaseRowIterator<?> iterator = partition instanceof UnfilteredRowIterator
-                                              ? Transformation.apply((UnfilteredRowIterator) partition, this)
-                                              : Transformation.apply((RowIterator) partition, this);
-
-                if (filterNonStaticColumns && !iterator.hasNext())
-                {
-                    iterator.close();
-                    return null;
-                }
-
-                return iterator;
-            }
-
-            @Override
-            public Row applyToRow(Row row)
-            {
-                Row purged = row.purge(DeletionPurger.PURGE_ALL, nowInSec, metadata.enforceStrictLiveness());
-                if (purged == null)
-                    return null;
-
-                for (Expression e : rowLevelExpressions)
-                    if (!e.isSatisfiedBy(metadata, pk, purged))
-                        return null;
-
-                return row;
-            }
-        };
+        return root.isEmpty() ? iter : Transformation.apply(iter, filter(iter.metadata(), nowInSec));
     }
 
     /**
@@ -267,22 +145,9 @@ public class RowFilter implements Iterable<RowFilter.Expression>
      * @param nowInSec the time of query in seconds.
      * @return the filtered iterator.
      */
-    public UnfilteredPartitionIterator filter(UnfilteredPartitionIterator iter, long nowInSec)
+    public PartitionIterator filter(PartitionIterator iter, TableMetadata metadata, int nowInSec)
     {
-        return expressions.isEmpty() ? iter : Transformation.apply(iter, filter(iter.metadata(), nowInSec));
-    }
-
-    /**
-     * Filters the provided iterator so that only the row satisfying the expression of this filter
-     * are included in the resulting iterator.
-     *
-     * @param iter the iterator to filter
-     * @param nowInSec the time of query in seconds.
-     * @return the filtered iterator.
-     */
-    public PartitionIterator filter(PartitionIterator iter, TableMetadata metadata, long nowInSec)
-    {
-        return expressions.isEmpty() ? iter : Transformation.apply(iter, filter(metadata, nowInSec));
+        return root.isEmpty() ? iter : Transformation.apply(iter, filter(metadata, nowInSec));
     }
 
     /**
@@ -294,19 +159,14 @@ public class RowFilter implements Iterable<RowFilter.Expression>
      * @param nowInSec the current time in seconds (to know what is live and what isn't).
      * @return {@code true} if {@code row} in partition {@code partitionKey} satisfies this row filter.
      */
-    public boolean isSatisfiedBy(TableMetadata metadata, DecoratedKey partitionKey, Row row, long nowInSec)
+    public boolean isSatisfiedBy(TableMetadata metadata, DecoratedKey partitionKey, Row row, int nowInSec)
     {
         // We purge all tombstones as the expressions isSatisfiedBy methods expects it
         Row purged = row.purge(DeletionPurger.PURGE_ALL, nowInSec, metadata.enforceStrictLiveness());
         if (purged == null)
-            return expressions.isEmpty();
+            return root.isEmpty();
 
-        for (Expression e : expressions)
-        {
-            if (!e.isSatisfiedBy(metadata, partitionKey, purged))
-                return false;
-        }
-        return true;
+        return root.isSatisfiedBy(metadata, partitionKey, purged);
     }
 
     /**
@@ -315,7 +175,8 @@ public class RowFilter implements Iterable<RowFilter.Expression>
      */
     public boolean partitionKeyRestrictionsAreSatisfiedBy(DecoratedKey key, AbstractType<?> keyValidator)
     {
-        for (Expression e : expressions)
+        warnIfFilterIsATree();
+        for (Expression e : root)
         {
             if (!e.column.isPartitionKey())
                 continue;
@@ -335,7 +196,8 @@ public class RowFilter implements Iterable<RowFilter.Expression>
      */
     public boolean clusteringKeyRestrictionsAreSatisfiedBy(Clustering<?> clustering)
     {
-        for (Expression e : expressions)
+        warnIfFilterIsATree();
+        for (Expression e : root)
         {
             if (!e.column.isClusteringColumn())
                 continue;
@@ -354,101 +216,527 @@ public class RowFilter implements Iterable<RowFilter.Expression>
      */
     public RowFilter without(Expression expression)
     {
-        assert expressions.contains(expression);
-        if (expressions.size() == 1)
-            return RowFilter.none();
+        warnIfFilterIsATree();
+        assert root.contains(expression);
+        if (root.size() == 1)
+            return RowFilter.NONE;
 
-        List<Expression> newExpressions = new ArrayList<>(expressions.size() - 1);
-        for (Expression e : expressions)
-            if (!e.equals(expression))
-                newExpressions.add(e);
-
-        return withNewExpressions(newExpressions);
-    }
-
-    /**
-     * Returns a copy of this filter but without the provided expression. If this filter doesn't contain the specified
-     * expression this method will just return an identical copy of this filter.
-     */
-    public RowFilter without(ColumnMetadata column, Operator op, ByteBuffer value)
-    {
-        if (isEmpty())
-            return this;
-
-        List<Expression> newExpressions = new ArrayList<>(expressions.size() - 1);
-        for (Expression e : expressions)
-            if (!e.column().equals(column) || e.operator() != op || !e.value.equals(value))
-                newExpressions.add(e);
-
-        return withNewExpressions(newExpressions);
-    }
-
-    public boolean hasNonKeyExpressions()
-    {
-        for (Expression e : expressions)
-            if (!e.column().isPrimaryKeyColumn())
-                return true;
-
-        return false;
+        return new CQLFilter(root.filter(e -> !e.equals(expression)));
     }
 
     public RowFilter withoutExpressions()
     {
-        return withNewExpressions(Collections.emptyList());
+        return NONE;
     }
 
-    protected RowFilter withNewExpressions(List<Expression> expressions)
+    public RowFilter restrict(Predicate<Expression> filter)
     {
-        return new RowFilter(expressions, needsReconciliation);
+        return new CQLFilter(root.filter(filter));
     }
 
     public boolean isEmpty()
     {
-        return expressions.isEmpty();
+        return root.isEmpty();
     }
 
     public Iterator<Expression> iterator()
     {
-        return expressions.iterator();
+        warnIfFilterIsATree();
+        return root.iterator();
     }
 
     @Override
     public String toString()
     {
-        return toString(false);
+        return root.toString();
     }
 
-    /**
-     * Returns a CQL representation of this row filter.
-     *
-     * @return a CQL representation of this row filter
-     */
-    public String toCQLString()
+    private void warnIfFilterIsATree()
     {
-        return toString(true);
-    }
-
-    private String toString(boolean cql)
-    {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < expressions.size(); i++)
+        if (!root.children.isEmpty())
         {
-            if (i > 0)
-                sb.append(" AND ");
-            sb.append(expressions.get(i).toString(cql));
+            noSpamLogger.warn("RowFilter is a tree, but we're using it as a list of top-levels expressions", new Exception("stacktrace of a potential misuse"));
         }
-        return sb.toString();
+    }
+
+    public static Builder builder()
+    {
+        return new Builder();
+    }
+
+    public static class Builder
+    {
+        private FilterElement.Builder current = new FilterElement.Builder(false);
+
+        public RowFilter build()
+        {
+            return new CQLFilter(current.build());
+        }
+
+        public RowFilter buildFromRestrictions(StatementRestrictions restrictions, IndexRegistry indexManager, TableMetadata table, QueryOptions options)
+        {
+            return new CQLFilter(doBuild(restrictions, indexManager, table, options));
+        }
+
+        private FilterElement doBuild(StatementRestrictions restrictions, IndexRegistry indexManager, TableMetadata table, QueryOptions options)
+        {
+            FilterElement.Builder element = new FilterElement.Builder(restrictions.isDisjunction());
+            this.current = element;
+
+            for (Restrictions restrictionSet : restrictions.filterRestrictions().getRestrictions())
+                restrictionSet.addToRowFilter(this, indexManager, options);
+
+            for (ExternalRestriction expression : restrictions.filterRestrictions().getExternalExpressions())
+                addAllAsConjunction(b -> expression.addToRowFilter(b, table, options));
+
+            for (StatementRestrictions child : restrictions.children())
+                element.children.add(doBuild(child, indexManager, table, options));
+
+            // Optimize out any conjunctions / disjunctions with TRUE.
+            // This is not needed for correctness.
+            if (restrictions.isDisjunction())
+            {
+                // `OR TRUE` swallows all other restrictions in disjunctions.
+                // Therefore, replace this node with an always true element.
+                if (element.children.stream().anyMatch(FilterElement::isAlwaysTrue))
+                    element = new FilterElement.Builder(false);
+            }
+            else
+            {
+                // `AND TRUE` does nothing in conjunctions, so remove it.
+                element.children.removeIf(FilterElement::isAlwaysTrue);
+            }
+
+            return element.build();
+        }
+
+        /**
+         * Adds multiple filter expressions to this {@link RowFilter.Builder} and joins them with AND (conjunction),
+         * regardless of the current mode (conjunction / disjunction) of the {@link RowFilter.Builder}.
+         * <p>
+         *
+         * This wrapper method makes sure we pass a {@code RowFilter.Builder} that is always in conjunction mode to the
+         * respective {@code addToRowFilterDelegate} method. If multiple expressions are added to the row filter, this 
+         * method makes sure they are joined with AND in their own {@link FilterElement}.
+         *
+         * @param addToRowFilterDelegate a function that adds expressions / child filter elements
+         *                               to a provided {@link RowFilter.Builder}, and expects all
+         *                               added expressions to be joined with AND operator
+         */
+        public void addAllAsConjunction(Consumer<Builder> addToRowFilterDelegate)
+        {
+            if (current.isDisjunction)
+            {
+                // If we're in disjunction mode, we must not pass the current builder to addToRowFilter.
+                // We create a new conjunction sub-builder instead and add all expressions there.
+                var builder = new Builder();
+                addToRowFilterDelegate.accept(builder);
+
+                if (builder.current.expressions.size() == 1 && builder.current.children.isEmpty())
+                {
+                    // Optimization:
+                    // if there is one expression, we can just add it directly to the current FilterElement
+                    // making the result tree flatter
+                    current.expressions.add(builder.current.expressions.get(0));
+                }
+                else if (builder.current.children.size() == 1 && builder.current.expressions.isEmpty())
+                {
+                    // Optimization:
+                    // if there is one child, we can just add it directly to the current FilterElement,
+                    // making the result tree flatter
+                    current.children.add(builder.current.children.get(0));
+                }
+                else
+                {
+                    // More expressions means we have to create a new child node (AND) for them.
+                    // Also note that we use this for adding zero expressions/children as well.
+                    // A conjunction with no restrictions means selecting everything, so if we didn't add an empty
+                    // AND node in such case, we could end up with a filter that misses to match some rows.
+                    current.children.add(builder.current.build());
+                }
+            }
+            else
+            {
+                // Just an optimisation. If we're already in the conjunction mode, we don't need to create
+                // a sub-builder; we can just use this one to collect the expressions.
+                addToRowFilterDelegate.accept(this);
+            }
+        }
+
+        public SimpleExpression add(ColumnMetadata def, Operator op, ByteBuffer value)
+        {
+            SimpleExpression expression = new SimpleExpression(def, op, value);
+            add(expression);
+            return expression;
+        }
+
+        public void addMapComparison(ColumnMetadata def, ByteBuffer key, Operator op, ByteBuffer value)
+        {
+            add(new MapComparisonExpression(def, key, op, value));
+        }
+
+        public void addGeoDistanceExpression(ColumnMetadata def, ByteBuffer point, Operator op, ByteBuffer distance)
+        {
+            var primaryGeoDistanceExpression = new GeoDistanceExpression(def, point, op, distance);
+            // The following logic optionally adds a second search expression in the event that the query area
+            // crosses then antimeridian.
+            if (primaryGeoDistanceExpression.crossesAntimeridian())
+            {
+                // The primry GeoDistanceExpression includes points on/over the antimeridian. Since we search
+                // using the lat/lon coordinates, we must create a shifted expression that will collect
+                // results on the other side of the antimeridian.
+                var shiftedGeoDistanceExpression = primaryGeoDistanceExpression.buildShiftedExpression();
+                if (current.isDisjunction)
+                {
+                    // We can add both expressions to this level of the tree because it is a disjunction.
+                    add(primaryGeoDistanceExpression);
+                    add(shiftedGeoDistanceExpression);
+                }
+                else
+                {
+                    // We need to add a new level to the tree so that we can get all results that match the primary
+                    // or the shifted expressions.
+                    var builder = new FilterElement.Builder(true);
+                    primaryGeoDistanceExpression.validate();
+                    shiftedGeoDistanceExpression.validate();
+                    builder.expressions.add(primaryGeoDistanceExpression);
+                    builder.expressions.add(shiftedGeoDistanceExpression);
+                    current.children.add(builder.build());
+                }
+            }
+            else
+            {
+                add(primaryGeoDistanceExpression);
+            }
+        }
+
+        public void addCustomIndexExpression(TableMetadata metadata, IndexMetadata targetIndex, ByteBuffer value)
+        {
+            add(CustomExpression.build(metadata, targetIndex, value));
+        }
+
+        public Builder add(Expression expression)
+        {
+            expression.validate();
+            current.expressions.add(expression);
+            return this;
+        }
+
+        public void addUserExpression(UserExpression e)
+        {
+            current.expressions.add(e);
+        }
+    }
+
+    public static class FilterElement implements Iterable<Expression>
+    {
+        public static final Serializer serializer = new Serializer();
+
+        public static final FilterElement NONE = new FilterElement(false, Collections.emptyList(), Collections.emptyList());
+
+        private boolean isDisjunction;
+
+        private final List<Expression> expressions;
+
+        private final List<FilterElement> children;
+
+        public FilterElement(boolean isDisjunction, List<Expression> expressions, List<FilterElement> children)
+        {
+            this.isDisjunction = isDisjunction;
+            this.expressions = expressions;
+            this.children = children;
+        }
+
+        public boolean isDisjunction()
+        {
+            return isDisjunction;
+        }
+
+        public List<Expression> expressions()
+        {
+            return expressions;
+        }
+
+        public Iterator<Expression> iterator()
+        {
+            List<Expression> allExpressions = new ArrayList<>(expressions);
+            for (FilterElement child : children)
+                allExpressions.addAll(child.expressions);
+            return allExpressions.iterator();
+        }
+
+        public FilterElement filter(Predicate<Expression> filter)
+        {
+            FilterElement.Builder builder = new Builder(isDisjunction);
+
+            expressions.stream().filter(filter).forEach(e -> builder.expressions.add(e));
+
+            children.stream().map(c -> c.filter(filter)).forEach(c -> builder.children.add(c));
+
+            return builder.build();
+        }
+
+        public List<FilterElement> children()
+        {
+            return children;
+        }
+
+        public boolean isEmpty()
+        {
+            return expressions.isEmpty() && children.isEmpty();
+        }
+
+        public boolean isAlwaysTrue()
+        {
+            return !isDisjunction && isEmpty();
+        }
+
+        public boolean contains(Expression expression)
+        {
+            return expressions.contains(expression) || children.stream().anyMatch(c -> contains(expression));
+        }
+
+        public FilterElement partitionLevelTree()
+        {
+            return new FilterElement(isDisjunction,
+                                     expressions.stream()
+                                                  .filter(e -> e.column.isStatic() || e.column.isPartitionKey())
+                                                  .collect(Collectors.toList()),
+                                     children.stream()
+                                               .map(FilterElement::partitionLevelTree)
+                                               .collect(Collectors.toList()));
+        }
+
+        public FilterElement rowLevelTree()
+        {
+            return new FilterElement(isDisjunction,
+                                     expressions.stream()
+                                                  .filter(e -> !e.column.isStatic() && !e.column.isPartitionKey())
+                                                  .collect(Collectors.toList()),
+                                     children.stream()
+                                               .map(FilterElement::rowLevelTree)
+                                               .collect(Collectors.toList()));
+        }
+
+        public int size()
+        {
+            return expressions.size() + children.stream().mapToInt(FilterElement::size).sum();
+        }
+
+        public boolean isSatisfiedBy(TableMetadata table, DecoratedKey key, Row row)
+        {
+            if (isEmpty())
+                return true;
+            if (isDisjunction)
+            {
+                for (Expression e : expressions)
+                    if (e.isSatisfiedBy(table, key, row))
+                        return true;
+                for (FilterElement child : children)
+                    if (child.isSatisfiedBy(table, key, row))
+                        return true;
+                return false;
+            }
+            else
+            {
+                for (Expression e : expressions)
+                    if (!e.isSatisfiedBy(table, key, row))
+                        return false;
+                for (FilterElement child : children)
+                    if (!child.isSatisfiedBy(table, key, row))
+                        return false;
+                return true;
+            }
+        }
+
+        @Override
+        public String toString()
+        {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < expressions.size(); i++)
+            {
+                if (sb.length() > 0)
+                    sb.append(isDisjunction ? " OR " : " AND ");
+                sb.append(expressions.get(i));
+            }
+            for (int i = 0; i < children.size(); i++)
+            {
+                if (sb.length() > 0)
+                    sb.append(isDisjunction ? " OR " : " AND ");
+                sb.append("(");
+                sb.append(children.get(i));
+                sb.append(")");
+            }
+            return sb.toString();
+        }
+
+        public Stream<Expression> getExpressionsPreOrder()
+        {
+            return Stream.concat(expressions.stream(),
+                                 children.stream().flatMap(FilterElement::getExpressionsPreOrder));
+        }
+
+        public static class Builder
+        {
+            private boolean isDisjunction;
+            private final List<Expression> expressions = new ArrayList<>();
+            private final List<FilterElement> children = new ArrayList<>();
+
+            public Builder(boolean isDisjunction)
+            {
+                this.isDisjunction = isDisjunction;
+            }
+
+            public FilterElement build()
+            {
+                return new FilterElement(isDisjunction, expressions, children);
+            }
+        }
+
+        public static class Serializer
+        {
+            public void serialize(FilterElement operation, DataOutputPlus out, int version) throws IOException
+            {
+                assert (!operation.isDisjunction && operation.children().isEmpty()) || version == MessagingService.VERSION_SG_10 :
+                "Attempting to serialize a disjunct row filter to a node that doesn't support disjunction";
+
+                out.writeUnsignedVInt(operation.expressions.size());
+                for (Expression expr : operation.expressions)
+                    Expression.serializer.serialize(expr, out, version);
+
+                if (version < MessagingService.VERSION_SG_10)
+                    return;
+
+                out.writeBoolean(operation.isDisjunction);
+                out.writeUnsignedVInt(operation.children.size());
+                for (FilterElement child : operation.children)
+                    serialize(child, out, version);
+            }
+
+            public FilterElement deserialize(DataInputPlus in, int version, TableMetadata metadata) throws IOException
+            {
+                int size = (int)in.readUnsignedVInt();
+                List<Expression> expressions = new ArrayList<>(size);
+                for (int i = 0; i < size; i++)
+                    expressions.add(Expression.serializer.deserialize(in, version, metadata));
+
+                if (version < MessagingService.VERSION_SG_10)
+                    return new FilterElement(false, expressions, Collections.emptyList());
+
+                boolean isDisjunction = in.readBoolean();
+                size = (int)in.readUnsignedVInt();
+                List<FilterElement> children = new ArrayList<>(size);
+                for (int i  = 0; i < size; i++)
+                    children.add(deserialize(in, version, metadata));
+                return new FilterElement(isDisjunction, expressions, children);
+            }
+
+            public long serializedSize(FilterElement operation, int version)
+            {
+                long size = TypeSizes.sizeofUnsignedVInt(operation.expressions.size());
+                for (Expression expr : operation.expressions)
+                    size += Expression.serializer.serializedSize(expr, version);
+
+                if (version < MessagingService.VERSION_SG_10)
+                    return size;
+
+                size++; // isDisjunction boolean
+                size += TypeSizes.sizeofUnsignedVInt(operation.children.size());
+                for (FilterElement child : operation.children)
+                    size += serializedSize(child, version);
+                return size;
+            }
+        }
+    }
+
+    private static class CQLFilter extends RowFilter
+    {
+        private static final CQLFilter NONE = new CQLFilter(FilterElement.NONE);
+
+        private CQLFilter(FilterElement operation)
+        {
+            super(operation);
+        }
+
+        protected Transformation<BaseRowIterator<?>> filter(TableMetadata metadata, int nowInSec)
+        {
+            FilterElement partitionLevelOperation = root.partitionLevelTree();
+            FilterElement rowLevelOperation = root.rowLevelTree();
+
+            final boolean filterNonStaticColumns = rowLevelOperation.size() > 0;
+
+            return new Transformation<BaseRowIterator<?>>()
+            {
+                DecoratedKey pk;
+
+                @SuppressWarnings("resource")
+                protected BaseRowIterator<?> applyToPartition(BaseRowIterator<?> partition)
+                {
+                    pk = partition.partitionKey();
+
+                    // Short-circuit all partitions that won't match based on static and partition keys
+                    if (!partitionLevelOperation.isSatisfiedBy(metadata, partition.partitionKey(), partition.staticRow()))
+                    {
+                        partition.close();
+                        return null;
+                    }
+
+                    BaseRowIterator<?> iterator = partition instanceof UnfilteredRowIterator
+                                                  ? Transformation.apply((UnfilteredRowIterator) partition, this)
+                                                  : Transformation.apply((RowIterator) partition, this);
+
+                    if (filterNonStaticColumns && !iterator.hasNext())
+                    {
+                        iterator.close();
+                        return null;
+                    }
+
+                    return iterator;
+                }
+
+                public Row applyToRow(Row row)
+                {
+                    Row purged = row.purge(DeletionPurger.PURGE_ALL, nowInSec, metadata.enforceStrictLiveness());
+                    if (purged == null)
+                        return null;
+
+                    if (!rowLevelOperation.isSatisfiedBy(metadata, pk, purged))
+                        return null;
+
+                    return row;
+                }
+            };
+        }
     }
 
     public static abstract class Expression
     {
-        private static final Serializer serializer = new Serializer();
+        public static final Serializer serializer = new Serializer();
 
-        // Note: the order of this enum matter, it's used for serialization,
+        // Note: the val of this enum is used for serialization,
         // and this is why we have some UNUSEDX for values we don't use anymore
         // (we could clean those on a major protocol update, but it's not worth
         // the trouble for now)
-        protected enum Kind { SIMPLE, MAP_ELEMENT, UNUSED1, CUSTOM, USER }
+        // VECTOR
+        protected enum Kind {
+            SIMPLE(0), MAP_COMPARISON(1), UNUSED1(2), CUSTOM(3), USER(4), VECTOR_RADIUS(100);
+            private final int val;
+            Kind(int v) { val = v; }
+            public int getVal() { return val; }
+            public static Kind fromVal(int val)
+            {
+                switch (val)
+                {
+                    case 0: return SIMPLE;
+                    case 1: return MAP_COMPARISON;
+                    case 2: return UNUSED1;
+                    case 3: return CUSTOM;
+                    case 4: return USER;
+                    case 100: return VECTOR_RADIUS;
+                    default: throw new IllegalArgumentException("Unknown index expression kind: " + val);
+                }
+            }
+        }
 
         protected abstract Kind kind();
         protected final ColumnMetadata column;
@@ -483,6 +771,28 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         }
 
         /**
+         * Checks if the operator of this <code>IndexExpression</code> is a <code>CONTAINS</code> operator.
+         *
+         * @return <code>true</code> if the operator of this <code>IndexExpression</code> is a <code>CONTAINS</code>
+         * operator, <code>false</code> otherwise.
+         */
+        public boolean isContains()
+        {
+            return Operator.CONTAINS == operator;
+        }
+
+        /**
+         * Checks if the operator of this <code>IndexExpression</code> is a <code>CONTAINS_KEY</code> operator.
+         *
+         * @return <code>true</code> if the operator of this <code>IndexExpression</code> is a <code>CONTAINS_KEY</code>
+         * operator, <code>false</code> otherwise.
+         */
+        public boolean isContainsKey()
+        {
+            return Operator.CONTAINS_KEY == operator;
+        }
+
+        /**
          * If this expression is used to query an index, the value to use as
          * partition key for that index query.
          */
@@ -497,8 +807,7 @@ public class RowFilter implements Iterable<RowFilter.Expression>
             checkBindValueSet(value, "Unsupported unset value for column %s", column.name);
         }
 
-        /** @deprecated See CASSANDRA-6377 */
-        @Deprecated(since = "3.5")
+        @Deprecated
         public void validateForIndexing()
         {
             checkFalse(value.remaining() > FBUtilities.MAX_UNSIGNED_SHORT,
@@ -556,29 +865,11 @@ public class RowFilter implements Iterable<RowFilter.Expression>
             return Objects.hashCode(column.name, operator, value);
         }
 
-        @Override
-        public String toString()
-        {
-            return toString(false);
-        }
-
-        /**
-         * Returns a CQL representation of this expression.
-         *
-         * @return a CQL representation of this expression
-         */
-        public String toCQLString()
-        {
-            return toString(true);
-        }
-
-        protected abstract String toString(boolean cql);
-
-        private static class Serializer
+        public static class Serializer
         {
             public void serialize(Expression expression, DataOutputPlus out, int version) throws IOException
             {
-                out.writeByte(expression.kind().ordinal());
+                out.writeByte(expression.kind().getVal());
 
                 // Custom expressions include neither a column or operator, but all
                 // other expressions do.
@@ -603,24 +894,30 @@ public class RowFilter implements Iterable<RowFilter.Expression>
                     case SIMPLE:
                         ByteBufferUtil.writeWithShortLength(expression.value, out);
                         break;
-                    case MAP_ELEMENT:
-                        MapElementExpression mexpr = (MapElementExpression)expression;
+                    case MAP_COMPARISON:
+                        MapComparisonExpression mexpr = (MapComparisonExpression)expression;
                         ByteBufferUtil.writeWithShortLength(mexpr.key, out);
                         ByteBufferUtil.writeWithShortLength(mexpr.value, out);
+                        break;
+                    case VECTOR_RADIUS:
+                        GeoDistanceExpression gexpr = (GeoDistanceExpression) expression;
+                        gexpr.distanceOperator.writeTo(out);
+                        ByteBufferUtil.writeWithShortLength(gexpr.distance, out);
+                        ByteBufferUtil.writeWithShortLength(gexpr.value, out);
                         break;
                 }
             }
 
             public Expression deserialize(DataInputPlus in, int version, TableMetadata metadata) throws IOException
             {
-                Kind kind = Kind.values()[in.readByte()];
+                Kind kind = Kind.fromVal(in.readByte());
 
                 // custom expressions (3.0+ only) do not contain a column or operator, only a value
                 if (kind == Kind.CUSTOM)
                 {
-                    return new CustomExpression(metadata,
-                            IndexMetadata.serializer.deserialize(in, version, metadata),
-                            ByteBufferUtil.readWithShortLength(in));
+                    return CustomExpression.build(metadata,
+                                                  IndexMetadata.serializer.deserialize(in, version, metadata),
+                                                  ByteBufferUtil.readWithShortLength(in));
                 }
 
                 if (kind == Kind.USER)
@@ -639,10 +936,15 @@ public class RowFilter implements Iterable<RowFilter.Expression>
                 {
                     case SIMPLE:
                         return new SimpleExpression(column, operator, ByteBufferUtil.readWithShortLength(in));
-                    case MAP_ELEMENT:
+                    case MAP_COMPARISON:
                         ByteBuffer key = ByteBufferUtil.readWithShortLength(in);
                         ByteBuffer value = ByteBufferUtil.readWithShortLength(in);
-                        return new MapElementExpression(column, key, operator, value);
+                        return new MapComparisonExpression(column, key, operator, value);
+                    case VECTOR_RADIUS:
+                        Operator boundaryOperator = Operator.readFrom(in);
+                        ByteBuffer distance = ByteBufferUtil.readWithShortLength(in);
+                        ByteBuffer searchVector = ByteBufferUtil.readWithShortLength(in);
+                        return new GeoDistanceExpression(column, searchVector, boundaryOperator, distance);
                 }
                 throw new AssertionError();
             }
@@ -655,15 +957,15 @@ public class RowFilter implements Iterable<RowFilter.Expression>
                 // other expressions do.
                 if (expression.kind() != Kind.CUSTOM && expression.kind() != Kind.USER)
                     size += ByteBufferUtil.serializedSizeWithShortLength(expression.column().name.bytes)
-                            + Operator.serializedSize();
+                            + expression.operator.serializedSize();
 
                 switch (expression.kind())
                 {
                     case SIMPLE:
                         size += ByteBufferUtil.serializedSizeWithShortLength(((SimpleExpression)expression).value);
                         break;
-                    case MAP_ELEMENT:
-                        MapElementExpression mexpr = (MapElementExpression)expression;
+                    case MAP_COMPARISON:
+                        MapComparisonExpression mexpr = (MapComparisonExpression)expression;
                         size += ByteBufferUtil.serializedSizeWithShortLength(mexpr.key)
                               + ByteBufferUtil.serializedSizeWithShortLength(mexpr.value);
                         break;
@@ -673,6 +975,12 @@ public class RowFilter implements Iterable<RowFilter.Expression>
                         break;
                     case USER:
                         size += UserExpression.serializedSize((UserExpression)expression, version);
+                        break;
+                    case VECTOR_RADIUS:
+                        GeoDistanceExpression geoDistanceRelation = (GeoDistanceExpression) expression;
+                        size += ByteBufferUtil.serializedSizeWithShortLength(geoDistanceRelation.distance)
+                                + ByteBufferUtil.serializedSizeWithShortLength(geoDistanceRelation.value)
+                                + geoDistanceRelation.distanceOperator.serializedSize();
                         break;
                 }
                 return size;
@@ -685,7 +993,7 @@ public class RowFilter implements Iterable<RowFilter.Expression>
      */
     public static class SimpleExpression extends Expression
     {
-        SimpleExpression(ColumnMetadata column, Operator operator, ByteBuffer value)
+        public SimpleExpression(ColumnMetadata column, Operator operator, ByteBuffer value)
         {
             super(column, operator, value);
         }
@@ -696,48 +1004,124 @@ public class RowFilter implements Iterable<RowFilter.Expression>
             // TODO: we should try to merge both code someday.
             assert value != null;
 
-            if (operator.appliesToColumnValues())
+            switch (operator)
             {
-                assert !column.isComplex() : "Only CONTAINS and CONTAINS_KEY are supported for 'complex' types";
+                case EQ:
+                case IN:
+                case NOT_IN:
+                case LT:
+                case LTE:
+                case GTE:
+                case GT:
+                    {
+                        assert !column.isComplex() : "Only CONTAINS and CONTAINS_KEY are supported for 'complex' types";
 
-                // In order to support operators on Counter types, their value has to be extracted from internal
-                // representation. See CASSANDRA-11629
-                if (column.type.isCounter())
-                {
-                    ByteBuffer foundValue = getValue(metadata, partitionKey, row);
-                    if (foundValue == null)
-                        return false;
+                        // In order to support operators on Counter types, their value has to be extracted from internal
+                        // representation. See CASSANDRA-11629
+                        if (column.type.isCounter())
+                        {
+                            ByteBuffer foundValue = getValue(metadata, partitionKey, row);
+                            if (foundValue == null)
+                                return false;
 
-                    ByteBuffer counterValue = LongType.instance.decompose(CounterContext.instance().total(foundValue, ByteBufferAccessor.instance));
-                    return operator.isSatisfiedBy(LongType.instance, counterValue, value);
-                }
-                else
-                {
-                    // Note that CQL expression are always of the form 'x < 4', i.e. the tested value is on the left.
-                    ByteBuffer foundValue = getValue(metadata, partitionKey, row);
-                    return foundValue != null && operator.isSatisfiedBy(column.type, foundValue, value);
-                }
+                            ByteBuffer counterValue = LongType.instance.decompose(CounterContext.instance().total(foundValue, ByteBufferAccessor.instance));
+                            return operator.isSatisfiedBy(LongType.instance, counterValue, value);
+                        }
+                        else
+                        {
+                            // Note that CQL expression are always of the form 'x < 4', i.e. the tested value is on the left.
+                            ByteBuffer foundValue = getValue(metadata, partitionKey, row);
+                            return foundValue != null && operator.isSatisfiedBy(column.type, foundValue, value);
+                        }
+                    }
+                case NEQ:
+                case LIKE_PREFIX:
+                case LIKE_SUFFIX:
+                case LIKE_CONTAINS:
+                case LIKE_MATCHES:
+                case ANN:
+                    {
+                        assert !column.isComplex() : "Only CONTAINS and CONTAINS_KEY are supported for 'complex' types";
+                        ByteBuffer foundValue = getValue(metadata, partitionKey, row);
+                        // Note that CQL expression are always of the form 'x < 4', i.e. the tested value is on the left.
+                        return foundValue != null && operator.isSatisfiedBy(column.type, foundValue, value);
+                    }
+                case CONTAINS:
+                    return contains(metadata, partitionKey, row);
+                case CONTAINS_KEY:
+                    return containsKey(metadata, partitionKey, row);
+                case NOT_CONTAINS:
+                    return !contains(metadata, partitionKey, row);
+                case NOT_CONTAINS_KEY:
+                    return !containsKey(metadata, partitionKey, row);
             }
-            else if (operator.appliesToCollectionElements() || operator.appliesToMapKeys())
+            throw new AssertionError("Unsupported operator: " + operator);
+        }
+
+        private boolean contains(TableMetadata metadata, DecoratedKey partitionKey, Row row)
+        {
+            assert column.type.isCollection();
+            CollectionType<?> type = (CollectionType<?>)column.type;
+            if (column.isComplex())
             {
-                assert column.type.isCollection();
-                CollectionType<?> type = (CollectionType<?>) column.type;
-                if (column.isComplex())
+                ComplexColumnData complexData = row.getComplexColumnData(column);
+                if (complexData != null)
                 {
-                    ComplexColumnData complexData = row.getComplexColumnData(column);
-                    return complexData != null && operator.isSatisfiedBy(type, complexData, value);
+                    for (Cell<?> cell : complexData)
+                    {
+                        if (type.kind == CollectionType.Kind.SET)
+                        {
+                            if (type.nameComparator().compare(cell.path().get(0), value) == 0)
+                                return true;
+                        }
+                        else
+                        {
+                            if (type.valueComparator().compare(cell.buffer(), value) == 0)
+                                return true;
+                        }
+                    }
                 }
-                else
-                {
-                    ByteBuffer foundValue = getValue(metadata, partitionKey, row);
-                    return foundValue != null && operator.isSatisfiedBy(column.type, foundValue, value);
-                }
+                return false;
             }
-            throw new AssertionError();
+            else
+            {
+                ByteBuffer foundValue = getValue(metadata, partitionKey, row);
+                if (foundValue == null)
+                    return false;
+
+                switch (type.kind)
+                {
+                    case LIST:
+                        ListType<?> listType = (ListType<?>)type;
+                        return listType.compose(foundValue).contains(listType.getElementsType().compose(value));
+                    case SET:
+                        SetType<?> setType = (SetType<?>)type;
+                        return setType.compose(foundValue).contains(setType.getElementsType().compose(value));
+                    case MAP:
+                        MapType<?,?> mapType = (MapType<?, ?>)type;
+                        return mapType.compose(foundValue).containsValue(mapType.getValuesType().compose(value));
+                }
+                throw new AssertionError();
+            }
+        }
+
+        private boolean containsKey(TableMetadata metadata, DecoratedKey partitionKey, Row row)
+        {
+            assert column.type.isCollection() && column.type instanceof MapType;
+            MapType<?, ?> mapType = (MapType<?, ?>)column.type;
+            if (column.isComplex())
+            {
+                return row.getCell(column, CellPath.create(value)) != null;
+            }
+            else
+            {
+                ByteBuffer foundValue = getValue(metadata, partitionKey, row);
+                return foundValue != null && mapType.getSerializer().getSerializedValue(foundValue, value, mapType.getKeysType()) != null;
+            }
         }
 
         @Override
-        protected String toString(boolean cql)
+        public String toString()
         {
             AbstractType<?> type = column.type;
             switch (operator)
@@ -755,26 +1139,19 @@ public class RowFilter implements Iterable<RowFilter.Expression>
                     break;
                 case IN:
                 case NOT_IN:
-                case BETWEEN:
                     type = ListType.getInstance(type, false);
                     break;
+                case ORDER_BY_ASC:
+                case ORDER_BY_DESC:
+                    // These don't have a value, so we return here to prevent an error calling type.getString(value)
+                    return String.format("%s %s", column.name, operator);
                 default:
                     break;
             }
-
-            if (operator.isTernary())
-            {
-                ListType<?> listType = (ListType<?>) type;
-                List<? extends ByteBuffer> buffers = listType.unpack(value);
-                AbstractType<?> elementType = listType.getElementsType();
-                return cql
-                    ? String.format("%s %s %s AND %s", column.name.toCQLString(), operator, elementType.toCQLString(buffers.get(0)), elementType.toCQLString(buffers.get(1)))
-                    : String.format("%s %s %s AND %s", column.name.toString(), operator, elementType.getString(buffers.get(0)), elementType.getString(buffers.get(1)));
-            }
-
-            return cql
-                 ? String.format("%s %s %s", column.name.toCQLString(), operator, type.toCQLString(value) )
-                 : String.format("%s %s %s", column.name.toString(), operator, type.getString(value));
+            var valueString = type.getString(value);
+            if (valueString.length() > 9)
+                valueString = valueString.substring(0, 6) + "...";
+            return String.format("%s %s %s", column.name, operator, valueString);
         }
 
         @Override
@@ -785,17 +1162,19 @@ public class RowFilter implements Iterable<RowFilter.Expression>
     }
 
     /**
-     * An expression of the form 'column' ['key'] = 'value' (which is only
-     * supported when 'column' is a map).
+     * An expression of the form 'column' ['key'] OPERATOR 'value' (which is only
+     * supported when 'column' is a map) and where the operator can be {@link Operator#EQ}, {@link Operator#NEQ},
+     * {@link Operator#LT}, {@link Operator#LTE}, {@link Operator#GT}, or {@link Operator#GTE}.
      */
-    private static class MapElementExpression extends Expression
+    public static class MapComparisonExpression extends Expression
     {
         private final ByteBuffer key;
+        private ByteBuffer indexValue = null;
 
-        public MapElementExpression(ColumnMetadata column, ByteBuffer key, Operator operator, ByteBuffer value)
+        public MapComparisonExpression(ColumnMetadata column, ByteBuffer key, Operator operator, ByteBuffer value)
         {
             super(column, operator, value);
-            assert column.type instanceof MapType && (operator == Operator.EQ || operator == Operator.NEQ);
+            assert column.type instanceof MapType && (operator == Operator.EQ || operator == Operator.NEQ || operator.isSlice());
             this.key = key;
         }
 
@@ -811,10 +1190,27 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         @Override
         public ByteBuffer getIndexValue()
         {
-            return CompositeType.build(ByteBufferAccessor.instance, key, value);
+            if (indexValue == null)
+                indexValue = CompositeType.build(ByteBufferAccessor.instance, key, value);
+            return indexValue;
         }
 
+        /**
+         * Returns whether the provided row satisfies this expression. For equality, it validates that the row contains
+         * the exact key/value pair. For inequalities, it validates that the row contains the key, then that the value
+         * satisfies the inequality.
+         * @param metadata
+         * @param partitionKey the partition key for row to check.
+         * @param row the row to check. It should *not* contain deleted cells
+         * (i.e. it should come from a RowIterator).
+         * @return whether the row is satisfied by this expression.
+         */
         public boolean isSatisfiedBy(TableMetadata metadata, DecoratedKey partitionKey, Row row)
+        {
+            return isSatisfiedByEq(metadata, partitionKey, row) ^ (operator == Operator.NEQ);
+        }
+
+        private boolean isSatisfiedByEq(TableMetadata metadata, DecoratedKey partitionKey, Row row)
         {
             assert key != null;
             // We support null conditions for LWT (in ColumnCondition) but not for RowFilter.
@@ -824,11 +1220,14 @@ public class RowFilter implements Iterable<RowFilter.Expression>
             if (row.isStatic() != column.isStatic())
                 return true;
 
-            MapType<?, ?> mt = (MapType<?, ?>) column.type;
+            int comp;
+            MapType<?, ?> mt = (MapType<?, ?>)column.type;
             if (column.isComplex())
             {
                 Cell<?> cell = row.getCell(column, CellPath.create(key));
-                return cell != null && operator.isSatisfiedBy(mt.getValuesType(), cell.buffer(), value);
+                if (cell == null)
+                    return false;
+                comp = mt.valueComparator().compare(cell.buffer(), value);
             }
             else
             {
@@ -837,19 +1236,32 @@ public class RowFilter implements Iterable<RowFilter.Expression>
                     return false;
 
                 ByteBuffer foundValue = mt.getSerializer().getSerializedValue(serializedMap, key, mt.getKeysType());
-                return foundValue != null && operator.isSatisfiedBy(mt.getValuesType(), foundValue, value);
+                if (foundValue == null)
+                    return false;
+                comp = mt.valueComparator().compare(foundValue, value);
+            }
+            switch (operator) {
+                case EQ:
+                case NEQ: // NEQ is inverted in calling method. We do this to simplify handling of null cells.
+                    return comp == 0;
+                case LT:
+                    return comp < 0;
+                case LTE:
+                    return comp <= 0;
+                case GT:
+                    return comp > 0;
+                case GTE:
+                    return comp >= 0;
+                default:
+                    throw new AssertionError("Unsupported operator: " + operator);
             }
         }
 
         @Override
-        protected String toString(boolean cql)
+        public String toString()
         {
-            MapType<?, ?> mt = (MapType<?, ?>) column.type;
-            AbstractType<?> nt = mt.nameComparator();
-            AbstractType<?> vt = mt.valueComparator();
-            return cql
-                    ? String.format("%s[%s] %s %s", column.name.toCQLString(), nt.toCQLString(key), operator, vt.toCQLString(value))
-                    : String.format("%s[%s] %s %s", column.name.toString(), nt.getString(key), operator, vt.getString(value));
+            MapType<?, ?> mt = (MapType<?, ?>)column.type;
+            return String.format("%s[%s] %s %s", column.name, mt.nameComparator().getString(key), operator, mt.valueComparator().getString(value));
         }
 
         @Override
@@ -858,10 +1270,10 @@ public class RowFilter implements Iterable<RowFilter.Expression>
             if (this == o)
                 return true;
 
-            if (!(o instanceof MapElementExpression))
+            if (!(o instanceof MapComparisonExpression))
                 return false;
 
-            MapElementExpression that = (MapElementExpression)o;
+            MapComparisonExpression that = (MapComparisonExpression)o;
 
             return Objects.equal(this.column.name, that.column.name)
                 && Objects.equal(this.operator, that.operator)
@@ -878,7 +1290,179 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         @Override
         protected Kind kind()
         {
-            return Kind.MAP_ELEMENT;
+            return Kind.MAP_COMPARISON;
+        }
+
+        /**
+         * Get the lower bound for this expression. When the expression is EQ, GT, or GTE, the lower bound is the
+         * expression itself. When the expression is LT or LTE, the lower bound is the map's key becuase
+         * {@link ByteBuffer} comparisons will work correctly.
+         * @return the lower bound for this expression.
+         */
+        public ByteBuffer getLowerBound()
+        {
+            switch (operator) {
+                case EQ:
+                case GT:
+                case GTE:
+                    return this.getIndexValue();
+                case LT:
+                case LTE:
+                    return CompositeType.extractFirstComponentAsTrieSearchPrefix(getIndexValue(), true);
+                default:
+                    throw new AssertionError("Unsupported operator: " + operator);
+            }
+        }
+
+        /**
+         * Get the upper bound for this expression. When the expression is EQ, LT, or LTE, the upper bound is the
+         * expression itself. When the expression is GT or GTE, the upper bound is the map's key with the last byte
+         * set to 1 so that {@link ByteBuffer} comparisons will work correctly.
+         * @return the upper bound for this express
+         */
+        public ByteBuffer getUpperBound()
+        {
+            switch (operator) {
+                case GT:
+                case GTE:
+                    return CompositeType.extractFirstComponentAsTrieSearchPrefix(getIndexValue(), false);
+                case EQ:
+                case LT:
+                case LTE:
+                    return this.getIndexValue();
+                default:
+                    throw new AssertionError("Unsupported operator: " + operator);
+            }
+        }
+    }
+
+
+    public static class GeoDistanceExpression extends Expression
+    {
+        private final ByteBuffer distance;
+        private final Operator distanceOperator;
+        private final float searchRadiusMeters;
+        private final float searchLat;
+        private final float searchLon;
+        // Whether this is a shifted expression, which is used to handle crossing the antimeridian
+        private final boolean isShifted;
+
+        public GeoDistanceExpression(ColumnMetadata column, ByteBuffer point, Operator operator, ByteBuffer distance)
+        {
+            this(column, point, operator, distance, false);
+        }
+
+        private GeoDistanceExpression(ColumnMetadata column, ByteBuffer point, Operator operator, ByteBuffer distance, boolean isShifted)
+        {
+            super(column, Operator.BOUNDED_ANN, point);
+            assert column.type instanceof VectorType && (operator == Operator.LTE || operator == Operator.LT);
+            this.isShifted = isShifted;
+            this.distanceOperator = operator;
+            this.distance = distance;
+            searchRadiusMeters = FloatType.instance.compose(distance);
+            var pointVector = TypeUtil.decomposeVector(column.type, point);
+            // This is validated earlier in the parser because the column requires size 2, so only assert on it
+            assert pointVector.length == 2 : "GEO_DISTANCE requires search vector to have 2 dimensions.";
+            searchLat = pointVector[0];
+            searchLon = pointVector[1];
+        }
+
+        public boolean crossesAntimeridian()
+        {
+            return GeoUtil.crossesAntimeridian(searchLat, searchLon, searchRadiusMeters);
+        }
+
+        /**
+         * Build a new {@link GeoDistanceExpression} that is shifted by 360 degrees and can correctly search
+         * on the opposite side of the antimeridian.
+         * @return
+         */
+        public GeoDistanceExpression buildShiftedExpression()
+        {
+            float shiftedLon = searchLon > 0 ? searchLon - 360 : searchLon + 360;
+            var newPoint = VectorType.getInstance(FloatType.instance, 2)
+                                     .decompose(List.of(searchLat, shiftedLon));
+            return new GeoDistanceExpression(column, newPoint, distanceOperator, distance, true);
+        }
+
+        public Operator getDistanceOperator()
+        {
+            return distanceOperator;
+        }
+
+        public ByteBuffer getDistance()
+        {
+            return distance;
+        }
+
+        @Override
+        public void validate() throws InvalidRequestException
+        {
+            checkBindValueSet(distance, "Unsupported unset distance for column %s", column.name);
+            checkBindValueSet(value, "Unsupported unset vector value for column %s", column.name);
+
+            if (searchRadiusMeters <= 0)
+                throw new InvalidRequestException("GEO_DISTANCE radius must be positive, got " + searchRadiusMeters);
+
+            if (searchLat < -90 || searchLat > 90)
+                throw new InvalidRequestException("GEO_DISTANCE latitude must be between -90 and 90 degrees, got " + searchLat);
+            if (!isShifted && (searchLon < -180 || searchLon > 180))
+                throw new InvalidRequestException("GEO_DISTANCE longitude must be between -180 and 180 degrees, got " + searchLon);
+        }
+
+        @Override
+        public boolean isSatisfiedBy(TableMetadata metadata, DecoratedKey partitionKey, Row row)
+        {
+            ByteBuffer foundValue = getValue(metadata, partitionKey, row);
+            if (foundValue == null)
+                return false;
+            var foundVector = TypeUtil.decomposeVector(column.type, foundValue);
+            double haversineDistance = SloppyMath.haversinMeters(foundVector[0], foundVector[1], searchLat, searchLon);
+            switch (distanceOperator)
+            {
+                case LTE:
+                    return haversineDistance <= searchRadiusMeters;
+                case LT:
+                    return haversineDistance < searchRadiusMeters;
+                default:
+                    throw new AssertionError("Unsupported operator: " + operator);
+            }
+        }
+
+        @Override
+        public String toString()
+        {
+            return String.format("GEO_DISTANCE(%s, %s) %s %s", column.name, column.type.getString(value),
+                                 distanceOperator, FloatType.instance.getString(distance));
+        }
+
+        @Override
+        public boolean equals(Object o)
+        {
+            if (this == o)
+                return true;
+
+            if (!(o instanceof GeoDistanceExpression))
+                return false;
+
+            GeoDistanceExpression that = (GeoDistanceExpression)o;
+
+            return Objects.equal(this.column.name, that.column.name)
+                   && Objects.equal(this.distanceOperator, that.distanceOperator)
+                   && Objects.equal(this.distance, that.distance)
+                   && Objects.equal(this.value, that.value);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return Objects.hashCode(column.name, distanceOperator, value, distance);
+        }
+
+        @Override
+        protected Kind kind()
+        {
+            return Kind.VECTOR_RADIUS;
         }
     }
 
@@ -886,7 +1470,7 @@ public class RowFilter implements Iterable<RowFilter.Expression>
      * A custom index expression for use with 2i implementations which support custom syntax and which are not
      * necessarily linked to a single column in the base table.
      */
-    public static final class CustomExpression extends Expression
+    public static class CustomExpression extends Expression
     {
         private final IndexMetadata targetIndex;
         private final TableMetadata table;
@@ -897,6 +1481,12 @@ public class RowFilter implements Iterable<RowFilter.Expression>
             super(makeDefinition(table, targetIndex), Operator.EQ, value);
             this.targetIndex = targetIndex;
             this.table = table;
+        }
+
+        public static CustomExpression build(TableMetadata metadata, IndexMetadata targetIndex, ByteBuffer value)
+        {
+            // delegate the expression creation to the target custom index
+            return Keyspace.openAndGetStore(metadata).indexManager.getIndex(targetIndex).customExpressionFor(metadata, value);
         }
 
         private static ColumnMetadata makeDefinition(TableMetadata table, IndexMetadata index)
@@ -916,11 +1506,10 @@ public class RowFilter implements Iterable<RowFilter.Expression>
             return value;
         }
 
-        @Override
-        protected String toString(boolean cql)
+        public String toString()
         {
             return String.format("expr(%s, %s)",
-                                 cql ? ColumnIdentifier.maybeQuote(targetIndex.name) : targetIndex.name,
+                                 targetIndex.name,
                                  Keyspace.openAndGetStore(table)
                                          .indexManager
                                          .getIndex(targetIndex)
@@ -1038,29 +1627,20 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         public void serialize(RowFilter filter, DataOutputPlus out, int version) throws IOException
         {
             out.writeBoolean(false); // Old "is for thrift" boolean
-            out.writeUnsignedVInt32(filter.expressions.size());
-            for (Expression expr : filter.expressions)
-                Expression.serializer.serialize(expr, out, version);
-
+            FilterElement.serializer.serialize(filter.root, out, version);
         }
 
-        public RowFilter deserialize(DataInputPlus in, int version, TableMetadata metadata, boolean needsReconciliation) throws IOException
+        public RowFilter deserialize(DataInputPlus in, int version, TableMetadata metadata) throws IOException
         {
             in.readBoolean(); // Unused
-            int size = in.readUnsignedVInt32();
-            List<Expression> expressions = new ArrayList<>(size);
-            for (int i = 0; i < size; i++)
-                expressions.add(Expression.serializer.deserialize(in, version, metadata));
-
-            return new RowFilter(expressions, needsReconciliation);
+            FilterElement operation = FilterElement.serializer.deserialize(in, version, metadata);
+            return new CQLFilter(operation);
         }
 
         public long serializedSize(RowFilter filter, int version)
         {
             long size = 1 // unused boolean
-                      + TypeSizes.sizeofUnsignedVInt(filter.expressions.size());
-            for (Expression expr : filter.expressions)
-                size += Expression.serializer.serializedSize(expr, version);
+                        + FilterElement.serializer.serializedSize(filter.root, version);
             return size;
         }
     }

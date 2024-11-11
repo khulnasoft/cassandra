@@ -18,6 +18,7 @@
 package org.apache.cassandra.cql3.statements.schema;
 
 import java.nio.ByteBuffer;
+import java.util.function.UnaryOperator;
 
 import org.apache.cassandra.audit.AuditLogContext;
 import org.apache.cassandra.audit.AuditLogEntryType;
@@ -25,13 +26,13 @@ import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.UTName;
 import org.apache.cassandra.cql3.functions.UserFunction;
+import org.apache.cassandra.cql3.statements.RawKeyspaceAwareStatement;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.Keyspaces.KeyspacesDiff;
 import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.transport.Event.SchemaChange.Change;
 import org.apache.cassandra.transport.Event.SchemaChange.Target;
 import org.apache.cassandra.transport.Event.SchemaChange;
@@ -48,20 +49,19 @@ public final class DropTypeStatement extends AlterSchemaStatement
     private final String typeName;
     private final boolean ifExists;
 
-    public DropTypeStatement(String keyspaceName, String typeName, boolean ifExists)
+    public DropTypeStatement(String queryString, String keyspaceName, String typeName,
+                             boolean ifExists)
     {
-        super(keyspaceName);
+        super(queryString, keyspaceName);
         this.typeName = typeName;
         this.ifExists = ifExists;
     }
 
     // TODO: expand types into tuples in all dropped columns of all tables
-    @Override
-    public Keyspaces apply(ClusterMetadata metadata)
+    public Keyspaces apply(Keyspaces schema)
     {
         ByteBuffer name = bytes(typeName);
 
-        Keyspaces schema = metadata.schema.getKeyspaces();
         KeyspaceMetadata keyspace = schema.getNullable(keyspaceName);
 
         UserType type = null == keyspace
@@ -123,7 +123,7 @@ public final class DropTypeStatement extends AlterSchemaStatement
 
     public void authorize(ClientState client)
     {
-        client.ensureAllTablesPermission(keyspaceName, Permission.DROP);
+        client.ensureKeyspacePermission(keyspaceName, Permission.DROP);
     }
 
     @Override
@@ -137,7 +137,7 @@ public final class DropTypeStatement extends AlterSchemaStatement
         return String.format("%s (%s, %s)", getClass().getSimpleName(), keyspaceName, typeName);
     }
 
-    public static final class Raw extends CQLStatement.Raw
+    public static final class Raw extends RawKeyspaceAwareStatement<DropTypeStatement>
     {
         private final UTName name;
         private final boolean ifExists;
@@ -148,10 +148,12 @@ public final class DropTypeStatement extends AlterSchemaStatement
             this.ifExists = ifExists;
         }
 
-        public DropTypeStatement prepare(ClientState state)
+        @Override
+        public DropTypeStatement prepare(ClientState state, UnaryOperator<String> keyspaceMapper)
         {
-            String keyspaceName = name.hasKeyspace() ? name.getKeyspace() : state.getKeyspace();
-            return new DropTypeStatement(keyspaceName, name.getStringTypeName(), ifExists);
+            String keyspaceName = keyspaceMapper.apply(name.hasKeyspace() ? name.getKeyspace() : state.getKeyspace());
+            return new DropTypeStatement(rawCQLStatement, keyspaceName, name.getStringTypeName(),
+                                         ifExists);
         }
     }
 }

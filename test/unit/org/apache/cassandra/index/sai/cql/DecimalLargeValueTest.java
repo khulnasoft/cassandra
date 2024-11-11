@@ -42,7 +42,7 @@ public class DecimalLargeValueTest extends SAITester
 
     /**
      * This test tries to induce rounding errors involving decimal values with wide significands.
-     *
+     * </p>
      * Two values are indexed:
      * <ul>
      * <li>1.0</li>
@@ -50,11 +50,11 @@ public class DecimalLargeValueTest extends SAITester
      * </ul>
      */
     @Test
-    public void runQueriesWithDecimalValueCollision() throws Throwable
+    public void runQueriesWithDecimalValueCollision()
     {
         final int significandSizeInDecimalDigits = 512;
         // String.repeat(int) exists in JDK 11 and later, but this line was introduced on JDK 8
-        String wideDecimalString = "1." + StringUtils.repeat('0', significandSizeInDecimalDigits - 2) + '1';
+        String wideDecimalString = "1." + StringUtils.repeat('0', significandSizeInDecimalDigits - 2) + "1";
         BigDecimal wideDecimal = new BigDecimal(wideDecimalString);
         // Sanity checks that this value was actually constructed as intended
         Preconditions.checkState(wideDecimal.precision() == significandSizeInDecimalDigits,
@@ -64,7 +64,7 @@ public class DecimalLargeValueTest extends SAITester
                                  "expected: %s; actual: %s", wideDecimalString, wideDecimal.toPlainString());
 
         execute("INSERT INTO %s (pk, ck, dec) VALUES (0, 1, 1.0)");
-        execute("INSERT INTO %s (pk, ck, dec) VALUES (2, 0, " + wideDecimalString + ')');
+        execute("INSERT INTO %s (pk, ck, dec) VALUES (2, 0, " + wideDecimalString + ")");
 
         // EQ queries
         assertRows(execute("SELECT * FROM %s WHERE dec = 1.0"),
@@ -98,12 +98,19 @@ public class DecimalLargeValueTest extends SAITester
         assertRowsIgnoringOrder(execute("SELECT * FROM %s WHERE dec >= 1.0"),
                 row(0, 1, BigDecimal.valueOf(1.0D)),
                 row(2, 0, wideDecimal));
+
+        // NEQ queries
+        assertRows(execute("SELECT * FROM %s WHERE dec != 1.0"),
+                row(2, 0, wideDecimal));
+
+        assertRows(execute("SELECT * FROM %s WHERE dec != " + wideDecimalString),
+                row(0, 1, BigDecimal.valueOf(1.0D)));
     }
     /**
      * This is a control method with small (two-significant-digit) values.
      */
     @Test
-    public void runQueriesWithoutCollisions() throws Throwable
+    public void runQueriesWithoutCollisions()
     {
         execute("INSERT INTO %s (pk, ck, dec) VALUES (-2, 1, 2.2)");
         execute("INSERT INTO %s (pk, ck, dec) VALUES (-2, 2, 2.2)");
@@ -145,6 +152,14 @@ public class DecimalLargeValueTest extends SAITester
                 row(-2, 2, BigDecimal.valueOf(2.2D)),
                 row(-1, 1, BigDecimal.valueOf(1.1D)),
                 row(1, 1, BigDecimal.valueOf(1.1D)),
+                row(2, 1, BigDecimal.valueOf(2.2D)),
+                row(2, 2, BigDecimal.valueOf(2.2D)));
+
+        // NEQ queries
+        assertRowsIgnoringOrder(execute("SELECT * FROM %s WHERE dec != 1.1"),
+                row(-2, 1, BigDecimal.valueOf(2.2D)),
+                row(-2, 2, BigDecimal.valueOf(2.2D)),
+                row(0, 1, BigDecimal.valueOf(0)),
                 row(2, 1, BigDecimal.valueOf(2.2D)),
                 row(2, 2, BigDecimal.valueOf(2.2D)));
     }

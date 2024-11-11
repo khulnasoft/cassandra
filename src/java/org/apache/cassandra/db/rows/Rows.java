@@ -27,6 +27,7 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.partitions.PartitionStatisticsCollector;
 import org.apache.cassandra.utils.MergeIterator;
+import org.apache.cassandra.utils.Reducer;
 
 /**
  * Static utilities to work on Row objects.
@@ -97,9 +98,8 @@ public abstract class Rows
      *
      * @param row the row for which to collect stats.
      * @param collector the stats collector.
-     * @return the total number of cells in {@code row}.
      */
-    public static int collectStats(Row row, PartitionStatisticsCollector collector)
+    public static void collectStats(Row row, PartitionStatisticsCollector collector)
     {
         assert !row.isEmpty();
 
@@ -109,7 +109,26 @@ public abstract class Rows
         long result = row.accumulate(StatsAccumulation::accumulateOnColumnData, collector, 0);
 
         collector.updateColumnSetPerRow(StatsAccumulation.unpackColumnCount(result));
-        return StatsAccumulation.unpackCellCount(result);
+    }
+
+    public static long collectMaxTimestamp(Row row)
+    {
+        long maxTimestamp = row.primaryKeyLivenessInfo().timestamp();
+        for (ColumnData cd : row)
+        {
+            if (cd.column().isSimple())
+            {
+                maxTimestamp = Math.max(maxTimestamp, ((Cell<?>)cd).timestamp());
+            }
+            else
+            {
+                ComplexColumnData complexData = (ComplexColumnData)cd;
+                maxTimestamp = Math.max(maxTimestamp, complexData.complexDeletion().markedForDeleteAt());
+                for (Cell<?> cell : complexData)
+                    maxTimestamp = Math.max(maxTimestamp, cell.timestamp());
+            }
+        }
+        return maxTimestamp;
     }
 
     /**
@@ -123,6 +142,7 @@ public abstract class Rows
      * @param merged the result of merging {@code inputs}.
      * @param inputs the inputs whose merge yielded {@code merged}.
      */
+    @SuppressWarnings("resource")
     public static void diff(RowDiffListener diffListener, Row merged, Row...inputs)
     {
         Clustering<?> clustering = merged.clustering();
@@ -145,7 +165,7 @@ public abstract class Rows
         for (Row row : inputs)
             inputIterators.add(row == null ? Collections.emptyIterator() : row.iterator());
 
-        Iterator<?> iter = MergeIterator.get(inputIterators, ColumnData.comparator, new MergeIterator.Reducer<ColumnData, Object>()
+        Iterator<?> iter = MergeIterator.get(inputIterators, ColumnData.comparator, new Reducer<ColumnData, Object>()
         {
             ColumnData mergedData;
             ColumnData[] inputDatas = new ColumnData[inputs.length];
@@ -157,7 +177,7 @@ public abstract class Rows
                     inputDatas[idx - 1] = current;
             }
 
-            protected Object getReduced()
+            public Object getReduced()
             {
                 for (int i = 0 ; i != inputDatas.length ; i++)
                 {
@@ -219,7 +239,7 @@ public abstract class Rows
                 return null;
             }
 
-            protected void onKeyChange()
+            public void onKeyChange()
             {
                 mergedData = null;
                 Arrays.fill(inputDatas, null);
@@ -236,8 +256,8 @@ public abstract class Rows
     }
 
     /**
-     * Merges two rows. In addition to reconciling the cells in each row, the liveness info, and deletion times for
-     * the row and complex columns are also merged.
+     * Merges two rows into the given builder, mainly for merging memtable rows. In addition to reconciling the cells
+     * in each row, the liveness info, and deletion times for the row and complex columns are also merged.
      * <p>
      * Note that this method assumes that the provided rows can meaningfully be reconciled together. That is,
      * that the rows share the same clustering value, and belong to the same partition.

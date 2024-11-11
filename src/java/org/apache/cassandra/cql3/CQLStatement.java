@@ -24,11 +24,18 @@ import org.apache.cassandra.audit.AuditLogContext;
 import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
-import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.messages.ResultMessage;
 
 public interface CQLStatement
 {
+    /**
+     * The query string that produced that statement, if available.
+     *
+     * @return the raw query string that produced that statement, or {@code null} if said string is not available
+     * (typically because the statement has not be built from a string). Note that said string may contain bind markers.
+     */
+    public String getRawCQLStatement();
+
     /**
      * Returns all bind variables for the statement
      */
@@ -48,7 +55,7 @@ public interface CQLStatement
     }
 
     /**
-     * Return an Iterable over all the functions (both native and user-defined) used by any component of the statement
+     * Return an Iterable over all of the functions (both native and user-defined) used by any component of the statement
      *
      * @return functions all functions found (may contain duplicates)
      */
@@ -62,30 +69,30 @@ public interface CQLStatement
      *
      * @param state the current client state
      */
-    void authorize(ClientState state);
+    public void authorize(ClientState state);
 
     /**
      * Perform additional validation required by the statment. To be overriden by subclasses if needed.
      *
-     * @param state the current client state
+     * @param state the current query state
      */
-    void validate(ClientState state);
+    public void validate(QueryState state);
 
     /**
      * Execute the statement and return the resulting result or null if there is no result.
      *
      * @param state the current query state
      * @param options options for this query (consistency, variables, pageSize, ...)
-     * @param requestTime request enqueue / and start times;
+     * @param queryStartNanoTime the timestamp returned by System.nanoTime() when this statement was received
      */
-    ResultMessage execute(QueryState state, QueryOptions options, Dispatcher.RequestTime requestTime);
+    public ResultMessage execute(QueryState state, QueryOptions options, long queryStartNanoTime);
 
     /**
      * Variant of execute used for internal query against the system tables, and thus only query the local node.
      *
      * @param state the current query state
      */
-    ResultMessage executeLocally(QueryState state, QueryOptions options);
+    public ResultMessage executeLocally(QueryState state, QueryOptions options);
 
     /**
      * Provides the context needed for audit logging statements.
@@ -93,31 +100,27 @@ public interface CQLStatement
     AuditLogContext getAuditLogContext();
 
     /**
-     * Whether this CQL Statement has LWT conditions
+     * Whether or not this CQL Statement has LWT conditions
      */
-    default boolean hasConditions()
+    default public boolean hasConditions()
     {
         return false;
     }
 
-    /**
-     * If this CQL statement is not fully qualified and this method returns true,
-     * then the warning will be emitted to the client if the statement is executed on
-     * a keyspace it was not prepared on.
-     * <p>
-     * A warning is also emitted if a prepare statement is used for other than
-     * modifications statements.
-     *
-     * @return true if this statement is eligible to be a prepared statement, false otherwise.
-     */
-    default boolean eligibleAsPreparedStatement()
+    public static abstract class Raw
     {
-        return false;
-    }
-
-    abstract class Raw
-    {
+        protected String rawCQLStatement;
         protected VariableSpecifications bindVariables;
+
+        public void setRawCQLStatement(String queryString)
+        {
+            this.rawCQLStatement = queryString;
+        }
+
+        public String getRawCQLStatement()
+        {
+            return rawCQLStatement;
+        }
 
         public void setBindVariables(List<ColumnIdentifier> variables)
         {
@@ -127,8 +130,14 @@ public interface CQLStatement
         public abstract CQLStatement prepare(ClientState state);
     }
 
-    interface SingleKeyspaceCqlStatement extends CQLStatement
+    /**
+     * A marker for the statements (prepared) which run against an exact keyspace.
+     */
+    public static interface SingleKeyspaceCqlStatement extends CQLStatement
     {
-        String keyspace();
+        /**
+         * Returns a keyspace name associated with this statement.
+         */
+        public String keyspace();
     }
 }

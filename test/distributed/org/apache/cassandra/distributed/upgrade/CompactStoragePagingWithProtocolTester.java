@@ -23,15 +23,15 @@ import java.util.List;
 
 import org.junit.Test;
 
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.ColumnDefinitions;
-import com.datastax.driver.core.DataType;
-import com.datastax.driver.core.ProtocolVersion;
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.SimpleStatement;
-import com.datastax.driver.core.Statement;
+import com.khulnasoft.driver.core.Cluster;
+import com.khulnasoft.driver.core.ColumnDefinitions;
+import com.khulnasoft.driver.core.DataType;
+import com.khulnasoft.driver.core.ProtocolVersion;
+import com.khulnasoft.driver.core.ResultSet;
+import com.khulnasoft.driver.core.Row;
+import com.khulnasoft.driver.core.Session;
+import com.khulnasoft.driver.core.SimpleStatement;
+import com.khulnasoft.driver.core.Statement;
 import com.vdurmont.semver4j.Semver;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
 
@@ -61,7 +61,7 @@ public abstract class CompactStoragePagingWithProtocolTester extends UpgradeTest
         new TestCase()
         .nodes(2)
         .nodesToUpgrade(1)
-        .singleUpgradeToCurrentFrom(initialVersion())
+        .singleUpgrade(initialVersion(), CURRENT)
         .withConfig(config -> config.with(GOSSIP, NETWORK, NATIVE_PROTOCOL))
         .setup(c -> {
             c.schemaChange(withKeyspace("CREATE TABLE %s.t (pk text, ck text, v text, " +
@@ -88,7 +88,7 @@ public abstract class CompactStoragePagingWithProtocolTester extends UpgradeTest
         new TestCase()
         .nodes(2)
         .nodesToUpgrade(1)
-        .singleUpgradeToCurrentFrom(initialVersion())
+        .singleUpgrade(initialVersion(), CURRENT)
         .withConfig(config -> config.with(GOSSIP, NETWORK, NATIVE_PROTOCOL))
         .setup(c -> {
             c.schemaChange(withKeyspace("CREATE TABLE %s.t (pk text, ck1 text, ck2 text, v text, " +
@@ -114,7 +114,7 @@ public abstract class CompactStoragePagingWithProtocolTester extends UpgradeTest
         new TestCase()
         .nodes(2)
         .nodesToUpgrade(1)
-        .singleUpgradeToCurrentFrom(initialVersion())
+        .singleUpgrade(initialVersion(), CURRENT)
         .withConfig(config -> config.with(GOSSIP, NETWORK, NATIVE_PROTOCOL))
         .setup(c -> {
             c.schemaChange(withKeyspace("CREATE TABLE %s.t (pk text PRIMARY KEY, v1 text, v2 text) WITH COMPACT STORAGE"));
@@ -138,14 +138,14 @@ public abstract class CompactStoragePagingWithProtocolTester extends UpgradeTest
 
     private static void assertRows(String query, ProtocolVersion protocolVersion, Object[]... expectedRows)
     {
-        Cluster.Builder builder = com.datastax.driver.core.Cluster.builder()
+        Cluster.Builder builder = com.khulnasoft.driver.core.Cluster.builder()
                                                                   .addContactPoint("127.0.0.1")
                                                                   .withProtocolVersion(protocolVersion);
-        try (com.datastax.driver.core.Cluster cluster = builder.build();
+        try (com.khulnasoft.driver.core.Cluster cluster = builder.build();
              Session session = cluster.connect())
         {
             Statement stmt = new SimpleStatement(query);
-            stmt.setConsistencyLevel(com.datastax.driver.core.ConsistencyLevel.ALL);
+            stmt.setConsistencyLevel(com.khulnasoft.driver.core.ConsistencyLevel.ALL);
             stmt.setFetchSize(1);
 
             ResultSet result = session.execute(stmt);
@@ -153,8 +153,8 @@ public abstract class CompactStoragePagingWithProtocolTester extends UpgradeTest
             assertEquals(expectedRows.length, actualRows.size());
 
             ColumnDefinitions columnDefs = result.getColumnDefinitions();
-            com.datastax.driver.core.ProtocolVersion driverProtocolVersion =
-            com.datastax.driver.core.ProtocolVersion.fromInt(protocolVersion.toInt());
+            com.khulnasoft.driver.core.ProtocolVersion driverProtocolVersion =
+            com.khulnasoft.driver.core.ProtocolVersion.fromInt(protocolVersion.toInt());
 
             for (int rowIndex = 0; rowIndex < expectedRows.length; rowIndex++)
             {

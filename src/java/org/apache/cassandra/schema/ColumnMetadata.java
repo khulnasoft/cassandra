@@ -17,41 +17,42 @@
  */
 package org.apache.cassandra.schema;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.*;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Optional;
 import java.util.function.Predicate;
-
-import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.MoreObjects;
 import com.google.common.collect.Collections2;
-import com.google.common.collect.Lists;
 
-import org.apache.cassandra.cql3.*;
-import org.apache.cassandra.cql3.functions.masking.ColumnMask;
+import org.apache.cassandra.cql3.ColumnIdentifier;
+import org.apache.cassandra.cql3.ColumnSpecification;
+import org.apache.cassandra.cql3.CqlBuilder;
+import org.apache.cassandra.cql3.VariableSpecifications;
 import org.apache.cassandra.cql3.selection.Selectable;
 import org.apache.cassandra.cql3.selection.Selector;
 import org.apache.cassandra.cql3.selection.SimpleSelector;
-import org.apache.cassandra.db.rows.*;
-import org.apache.cassandra.db.marshal.*;
+import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.CollectionType;
+import org.apache.cassandra.db.marshal.MultiCellCapableType;
+import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.db.marshal.UserType;
+import org.apache.cassandra.db.rows.Cell;
+import org.apache.cassandra.db.rows.CellPath;
+import org.apache.cassandra.db.rows.ColumnData;
 import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.tcm.serialization.UDTAndFunctionsAwareMetadataSerializer;
-import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.serializers.MarshalException;
-import org.apache.cassandra.utils.ByteBufferUtil;
 import org.github.jamm.Unmetered;
 
-import static org.apache.cassandra.db.TypeSizes.BOOL_SIZE;
-import static org.apache.cassandra.db.TypeSizes.sizeof;
+import static java.lang.String.format;
 
 @Unmetered
 public final class ColumnMetadata extends ColumnSpecification implements Selectable, Comparable<ColumnMetadata>
 {
-    public static final Serializer serializer = new Serializer();
     public static final Comparator<Object> asymmetricColumnDataComparator =
         (a, b) -> ((ColumnData) a).column().compareTo((ColumnMetadata) b);
 
@@ -86,6 +87,11 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
 
     }
 
+    /**
+     * Whether this is a dropped column.
+     */
+    private final boolean isDropped;
+
     public final Kind kind;
 
     /*
@@ -109,12 +115,6 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
      */
     private final long comparisonOrder;
 
-    /**
-     * Masking function used to dynamically mask the contents of this column.
-     */
-    @Nullable
-    private final ColumnMask mask;
-
     private static long comparisonOrder(Kind kind, boolean isComplex, long position, ColumnIdentifier name)
     {
         assert position >= 0 && position < 1 << 12;
@@ -126,58 +126,71 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
 
     public static ColumnMetadata partitionKeyColumn(TableMetadata table, ByteBuffer name, AbstractType<?> type, int position)
     {
-        return new ColumnMetadata(table, name, type, position, Kind.PARTITION_KEY, null);
+        return new ColumnMetadata(table, name, type, position, Kind.PARTITION_KEY);
     }
 
     public static ColumnMetadata partitionKeyColumn(String keyspace, String table, String name, AbstractType<?> type, int position)
     {
-        return new ColumnMetadata(keyspace, table, ColumnIdentifier.getInterned(name, true), type, position, Kind.PARTITION_KEY, null);
+        return new ColumnMetadata(keyspace, table, ColumnIdentifier.getInterned(name, true), type, position, Kind.PARTITION_KEY);
     }
 
     public static ColumnMetadata clusteringColumn(TableMetadata table, ByteBuffer name, AbstractType<?> type, int position)
     {
-        return new ColumnMetadata(table, name, type, position, Kind.CLUSTERING, null);
+        return new ColumnMetadata(table, name, type, position, Kind.CLUSTERING);
     }
 
     public static ColumnMetadata clusteringColumn(String keyspace, String table, String name, AbstractType<?> type, int position)
     {
-        return new ColumnMetadata(keyspace, table, ColumnIdentifier.getInterned(name, true), type, position, Kind.CLUSTERING, null);
+        return new ColumnMetadata(keyspace, table, ColumnIdentifier.getInterned(name, true), type, position, Kind.CLUSTERING);
     }
 
     public static ColumnMetadata regularColumn(TableMetadata table, ByteBuffer name, AbstractType<?> type)
     {
-        return new ColumnMetadata(table, name, type, NO_POSITION, Kind.REGULAR, null);
+        return new ColumnMetadata(table, name, type, NO_POSITION, Kind.REGULAR);
     }
 
     public static ColumnMetadata regularColumn(String keyspace, String table, String name, AbstractType<?> type)
     {
-        return new ColumnMetadata(keyspace, table, ColumnIdentifier.getInterned(name, true), type, NO_POSITION, Kind.REGULAR, null);
+        return new ColumnMetadata(keyspace, table, ColumnIdentifier.getInterned(name, true), type, NO_POSITION, Kind.REGULAR);
     }
 
     public static ColumnMetadata staticColumn(TableMetadata table, ByteBuffer name, AbstractType<?> type)
     {
-        return new ColumnMetadata(table, name, type, NO_POSITION, Kind.STATIC, null);
+        return new ColumnMetadata(table, name, type, NO_POSITION, Kind.STATIC);
     }
 
     public static ColumnMetadata staticColumn(String keyspace, String table, String name, AbstractType<?> type)
     {
-        return new ColumnMetadata(keyspace, table, ColumnIdentifier.getInterned(name, true), type, NO_POSITION, Kind.STATIC, null);
+        return new ColumnMetadata(keyspace, table, ColumnIdentifier.getInterned(name, true), type, NO_POSITION, Kind.STATIC);
     }
 
-    public ColumnMetadata(TableMetadata table,
-                          ByteBuffer name,
-                          AbstractType<?> type,
-                          int position,
-                          Kind kind,
-                          @Nullable ColumnMask mask)
+    /**
+     * Rebuild the metadata for a dropped column from its recorded data.
+     *
+     * <p>Please note that this method expect that the provided arguments are those of a dropped column, and in
+     * particular that the type uses no UDT (any should have been expanded). If a column is being dropped, prefer
+     * {@link #asDropped()} to transform the existing column to a dropped one as this deal with type expansion directly.
+     */
+    public static ColumnMetadata droppedColumn(String keyspace,
+                                               String table,
+                                               ColumnIdentifier name,
+                                               AbstractType<?> type,
+                                               Kind kind)
+    {
+        assert !kind.isPrimaryKeyKind();
+        assert !type.referencesUserTypes()
+        : format("In %s.%s, dropped column %s type should not contain UDT; got %s" , keyspace, table, name, type);
+        return new ColumnMetadata(keyspace, table, name, type, NO_POSITION, kind, true);
+    }
+
+    public ColumnMetadata(TableMetadata table, ByteBuffer name, AbstractType<?> type, int position, Kind kind)
     {
         this(table.keyspace,
              table.name,
              ColumnIdentifier.getInterned(name, UTF8Type.instance),
              type,
              position,
-             kind,
-             mask);
+             kind);
     }
 
     @VisibleForTesting
@@ -186,26 +199,30 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
                           ColumnIdentifier name,
                           AbstractType<?> type,
                           int position,
+                          Kind kind)
+    {
+        this(ksName, cfName, name, type, position, kind, false);
+    }
+
+    public ColumnMetadata(String ksName,
+                          String cfName,
+                          ColumnIdentifier name,
+                          AbstractType<?> type,
+                          int position,
                           Kind kind,
-                          @Nullable ColumnMask mask)
+                          boolean isDropped)
     {
         super(ksName, cfName, name, type);
         assert name != null && type != null && kind != null;
         assert (position == NO_POSITION) == !kind.isPrimaryKeyKind(); // The position really only make sense for partition and clustering columns (and those must have one),
                                                                       // so make sure we don't sneak it for something else since it'd breaks equals()
-
-        // The propagation of system distributed keyspaces at startup can be problematic for old nodes without DDM,
-        // since those won't know what to do with the mask mutations. Thus, we don't support DDM on those keyspaces.
-        if (mask != null && SchemaConstants.isReplicatedSystemKeyspace(ksName))
-            throw new AssertionError("DDM is not supported on system distributed keyspaces");
-
         this.kind = kind;
         this.position = position;
         this.cellPathComparator = makeCellPathComparator(kind, type);
         this.cellComparator = cellPathComparator == null ? ColumnData.comparator : (a, b) -> cellPathComparator.compare(a.path(), b.path());
         this.asymmetricCellPathComparator = cellPathComparator == null ? null : (a, b) -> cellPathComparator.compare(((Cell<?>)a).path(), (CellPath) b);
         this.comparisonOrder = comparisonOrder(kind, isComplex(), Math.max(0, position), name);
-        this.mask = mask;
+        this.isDropped = isDropped;
     }
 
     private static Comparator<CellPath> makeCellPathComparator(Kind kind, AbstractType<?> type)
@@ -213,9 +230,7 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
         if (kind.isPrimaryKeyKind() || !type.isMultiCell())
             return null;
 
-        AbstractType<?> nameComparator = type.isCollection()
-                                       ? ((CollectionType) type).nameComparator()
-                                       : ((UserType) type).nameComparator();
+        AbstractType<?> nameComparator = ((MultiCellCapableType<?>) type).nameComparator();
 
 
         return (path1, path2) ->
@@ -235,24 +250,53 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
         };
     }
 
+    /**
+     * Whether that is the column metadata of a dropped column.
+     */
+    public boolean isDropped()
+    {
+        return isDropped;
+    }
+
     public ColumnMetadata copy()
     {
-        return new ColumnMetadata(ksName, cfName, name, type, position, kind, mask);
+        return new ColumnMetadata(ksName, cfName, name, type, position, kind, isDropped);
+    }
+
+    public ColumnMetadata withNewKeyspace(String newKeyspace, Types udts)
+    {
+        return new ColumnMetadata(newKeyspace, cfName, name, type.withUpdatedUserTypes(udts), position, kind, isDropped);
     }
 
     public ColumnMetadata withNewName(ColumnIdentifier newName)
     {
-        return new ColumnMetadata(ksName, cfName, newName, type, position, kind, mask);
+        return new ColumnMetadata(ksName, cfName, newName, type, position, kind, isDropped);
     }
 
     public ColumnMetadata withNewType(AbstractType<?> newType)
     {
-        return new ColumnMetadata(ksName, cfName, name, newType, position, kind, mask);
+        return new ColumnMetadata(ksName, cfName, name, newType, position, kind, isDropped);
     }
 
-    public ColumnMetadata withNewMask(@Nullable ColumnMask newMask)
+    /**
+     * Transforms this (non-dropped) column metadata into one suitable when the column is dropped.
+     *
+     * <p>This should be used when a column is dropped to create the relevant {@link DroppedColumn} record.
+     *
+     * @return the transformed metadata. It will be equivalent to {@code this} except that 1) its {@link #isDropped}
+     * method will return {@code true} and 2) any UDT within the column type will have been expanded to tuples (see
+     * {@link AbstractType#expandUserTypes()}).
+     */
+    ColumnMetadata asDropped()
     {
-        return new ColumnMetadata(ksName, cfName, name, type, position, kind, newMask);
+        assert !isDropped : this + " was already dropped";
+        return new ColumnMetadata(ksName,
+                                  cfName,
+                                  name,
+                                  type.expandUserTypes(),
+                                  position,
+                                  kind,
+                                  true);
     }
 
     public boolean isPartitionKey()
@@ -268,11 +312,6 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
     public boolean isStatic()
     {
         return kind == Kind.STATIC;
-    }
-
-    public boolean isMasked()
-    {
-        return mask != null;
     }
 
     public boolean isRegular()
@@ -291,12 +330,6 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
     public int position()
     {
         return position;
-    }
-
-    @Nullable
-    public ColumnMask getMask()
-    {
-        return mask;
     }
 
     @Override
@@ -319,8 +352,7 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
             && kind == other.kind
             && position == other.position
             && ksName.equals(other.ksName)
-            && cfName.equals(other.cfName)
-            && Objects.equals(mask, other.mask);
+            && cfName.equals(other.cfName);
     }
 
     Optional<Difference> compare(ColumnMetadata other)
@@ -350,7 +382,6 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
             result = 31 * result + (type == null ? 0 : type.hashCode());
             result = 31 * result + (kind == null ? 0 : kind.hashCode());
             result = 31 * result + position;
-            result = 31 * result + (mask == null ? 0 : mask.hashCode());
             hash = result;
         }
         return result;
@@ -386,13 +417,7 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
     @Override
     public boolean processesSelection()
     {
-        return isMasked();
-    }
-
-    @Override
-    public ColumnSpecification specForElementOrSlice(Selectable selected, ColumnSpecification receiver, CollectionType.Kind kind, String selectionType)
-    {
-        return Selectable.super.specForElementOrSlice(selected, receiver, kind, selectionType);
+        return false;
     }
 
     /**
@@ -404,28 +429,6 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
     public static Collection<ColumnIdentifier> toIdentifiers(Collection<ColumnMetadata> definitions)
     {
         return Collections2.transform(definitions, columnDef -> columnDef.name);
-    }
-
-    /**
-     * Returns the types corresponding to the specified column definitions.
-     *
-     * @param columns the column definitions to convert.
-     * @return the types corresponding to the specified definitions
-     */
-    public static List<AbstractType<?>> types(List<ColumnMetadata> columns)
-    {
-        return Lists.transform(columns, column -> column.type);
-    }
-
-    /**
-     * Returns the CQL names corresponding to the specified column definitions.
-     *
-     * @param columns the column definitions to convert.
-     * @return the CQL names corresponding to the specified definitions
-     */
-    public static List<String> cqlNames(List<ColumnMetadata> columns)
-    {
-        return Lists.transform(columns, column -> column.name.toCQLString());
     }
 
     public int compareTo(ColumnMetadata other)
@@ -513,9 +516,6 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
 
         if (isStatic())
             builder.append(" static");
-
-        if (isMasked())
-            mask.appendCqlTo(builder);
     }
 
     public static String toCQLString(Iterable<ColumnMetadata> defs)
@@ -529,11 +529,12 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
             return "";
 
         StringBuilder sb = new StringBuilder();
-        sb.append(defs.next().name.toCQLString());
+        sb.append(defs.next().name);
         while (defs.hasNext())
-            sb.append(", ").append(defs.next().name.toCQLString());
+            sb.append(", ").append(defs.next().name);
         return sb.toString();
     }
+
 
     public void appendNameAndOrderTo(CqlBuilder builder)
     {
@@ -570,7 +571,7 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
 
     public Selector.Factory newSelectorFactory(TableMetadata table, AbstractType<?> expectedType, List<ColumnMetadata> defs, VariableSpecifications boundNames) throws InvalidRequestException
     {
-        return SimpleSelector.newFactory(this, addAndGetIndex(this, defs), false);
+        return SimpleSelector.newFactory(this, addAndGetIndex(this, defs));
     }
 
     public AbstractType<?> getExactTypeIfKnown(String keyspace)
@@ -579,69 +580,12 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
     }
 
     /**
-     * Returns the types of the differents columns.
+     * Validate whether the column definition is valid (mostly, that the type is valid for the type of column this is).
      *
-     * @param columns the columns for which the types must be returned.
-     * @return the types of the differents columns.
+     * @param isCounterTable whether the table the column is part of is a counter table.
      */
-    public static List<AbstractType<?>> typesOf(List<ColumnMetadata> columns)
+    public void validate(boolean isCounterTable, boolean durationLegacyMode)
     {
-        List<AbstractType<?>> types = new ArrayList<>(columns.size());
-        for (ColumnMetadata column : columns)
-        {
-            types.add(column.type);
-        }
-        return types;
-    }
-
-    public static class Serializer implements UDTAndFunctionsAwareMetadataSerializer<ColumnMetadata>
-    {
-        public void serialize(ColumnMetadata t, DataOutputPlus out, Version version) throws IOException
-        {
-            out.writeUTF(t.ksName);
-            out.writeUTF(t.cfName);
-            out.writeUTF(t.kind.name());
-            out.writeInt(t.position);
-            out.writeUTF(t.type.asCQL3Type().toString());
-            out.writeBoolean(t.isReversedType());
-            out.writeUTF(t.name.toString());
-            ByteBufferUtil.writeWithShortLength(t.name.bytes, out);
-            out.writeBoolean(t.mask != null);
-            if (t.mask != null)
-                ColumnMask.serializer.serialize(t.mask, out, version);
-        }
-
-        public ColumnMetadata deserialize(DataInputPlus in, Types types, UserFunctions functions, Version version) throws IOException
-        {
-            String ksName = in.readUTF();
-            String tableName = in.readUTF();
-            Kind kind = Kind.valueOf(in.readUTF());
-            int position = in.readInt();
-            AbstractType<?> type = CQLTypeParser.parse(ksName, in.readUTF(), types);
-            boolean isReversedType = in.readBoolean();
-            if (isReversedType)
-                type = ReversedType.getInstance(type);
-            String name = in.readUTF();
-            ByteBuffer nameBB = ByteBufferUtil.readWithShortLength(in);
-            ColumnMask mask = null;
-            boolean masked = in.readBoolean();
-            if (masked)
-                mask = ColumnMask.serializer.deserialize(in, ksName, type, types, functions, version);
-            return new ColumnMetadata(ksName, tableName, new ColumnIdentifier(nameBB, name), type, position, kind, mask);
-        }
-
-        public long serializedSize(ColumnMetadata t, Version version)
-        {
-            return sizeof(t.ksName) +
-                   sizeof(t.cfName) +
-                   sizeof(t.kind.name()) +
-                   sizeof(t.position) +
-                   sizeof(t.type.asCQL3Type().toString()) +
-                   sizeof(t.isReversedType()) +
-                   sizeof(t.name.toString()) +
-                   ByteBufferUtil.serializedSizeWithShortLength(t.name.bytes) +
-                   BOOL_SIZE +
-                   ((t.mask == null) ? 0 : ColumnMask.serializer.serializedSize(t.mask, version));
-        }
+        type.validateForColumn(name.bytes, kind.isPrimaryKeyKind(), isCounterTable, isDropped, false, durationLegacyMode);
     }
 }

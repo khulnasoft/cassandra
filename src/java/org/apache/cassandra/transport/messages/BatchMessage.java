@@ -20,8 +20,12 @@ package org.apache.cassandra.transport.messages;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import com.google.common.collect.ImmutableMap;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import io.netty.buffer.ByteBuf;
 import org.apache.cassandra.cql3.Attributes;
@@ -40,14 +44,12 @@ import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.transport.CBUtil;
-import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.Message;
 import org.apache.cassandra.transport.ProtocolException;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.MD5Digest;
-
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
+import org.apache.cassandra.utils.NoSpamLogger;
 
 public class BatchMessage extends Message.Request
 {
@@ -164,13 +166,7 @@ public class BatchMessage extends Message.Request
     }
 
     @Override
-    protected boolean isTrackable()
-    {
-        return true;
-    }
-
-    @Override
-    protected Message.Response execute(QueryState state, Dispatcher.RequestTime requestTime, boolean traceRequest)
+    protected Message.Response execute(QueryState state, long queryStartNanoTime, boolean traceRequest)
     {
         List<QueryHandler.Prepared> prepared = null;
         try
@@ -213,7 +209,7 @@ public class BatchMessage extends Message.Request
             {
                 CQLStatement statement = prepared.get(i).statement;
                 if (queries != null)
-                    queries.add(prepared.get(i).rawCQLStatement);
+                    queries.add(statement.getRawCQLStatement());
                 batchOptions.prepareStatement(i, statement.getBindVariables());
 
                 if (!(statement instanceof ModificationStatement))
@@ -224,10 +220,11 @@ public class BatchMessage extends Message.Request
 
             // Note: It's ok at this point to pass a bogus value for the number of bound terms in the BatchState ctor
             // (and no value would be really correct, so we prefer passing a clearly wrong one).
-            BatchStatement batch = new BatchStatement(batchType, VariableSpecifications.empty(), statements, Attributes.none());
+            BatchStatement batch = new BatchStatement(null, batchType,
+                                                      VariableSpecifications.empty(), statements, Attributes.none());
 
-            long queryTime = currentTimeMillis();
-            Message.Response response = handler.processBatch(batch, state, batchOptions, getCustomPayload(), requestTime);
+            long queryTime = System.currentTimeMillis();
+            Message.Response response = handler.processBatch(batch, state, batchOptions, getCustomPayload(), queryStartNanoTime);
             if (queries != null)
                 QueryEvents.instance.notifyBatchSuccess(batchType, statements, queries, values, options, state, queryTime, response);
             return response;
@@ -245,8 +242,8 @@ public class BatchMessage extends Message.Request
         ImmutableMap.Builder<String, String> builder = ImmutableMap.builder();
         if (options.getConsistency() != null)
             builder.put("consistency_level", options.getConsistency().name());
-        if (options.getSerialConsistency() != null)
-            builder.put("serial_consistency_level", options.getSerialConsistency().name());
+        if (options.getSerialConsistency(state) != null)
+            builder.put("serial_consistency_level", options.getSerialConsistency(state).name());
 
         // TODO we don't have [typed] access to CQL bind variables here.  CASSANDRA-4560 is open to add support.
         Tracing.instance.begin("Execute batch of CQL3 queries", state.getClientAddress(), builder.build());

@@ -19,22 +19,26 @@
 package org.apache.cassandra.index.sai.analyzer.filter;
 
 /**
- * Executes all linked {@link FilterPipeline.Task}s serially on the provided input and returns a result
+ * Executes all linked Pipeline Tasks serially and returns
+ * output (if exists) from the executed logic
  */
 public class FilterPipelineExecutor
 {
-    public static String execute(FilterPipeline pipeline, String initialInput)
+    public static String execute(FilterPipelineTask task, String initialInput)
     {
-        FilterPipeline.Task currentTask = pipeline.head();
+        FilterPipelineTask taskPtr = task;
         String result = initialInput;
         
         while (true)
         {
-            result = currentTask.process(result);
-            currentTask = currentTask.next;
+            FilterPipelineTask taskGeneric = taskPtr;
+            result = taskGeneric.process(result);
+            taskPtr = taskPtr.next;
             
-            if (currentTask == null)
+            if (taskPtr == null)
+            {
                 return result;
+            }
         }
     }
 }

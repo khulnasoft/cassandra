@@ -17,46 +17,43 @@
  */
 package org.apache.cassandra.metrics;
 
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Function;
 import java.util.function.Supplier;
 
 import org.junit.Test;
 
 import org.apache.cassandra.Util;
-import org.apache.cassandra.concurrent.ExecutorPlus;
-import org.apache.cassandra.concurrent.SEPExecutor;
-import org.apache.cassandra.concurrent.SharedExecutorPool;
-import org.apache.cassandra.concurrent.ThreadPoolExecutorJMXAdapter;
-import org.apache.cassandra.concurrent.ThreadPoolExecutorPlus;
+import org.apache.cassandra.concurrent.*;
 
-import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
-import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.*;
 
 public class ThreadPoolMetricsTest
 {
     @Test
     public void testJMXEnabledThreadPoolMetricsWithNoBlockedThread()
     {
-        ThreadPoolExecutorPlus executor = (ThreadPoolExecutorPlus) executorFactory()
-                .withJmxInternal()
-                .configurePooled("ThreadPoolMetricsTest-1", 2)
-                .withQueueLimit(2)
-                .build();
-        testMetricsWithNoBlockedThreads(executor, ((ThreadPoolExecutorJMXAdapter)executor.onShutdown()).metrics(), 2);
+        JMXEnabledThreadPoolExecutor executor = new JMXEnabledThreadPoolExecutor(2,
+                                                                                 Integer.MAX_VALUE,
+                                                                                 TimeUnit.SECONDS,
+                                                                                 new ArrayBlockingQueue<>(2),
+                                                                                 new NamedThreadFactory("ThreadPoolMetricsTest-1"),
+                                                                                 "internal");
+        testMetricsWithNoBlockedThreads(executor, executor.metrics);
     }
 
     @Test
     public void testJMXEnabledThreadPoolMetricsWithBlockedThread()
     {
-        ThreadPoolExecutorPlus executor = (ThreadPoolExecutorPlus) executorFactory()
-                .withJmxInternal()
-                .configurePooled("ThreadPoolMetricsTest-2", 2)
-                .withQueueLimit(2)
-                .build();
-        testMetricsWithBlockedThreads(executor, ((ThreadPoolExecutorJMXAdapter)executor.onShutdown()).metrics());
+        JMXEnabledThreadPoolExecutor executor = new JMXEnabledThreadPoolExecutor(2,
+                                                                                 Integer.MAX_VALUE,
+                                                                                 TimeUnit.SECONDS,
+                                                                                 new ArrayBlockingQueue<>(2),
+                                                                                 new NamedThreadFactory("ThreadPoolMetricsTest-2"),
+                                                                                 "internal");
+        testMetricsWithBlockedThreads(executor, executor.metrics);
     }
 
     @Test
@@ -66,13 +63,12 @@ public class ThreadPoolMetricsTest
                                                                                                            "ThreadPoolMetricsTest-3",
                                                                                                            "internal");
 
-        testMetricsWithNoBlockedThreads(executor, executor.metrics, Integer.MAX_VALUE);
+        testMetricsWithNoBlockedThreads(executor, executor.metrics);
     }
 
-    private static void testMetricsWithBlockedThreads(ExecutorPlus threadPool, ThreadPoolMetrics metrics)
+    private static void testMetricsWithBlockedThreads(LocalAwareExecutorService threadPool, ThreadPoolMetrics metrics)
     {
         assertEquals(2, metrics.maxPoolSize.getValue().intValue());
-        assertEquals(2, metrics.maxTasksQueued.getValue().intValue());
 
         spinAssertEquals(0, metrics.activeTasks::getValue);
         spinAssertEquals(0L, metrics.completedTasks::getValue);
@@ -94,7 +90,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(0, metrics.pendingTasks::getValue);
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(0L, metrics.totalBlocked::getCount);
-        spinAssertEquals(2, metrics.maxTasksQueued::getValue);
 
         // There are no threads available any more the 2 next tasks should go into the queue
         threadPool.execute(task3);
@@ -105,7 +100,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(2, metrics.pendingTasks::getValue);
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(0L, metrics.totalBlocked::getCount);
-        spinAssertEquals(0, metrics.maxTasksQueued::getValue);
 
         // The queue is full the 2 next task should go into blocked and block the thread
         BlockingTask task5 = new BlockingTask();
@@ -125,7 +119,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(2, metrics.pendingTasks::getValue);
         spinAssertEquals(1L, metrics.currentBlocked::getCount);
         spinAssertEquals(1L, metrics.totalBlocked::getCount);
-        spinAssertEquals(0, metrics.maxTasksQueued::getValue);
 
         new Thread(() ->
         {
@@ -140,7 +133,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(2, metrics.pendingTasks::getValue);
         spinAssertEquals(2L, metrics.currentBlocked::getCount);
         spinAssertEquals(2L, metrics.totalBlocked::getCount);
-        spinAssertEquals(0, metrics.maxTasksQueued::getValue);
 
         // Allowing first task to complete
         task1.allowToComplete();
@@ -152,7 +144,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(1L, metrics.currentBlocked::getCount);
         spinAssertEquals(2L, metrics.totalBlocked::getCount);
         spinAssertEquals(1, blockedThreads::get);
-        spinAssertEquals(0, metrics.maxTasksQueued::getValue);
 
         // Allowing second task to complete
         task2.allowToComplete();
@@ -164,7 +155,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(2L, metrics.totalBlocked::getCount);
         spinAssertEquals(0, blockedThreads::get);
-        spinAssertEquals(0, metrics.maxTasksQueued::getValue);
 
         // Allowing third task to complete
         task3.allowToComplete();
@@ -175,7 +165,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(1, metrics.pendingTasks::getValue);
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(2L, metrics.totalBlocked::getCount);
-        spinAssertEquals(1, metrics.maxTasksQueued::getValue);
 
         // Allowing fourth task to complete
         task4.allowToComplete();
@@ -186,7 +175,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(0, metrics.pendingTasks::getValue);
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(2L, metrics.totalBlocked::getCount);
-        spinAssertEquals(2, metrics.maxTasksQueued::getValue);
 
         // Allowing last tasks to complete
         task5.allowToComplete();
@@ -197,19 +185,15 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(0, metrics.pendingTasks::getValue);
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(2L, metrics.totalBlocked::getCount);
-        spinAssertEquals(2, metrics.maxTasksQueued::getValue);
     }
 
-    private static void testMetricsWithNoBlockedThreads(ExecutorPlus threadPool, ThreadPoolMetrics metrics, Integer initialMaxQueueSize)
+    private static void testMetricsWithNoBlockedThreads(LocalAwareExecutorService threadPool, ThreadPoolMetrics metrics)
     {
-        Integer maxQueueSize = initialMaxQueueSize;
-
         spinAssertEquals(0, metrics.activeTasks::getValue);
         spinAssertEquals(0L, metrics.completedTasks::getValue);
         spinAssertEquals(0, metrics.pendingTasks::getValue);
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(0L, metrics.totalBlocked::getCount);
-        spinAssertEquals(maxQueueSize, metrics.maxTasksQueued::getValue);
 
         BlockingTask task1 = new BlockingTask();
         BlockingTask task2 = new BlockingTask();
@@ -224,7 +208,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(0, metrics.pendingTasks::getValue);
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(0L, metrics.totalBlocked::getCount);
-        spinAssertEquals(maxQueueSize, metrics.maxTasksQueued::getValue);
 
         threadPool.execute(task2);
 
@@ -233,7 +216,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(0, metrics.pendingTasks::getValue);
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(0L, metrics.totalBlocked::getCount);
-        spinAssertEquals(maxQueueSize, metrics.maxTasksQueued::getValue);
 
         // There are no threads available any more the 2 next tasks should go into the queue
         threadPool.execute(task3);
@@ -243,8 +225,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(1, metrics.pendingTasks::getValue);
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(0L, metrics.totalBlocked::getCount);
-        maxQueueSize = resolveMaxTasksQueued(maxQueueSize, v -> --v);
-        spinAssertEquals(maxQueueSize, metrics.maxTasksQueued::getValue);
 
         threadPool.execute(task4);
 
@@ -253,8 +233,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(2, metrics.pendingTasks::getValue);
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(0L, metrics.totalBlocked::getCount);
-        maxQueueSize = resolveMaxTasksQueued(maxQueueSize, v -> --v);
-        spinAssertEquals(maxQueueSize, metrics.maxTasksQueued::getValue);
 
         // Allowing first task to complete
         task1.allowToComplete();
@@ -265,8 +243,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(1, metrics.pendingTasks::getValue);
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(0L, metrics.totalBlocked::getCount);
-        maxQueueSize = resolveMaxTasksQueued(maxQueueSize, v -> ++v);
-        spinAssertEquals(maxQueueSize, metrics.maxTasksQueued::getValue);
 
         // Allowing second task to complete
         task2.allowToComplete();
@@ -277,8 +253,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(0, metrics.pendingTasks::getValue);
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(0L, metrics.totalBlocked::getCount);
-        maxQueueSize = resolveMaxTasksQueued(maxQueueSize, v -> ++v);
-        spinAssertEquals(maxQueueSize, metrics.maxTasksQueued::getValue);
 
         // Allowing third task to complete
         task3.allowToComplete();
@@ -288,7 +262,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(0, metrics.pendingTasks::getValue);
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(0L, metrics.totalBlocked::getCount);
-        spinAssertEquals(maxQueueSize, metrics.maxTasksQueued::getValue);
 
         // Allowing fourth task to complete
         task4.allowToComplete();
@@ -298,21 +271,6 @@ public class ThreadPoolMetricsTest
         spinAssertEquals(0, metrics.pendingTasks::getValue);
         spinAssertEquals(0L, metrics.currentBlocked::getCount);
         spinAssertEquals(0L, metrics.totalBlocked::getCount);
-        spinAssertEquals(maxQueueSize, metrics.maxTasksQueued::getValue);
-    }
-
-    private static Integer resolveMaxTasksQueued(Integer value, Function<Integer, Integer> operation)
-    {
-        if (value == Integer.MAX_VALUE)
-        {
-            // SEPExecutor doesn't care
-            return Integer.MAX_VALUE;
-        }
-        else
-        {
-            value = operation.apply(value);
-            return value;
-        }
     }
 
     private static void spinAssertEquals(Object expected, Supplier<Object> actualSupplier)

@@ -22,7 +22,15 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
 
@@ -46,26 +54,32 @@ import org.apache.cassandra.db.marshal.CounterColumnType;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.ReversedType;
 import org.apache.cassandra.db.marshal.SetType;
-import org.apache.cassandra.db.partitions.*;
+import org.apache.cassandra.db.partitions.FilteredPartition;
+import org.apache.cassandra.db.partitions.ImmutableBTreePartition;
+import org.apache.cassandra.db.partitions.Partition;
+import org.apache.cassandra.db.partitions.PartitionIterator;
+import org.apache.cassandra.db.partitions.PartitionUpdate;
+import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
+import org.apache.cassandra.db.partitions.UnfilteredPartitionIterators;
+import org.apache.cassandra.db.rows.DeserializationHelper;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.db.rows.Unfiltered;
-import org.apache.cassandra.db.rows.DeserializationHelper;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.db.rows.UnfilteredRowIterators;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.exceptions.QueryCancelledException;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.big.BigTableReader;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.WrappedDataOutputStreamPlus;
 import org.apache.cassandra.locator.EndpointsForToken;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.ReplicaUtils;
-import org.apache.cassandra.net.Message;
 import org.apache.cassandra.metrics.ClearableHistogram;
+import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.repair.consistent.LocalSessionAccessor;
@@ -77,17 +91,17 @@ import org.apache.cassandra.schema.SchemaTestUtil;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableParams;
 import org.apache.cassandra.service.ActiveRepairService;
+import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.UUIDGen;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.apache.cassandra.utils.ByteBufferUtil.EMPTY_BYTE_BUFFER;
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -221,7 +235,7 @@ public class ReadCommandTest
                 .build()
                 .apply();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         new RowUpdateBuilder(cfs.metadata(), 0, ByteBufferUtil.bytes("key2"))
                 .clustering("Column1")
@@ -233,20 +247,11 @@ public class ReadCommandTest
         assertEquals(2, Util.getAll(readCommand).size());
 
         readCommand.abort();
-        boolean cancelled = false;
-        try
-        {
-            Util.getAll(readCommand);
-        }
-        catch (QueryCancelledException e)
-        {
-            cancelled = true;
-        }
-        assertTrue(cancelled);
+        assertEquals(0, Util.getAll(readCommand).size());
     }
 
     @Test
-    public void testSinglePartitionSliceAbort()
+    public void testSinglePartitionSliceAbort() throws Exception
     {
         ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF2);
 
@@ -258,7 +263,7 @@ public class ReadCommandTest
                 .build()
                 .apply();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         new RowUpdateBuilder(cfs.metadata(), 0, ByteBufferUtil.bytes("key"))
                 .clustering("dd")
@@ -273,20 +278,11 @@ public class ReadCommandTest
         assertEquals(2, partitions.get(0).rowCount());
 
         readCommand.abort();
-        boolean cancelled = false;
-        try
-        {
-            Util.getAll(readCommand);
-        }
-        catch (QueryCancelledException e)
-        {
-            cancelled = true;
-        }
-        assertTrue(cancelled);
+        assertEquals(0, Util.getAll(readCommand).size());
     }
 
     @Test
-    public void testSinglePartitionNamesAbort()
+    public void testSinglePartitionNamesAbort() throws Exception
     {
         ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF2);
 
@@ -298,7 +294,7 @@ public class ReadCommandTest
                 .build()
                 .apply();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         new RowUpdateBuilder(cfs.metadata(), 0, ByteBufferUtil.bytes("key"))
                 .clustering("dd")
@@ -313,16 +309,7 @@ public class ReadCommandTest
         assertEquals(2, partitions.get(0).rowCount());
 
         readCommand.abort();
-        boolean cancelled = false;
-        try
-        {
-            Util.getAll(readCommand);
-        }
-        catch (QueryCancelledException e)
-        {
-            cancelled = true;
-        }
-        assertTrue(cancelled);
+        assertEquals(0, Util.getAll(readCommand).size());
     }
 
     @Test
@@ -357,9 +344,9 @@ public class ReadCommandTest
         String[] expectedRows = new String[] { "aa", "ff", "ee", "cc", "dd", "cc", "bb"};
 
         List<ByteBuffer> buffers = new ArrayList<>(groups.length);
-        long nowInSeconds = FBUtilities.nowInSeconds();
+        int nowInSeconds = FBUtilities.nowInSeconds();
         ColumnFilter columnFilter = ColumnFilter.allRegularColumnsBuilder(cfs.metadata(), false).build();
-        RowFilter rowFilter = RowFilter.create(true);
+        RowFilter.Builder rowFilter = RowFilter.builder();
         Slice slice = Slice.make(BufferClusteringBound.BOTTOM, BufferClusteringBound.TOP);
         ClusteringIndexSliceFilter sliceFilter = new ClusteringIndexSliceFilter(Slices.with(cfs.metadata().comparator, slice), false);
 
@@ -383,12 +370,12 @@ public class ReadCommandTest
                 {
                     RowUpdateBuilder.deleteRow(cfs.metadata(), FBUtilities.timestampMicros(), ByteBufferUtil.bytes(data[1]), data[2]).apply();
                 }
-                commands.add(SinglePartitionReadCommand.create(cfs.metadata(), nowInSeconds, columnFilter, rowFilter, DataLimits.NONE, Util.dk(data[1]), sliceFilter));
+                commands.add(SinglePartitionReadCommand.create(cfs.metadata(), nowInSeconds, columnFilter, rowFilter.build(), DataLimits.NONE, Util.dk(data[1]), sliceFilter));
             }
 
-            Util.flush(cfs);
+            cfs.forceBlockingFlush(UNIT_TESTS);
 
-            ReadQuery query = SinglePartitionReadCommand.Group.create(commands, DataLimits.NONE);
+            ReadQuery query = new SinglePartitionReadCommand.Group(commands, DataLimits.NONE);
 
             try (ReadExecutionController executionController = query.executionController();
                  UnfilteredPartitionIterator iter = query.executeLocally(executionController);
@@ -469,7 +456,7 @@ public class ReadCommandTest
         ReadCommand readCommand = Util.cmd(cfs, Util.dk("key")).includeRow("dd").build();
         int messagingVersion = MessagingService.current_version;
         FakeOutputStream out = new FakeOutputStream();
-        Tracing.instance.newSession(Tracing.TraceType.QUERY);
+        Tracing.instance.newSession(ClientState.forInternalCalls(), Tracing.TraceType.QUERY);
         Message<ReadCommand> messageOut = Message.out(Verb.READ_REQ, readCommand);
         long size = messageOut.serializedSize(messagingVersion);
         Message.serializer.serialize(messageOut, new WrappedDataOutputStreamPlus(out), messagingVersion);
@@ -524,9 +511,9 @@ public class ReadCommandTest
         };
 
         List<ByteBuffer> buffers = new ArrayList<>(groups.length);
-        long nowInSeconds = FBUtilities.nowInSeconds();
+        int nowInSeconds = FBUtilities.nowInSeconds();
         ColumnFilter columnFilter = ColumnFilter.allRegularColumnsBuilder(cfs.metadata(), false).build();
-        RowFilter rowFilter = RowFilter.create(true);
+        RowFilter.Builder rowFilter = RowFilter.builder();
         Slice slice = Slice.make(BufferClusteringBound.BOTTOM, BufferClusteringBound.TOP);
         ClusteringIndexSliceFilter sliceFilter = new ClusteringIndexSliceFilter(
                 Slices.with(cfs.metadata().comparator, slice), false);
@@ -552,13 +539,13 @@ public class ReadCommandTest
                     RowUpdateBuilder.deleteRow(cfs.metadata(), FBUtilities.timestampMicros(),
                             ByteBufferUtil.bytes(data[1]), data[2]).apply();
                 }
-                commands.add(SinglePartitionReadCommand.create(cfs.metadata(), nowInSeconds, columnFilter, rowFilter,
+                commands.add(SinglePartitionReadCommand.create(cfs.metadata(), nowInSeconds, columnFilter, rowFilter.build(),
                         DataLimits.NONE, Util.dk(data[1]), sliceFilter));
             }
 
-            Util.flush(cfs);
+            cfs.forceBlockingFlush(UNIT_TESTS);
 
-            ReadQuery query = SinglePartitionReadCommand.Group.create(commands, DataLimits.NONE);
+            ReadQuery query = new SinglePartitionReadCommand.Group(commands, DataLimits.NONE);
 
             try (ReadExecutionController executionController = query.executionController();
                     UnfilteredPartitionIterator iter = query.executeLocally(executionController);
@@ -572,7 +559,7 @@ public class ReadCommandTest
             }
         }
 
-        assertEquals(5, cfs.metric.tombstoneScannedHistogram.cf.getSnapshot().getMax());
+        assertEquals(5, cfs.metric.tombstoneScannedHistogram.tableOrKeyspaceHistogram().getSnapshot().getMax());
     }
 
     @Test
@@ -600,9 +587,9 @@ public class ReadCommandTest
         };
 
         List<ByteBuffer> buffers = new ArrayList<>(groups.length);
-        long nowInSeconds = FBUtilities.nowInSeconds();
+        int nowInSeconds = FBUtilities.nowInSeconds();
         ColumnFilter columnFilter = ColumnFilter.allRegularColumnsBuilder(cfs.metadata(), false).build();
-        RowFilter rowFilter = RowFilter.create(true);
+        RowFilter.Builder rowFilter = RowFilter.builder();
         Slice slice = Slice.make(BufferClusteringBound.BOTTOM, BufferClusteringBound.TOP);
         ClusteringIndexSliceFilter sliceFilter = new ClusteringIndexSliceFilter(
                 Slices.with(cfs.metadata().comparator, slice), false);
@@ -628,13 +615,13 @@ public class ReadCommandTest
                     RowUpdateBuilder.deleteRow(cfs.metadata(), FBUtilities.timestampMicros(),
                             ByteBufferUtil.bytes(data[1]), data[2]).apply();
                 }
-                commands.add(SinglePartitionReadCommand.create(cfs.metadata(), nowInSeconds, columnFilter, rowFilter,
+                commands.add(SinglePartitionReadCommand.create(cfs.metadata(), nowInSeconds, columnFilter, rowFilter.build(),
                         DataLimits.NONE, Util.dk(data[1]), sliceFilter));
             }
 
-            Util.flush(cfs);
+            cfs.forceBlockingFlush(UNIT_TESTS);
 
-            ReadQuery query = SinglePartitionReadCommand.Group.create(commands, DataLimits.NONE);
+            ReadQuery query = new SinglePartitionReadCommand.Group(commands, DataLimits.NONE);
 
             try (ReadExecutionController executionController = query.executionController();
                     UnfilteredPartitionIterator iter = query.executeLocally(executionController);
@@ -648,7 +635,7 @@ public class ReadCommandTest
             }
         }
 
-        assertEquals(1, cfs.metric.tombstoneScannedHistogram.cf.getSnapshot().getMax());
+        assertEquals(1, cfs.metric.tombstoneScannedHistogram.tableOrKeyspaceHistogram().getSnapshot().getMax());
     }
 
     @Test
@@ -691,7 +678,7 @@ public class ReadCommandTest
             .build()
             .apply();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         new RowUpdateBuilder(cfs.metadata(), 1, ByteBufferUtil.bytes("key"))
             .clustering("dd")
@@ -699,10 +686,10 @@ public class ReadCommandTest
             .build()
             .apply();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         List<SSTableReader> sstables = new ArrayList<>(cfs.getLiveSSTables());
         assertEquals(2, sstables.size());
-        sstables.sort(SSTableReader.maxTimestampDescending);
+        Collections.sort(sstables, BigTableReader.maxTimestampDescending);
 
         ReadCommand readCommand = Util.cmd(cfs, Util.dk("key")).includeRow("dd").columns("a").build();
 
@@ -720,7 +707,7 @@ public class ReadCommandTest
     }
 
     @Test
-    public void dontIncludeLegacyCounterContextInDigest()
+    public void dontIncludeLegacyCounterContextInDigest() throws IOException
     {
         // Serializations of a CounterContext containing legacy (pre-2.1) shards
         // can legitimately differ across replicas. For this reason, the context
@@ -738,13 +725,13 @@ public class ReadCommandTest
                 .addLegacyCounterCell("c", 0L)
                 .build()
                 .apply();
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         cfs.getLiveSSTables().forEach(sstable -> mutateRepaired(cfs, sstable, 111, null));
 
         // execute a read and capture the digest
         ReadCommand readCommand = Util.cmd(cfs, Util.dk("key")).build();
         ByteBuffer digestWithLegacyCounter0 = performReadAndVerifyRepairedInfo(readCommand, 1, 1, true);
-        assertNotEquals(EMPTY_BYTE_BUFFER, digestWithLegacyCounter0);
+        assertFalse(EMPTY_BYTE_BUFFER.equals(digestWithLegacyCounter0));
 
         // truncate, then re-insert the same partition, but this time with a legacy
         // shard having the value 1. The repaired digest should match the previous, as
@@ -755,7 +742,7 @@ public class ReadCommandTest
                 .addLegacyCounterCell("c", 1L)
                 .build()
                 .apply();
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         cfs.getLiveSSTables().forEach(sstable -> mutateRepaired(cfs, sstable, 111, null));
 
         ByteBuffer digestWithLegacyCounter1 = performReadAndVerifyRepairedInfo(readCommand, 1, 1, true);
@@ -770,13 +757,13 @@ public class ReadCommandTest
                 .add("c", 1L)
                 .build()
                 .apply();
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         cfs.getLiveSSTables().forEach(sstable -> mutateRepaired(cfs, sstable, 111, null));
 
         ByteBuffer digestWithCounterCell = performReadAndVerifyRepairedInfo(readCommand, 1, 1, true);
-        assertNotEquals(EMPTY_BYTE_BUFFER, digestWithCounterCell);
-        assertNotEquals(digestWithLegacyCounter0, digestWithCounterCell);
-        assertNotEquals(digestWithLegacyCounter1, digestWithCounterCell);
+        assertFalse(EMPTY_BYTE_BUFFER.equals(digestWithCounterCell));
+        assertFalse(digestWithLegacyCounter0.equals(digestWithCounterCell));
+        assertFalse(digestWithLegacyCounter1.equals(digestWithCounterCell));
     }
 
     /**
@@ -787,7 +774,7 @@ public class ReadCommandTest
      * Also, neither digest should be empty as the partition is not made empty by the purging.
      */
     @Test
-    public void purgeGCableTombstonesBeforeCalculatingDigest()
+    public void purgeGCableTombstonesBeforeCalculatingDigest() throws Exception
     {
         ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF8);
         cfs.truncateBlocking();
@@ -795,7 +782,8 @@ public class ReadCommandTest
         setGCGrace(cfs, 600);
 
         DecoratedKey[] keys = new DecoratedKey[] { Util.dk("key0"), Util.dk("key1"), Util.dk("key2"), Util.dk("key3") };
-        long nowInSec = FBUtilities.nowInSeconds();
+        int nowInSec = FBUtilities.nowInSeconds();
+        TableMetadata cfm = cfs.metadata();
 
         // A simple tombstone
         new RowUpdateBuilder(cfs.metadata(), 0, keys[0]).clustering("cc").delete("a").build().apply();
@@ -813,7 +801,7 @@ public class ReadCommandTest
         // Partition with 2 rows, one fully deleted
         new RowUpdateBuilder(cfs.metadata.get(), 0, keys[3]).clustering("bb").add("a", ByteBufferUtil.bytes("a")).delete("b").build().apply();
         RowUpdateBuilder.deleteRow(cfs.metadata(), 0, keys[3], "cc").apply();
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         cfs.getLiveSSTables().forEach(sstable -> mutateRepaired(cfs, sstable, 111, null));
 
         Map<DecoratedKey, ByteBuffer> digestsWithTombstones = new HashMap<>();
@@ -881,7 +869,7 @@ public class ReadCommandTest
                                                         .build());
         // Insert and repair
         insert(cfs, IntStream.range(0, 10), () -> IntStream.range(0, 10));
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         cfs.getLiveSSTables().forEach(sstable -> mutateRepaired(cfs, sstable, 111, null));
         // Insert and leave unrepaired
         insert(cfs, IntStream.range(0, 10), () -> IntStream.range(10, 20));
@@ -931,17 +919,14 @@ public class ReadCommandTest
     {
         TableParams newParams = cfs.metadata().params.unbuild().gcGraceSeconds(gcGrace).build();
         KeyspaceMetadata keyspaceMetadata = Schema.instance.getKeyspaceMetadata(cfs.metadata().keyspace);
-        SchemaTestUtil.addOrUpdateKeyspace(
-            keyspaceMetadata.withSwapped(
-                keyspaceMetadata.tables.withSwapped(
-                    cfs.metadata().withSwapped(newParams))), true);
+        SchemaTestUtil.addOrUpdateKeyspace(keyspaceMetadata.withSwapped(keyspaceMetadata.tables.withSwapped(cfs.metadata().withSwapped(newParams))), true);
     }
 
     private long getAndResetOverreadCount(ColumnFamilyStore cfs)
     {
         // always clear the histogram after reading to make comparisons & asserts easier
-        long rows = cfs.metric.repairedDataTrackingOverreadRows.cf.getSnapshot().getMax();
-        ((ClearableHistogram)cfs.metric.repairedDataTrackingOverreadRows.cf).clear();
+        long rows = cfs.metric.repairedDataTrackingOverreadRows.tableOrKeyspaceHistogram().getSnapshot().getMax();
+        ((ClearableHistogram)cfs.metric.repairedDataTrackingOverreadRows.tableOrKeyspaceHistogram()).clear();
         return rows;
     }
 
@@ -1005,7 +990,7 @@ public class ReadCommandTest
      * the row deletion is eligible for purging, both the result set and the repaired data digest should
      * be empty.
      */
-    private void fullyPurgedPartitionCreatesEmptyDigest(ColumnFamilyStore cfs, ReadCommand command)
+    private void fullyPurgedPartitionCreatesEmptyDigest(ColumnFamilyStore cfs, ReadCommand command) throws Exception
     {
         cfs.truncateBlocking();
         cfs.disableAutoCompaction();
@@ -1014,12 +999,12 @@ public class ReadCommandTest
         // Partition with a fully deleted static row and a single, fully deleted regular row
         RowUpdateBuilder.deleteRow(cfs.metadata(), 0, ByteBufferUtil.bytes("key")).apply();
         RowUpdateBuilder.deleteRow(cfs.metadata(), 0, ByteBufferUtil.bytes("key"), "cc").apply();
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         cfs.getLiveSSTables().forEach(sstable -> mutateRepaired(cfs, sstable, 111, null));
 
         try (ReadExecutionController controller = command.executionController(true))
         {
-            List<ImmutableBTreePartition> partitions = Util.getAllUnfiltered(command, controller);
+            List<Partition> partitions = Util.getAllUnfiltered(command, controller);
             assertEquals(1, partitions.size());
             ByteBuffer digestWithTombstones = controller.getRepairedDataDigest();
             assertTrue(ByteBufferUtil.compareUnsigned(EMPTY_BYTE_BUFFER, digestWithTombstones) != 0);
@@ -1036,7 +1021,7 @@ public class ReadCommandTest
 
         try (ReadExecutionController controller = command.executionController(true))
         {
-            List<ImmutableBTreePartition> partitions = Util.getAllUnfiltered(command, controller);
+            List<Partition> partitions = Util.getAllUnfiltered(command, controller);
             assertTrue(partitions.isEmpty());
             ByteBuffer digestWithoutTombstones = controller.getRepairedDataDigest();
             assertEquals(0, ByteBufferUtil.compareUnsigned(EMPTY_BYTE_BUFFER, digestWithoutTombstones));
@@ -1064,18 +1049,18 @@ public class ReadCommandTest
 
         // Live partition in a repaired sstable, so included in the digest calculation
         new RowUpdateBuilder(cfs.metadata.get(), 0, ByteBufferUtil.bytes("key-0")).clustering("cc").add("a", ByteBufferUtil.bytes("a")).build().apply();
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         cfs.getLiveSSTables().forEach(sstable -> mutateRepaired(cfs, sstable, 111, null));
         // Fully deleted partition (static and regular rows) in an unrepaired sstable, so not included in the intial digest
         RowUpdateBuilder.deleteRow(cfs.metadata(), 0, ByteBufferUtil.bytes("key-1")).apply();
         RowUpdateBuilder.deleteRow(cfs.metadata(), 0, ByteBufferUtil.bytes("key-1"), "cc").apply();
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         ByteBuffer digestWithoutPurgedPartition = null;
         
         try (ReadExecutionController controller = command.executionController(true))
         {
-            List<ImmutableBTreePartition> partitions = Util.getAllUnfiltered(command, controller);
+            List<Partition> partitions = Util.getAllUnfiltered(command, controller);
             assertEquals(1, partitions.size());
             digestWithoutPurgedPartition = controller.getRepairedDataDigest();
             assertTrue(ByteBufferUtil.compareUnsigned(EMPTY_BYTE_BUFFER, digestWithoutPurgedPartition) != 0);
@@ -1089,7 +1074,7 @@ public class ReadCommandTest
 
         try (ReadExecutionController controller = command.executionController(true))
         {
-            List<ImmutableBTreePartition> partitions = Util.getAllUnfiltered(command, controller);
+            List<Partition> partitions = Util.getAllUnfiltered(command, controller);
             assertEquals(1, partitions.size());
             ByteBuffer digestWithPurgedPartition = controller.getRepairedDataDigest();
             assertEquals(0, ByteBufferUtil.compareUnsigned(digestWithPurgedPartition, digestWithoutPurgedPartition));
@@ -1097,7 +1082,7 @@ public class ReadCommandTest
     }
 
     @Test
-    public void purgingConsidersRepairedDataOnly()
+    public void purgingConsidersRepairedDataOnly() throws Exception
     {
         // 2 sstables, first is repaired and contains data that is all purgeable
         // the second is unrepaired and contains non-purgable data. Even though
@@ -1112,13 +1097,13 @@ public class ReadCommandTest
         DecoratedKey key = Util.dk("key");
         RowUpdateBuilder.deleteRow(cfs.metadata(), 0, key).apply();
         RowUpdateBuilder.deleteRow(cfs.metadata(), 0, key, "cc").apply();
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         cfs.getLiveSSTables().forEach(sstable -> mutateRepaired(cfs, sstable, 111, null));
 
         new RowUpdateBuilder(cfs.metadata(), 1, key).clustering("cc").add("a", ByteBufferUtil.bytes("a")).build().apply();
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
-        long nowInSec = FBUtilities.nowInSeconds() + 10;
+        int nowInSec = FBUtilities.nowInSeconds() + 10;
         ReadCommand cmd = Util.cmd(cfs, key).withNowInSeconds(nowInSec).build();
 
         try (ReadExecutionController controller = cmd.executionController(true))
@@ -1157,7 +1142,7 @@ public class ReadCommandTest
                 .build()
                 .apply();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         ReadCommand readCommand = Util.cmd(cfs, Util.dk("key")).build();
         assertTrue(cfs.isRowCacheEnabled());
@@ -1221,20 +1206,7 @@ public class ReadCommandTest
                                                            ReplicaUtils.full(addr, token)));
     }
 
-    @Test
-    public void testToCQLString()
-    {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF2);
-        DecoratedKey key = Util.dk("key");
-
-        ReadCommand readCommand = Util.cmd(cfs, key).build();
-
-        String result = readCommand.toCQLString();
-
-        assertEquals(result, String.format("SELECT * FROM \"ReadCommandTest\".\"Standard2\" WHERE key = 0x%s ALLOW FILTERING", ByteBufferUtil.bytesToHex(key.getKey())));
-    }
-
-    private void testRepairedDataTracking(ColumnFamilyStore cfs, ReadCommand readCommand)
+    private void testRepairedDataTracking(ColumnFamilyStore cfs, ReadCommand readCommand) throws IOException
     {
         cfs.truncateBlocking();
         cfs.disableAutoCompaction();
@@ -1245,7 +1217,7 @@ public class ReadCommandTest
                 .build()
                 .apply();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         new RowUpdateBuilder(cfs.metadata(), 1, ByteBufferUtil.bytes("key"))
                 .clustering("dd")
@@ -1253,7 +1225,7 @@ public class ReadCommandTest
                 .build()
                 .apply();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         List<SSTableReader> sstables = new ArrayList<>(cfs.getLiveSSTables());
         assertEquals(2, sstables.size());
         sstables.forEach(sstable -> assertFalse(sstable.isRepaired() || sstable.isPendingRepair()));
@@ -1272,13 +1244,13 @@ public class ReadCommandTest
         digests.add(digest);
 
         // add a pending repair session to table1, digest should remain the same but now we expect it to be marked inconclusive
-        TimeUUID session1 = nextTimeUUID();
+        UUID session1 = UUIDGen.getTimeUUID();
         mutateRepaired(cfs, sstable1, ActiveRepairService.UNREPAIRED_SSTABLE, session1);
         digests.add(performReadAndVerifyRepairedInfo(readCommand, numPartitions, rowsPerPartition, false));
         assertEquals(1, digests.size());
 
         // add a different pending session to table2, digest should remain the same and still consider it inconclusive
-        TimeUUID session2 = nextTimeUUID();
+        UUID session2 = UUIDGen.getTimeUUID();
         mutateRepaired(cfs, sstable2, ActiveRepairService.UNREPAIRED_SSTABLE, session2);
         digests.add(performReadAndVerifyRepairedInfo(readCommand, numPartitions, rowsPerPartition, false));
         assertEquals(1, digests.size());
@@ -1310,13 +1282,13 @@ public class ReadCommandTest
             assertEquals(EMPTY_BYTE_BUFFER, digest);
 
             // now flush so we have an unrepaired table with the deletion and repeat the check
-            Util.flush(cfs);
+            cfs.forceBlockingFlush(UNIT_TESTS);
             digest = performReadAndVerifyRepairedInfo(readCommand, 0, rowsPerPartition, false);
             assertEquals(EMPTY_BYTE_BUFFER, digest);
         }
     }
 
-    private void mutateRepaired(ColumnFamilyStore cfs, SSTableReader sstable, long repairedAt, TimeUUID pendingSession)
+    private void mutateRepaired(ColumnFamilyStore cfs, SSTableReader sstable, long repairedAt, UUID pendingSession)
     {
         try
         {
@@ -1335,14 +1307,14 @@ public class ReadCommandTest
             // check for sessions which have exceeded timeout and been purged
             Range<Token> range = new Range<>(cfs.metadata().partitioner.getMinimumToken(),
                                              cfs.metadata().partitioner.getRandomToken());
-            ActiveRepairService.instance().registerParentRepairSession(pendingSession,
-                                                                       REPAIR_COORDINATOR,
-                                                                       Lists.newArrayList(cfs),
-                                                                       Sets.newHashSet(range),
-                                                                       true,
-                                                                       repairedAt,
-                                                                       true,
-                                                                       PreviewKind.NONE);
+            ActiveRepairService.instance.registerParentRepairSession(pendingSession,
+                                                                     REPAIR_COORDINATOR,
+                                                                     Lists.newArrayList(cfs),
+                                                                     Sets.newHashSet(range),
+                                                                     true,
+                                                                     repairedAt,
+                                                                     true,
+                                                                     PreviewKind.NONE);
 
             LocalSessionAccessor.prepareUnsafe(pendingSession, null, Sets.newHashSet(REPAIR_COORDINATOR));
         }

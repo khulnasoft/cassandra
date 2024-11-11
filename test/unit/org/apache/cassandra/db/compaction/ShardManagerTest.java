@@ -18,34 +18,27 @@
 
 package org.apache.cassandra.db.compaction;
 
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
-import com.google.common.collect.ImmutableList;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
 import org.agrona.collections.IntArrayList;
-import org.apache.cassandra.ServerTestUtils;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.BufferDecoratedKey;
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DiskBoundaries;
-import org.apache.cassandra.db.PartitionPosition;
+import org.apache.cassandra.db.SortedLocalRanges;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Splitter;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.mockito.Mockito;
 
-import static org.apache.cassandra.db.ColumnFamilyStore.RING_VERSION_IRRELEVANT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -56,24 +49,27 @@ public class ShardManagerTest
     final IPartitioner partitioner = Murmur3Partitioner.instance;
     final Token minimumToken = partitioner.getMinimumToken();
 
-    ColumnFamilyStore.VersionedLocalRanges weightedRanges;
+    SortedLocalRanges localRanges;
+    List<Splitter.WeightedRange> weightedRanges;
 
     static final double delta = 1e-15;
 
     @Before
     public void setUp()
     {
-        DatabaseDescriptor.daemonInitialization(); // because of all the static initialization in CFS
-        DatabaseDescriptor.setPartitionerUnsafe(Murmur3Partitioner.instance);
-        ServerTestUtils.prepareServerNoRegister();
-        weightedRanges = new ColumnFamilyStore.VersionedLocalRanges(RING_VERSION_IRRELEVANT, 16);
+        weightedRanges = new ArrayList<>();
+        var realm = Mockito.mock(CompactionRealm.class);
+        localRanges = Mockito.mock(SortedLocalRanges.class, Mockito.withSettings().defaultAnswer(Mockito.CALLS_REAL_METHODS));
+        Mockito.when(localRanges.getRanges()).thenAnswer(invocation -> weightedRanges);
+        Mockito.when(localRanges.getRealm()).thenReturn(realm);
+        Mockito.when(realm.estimatedPartitionCount()).thenReturn(10000L);
     }
 
     @Test
     public void testRangeSpannedFullOwnership()
     {
         weightedRanges.add(new Splitter.WeightedRange(1.0, new Range<>(minimumToken, minimumToken)));
-        ShardManager shardManager = new ShardManagerNoDisks(weightedRanges);
+        ShardManager shardManager = new ShardManagerNoDisks(localRanges);
 
         // sanity check
         assertEquals(0.4, tokenAt(0.1).size(tokenAt(0.5)), delta);
@@ -82,8 +78,12 @@ public class ShardManagerTest
         assertEquals(0.2, shardManager.rangeSpanned(range(0.3, 0.5)), delta);
 
         assertEquals(0.2, shardManager.rangeSpanned(mockedTable(0.5, 0.7, Double.NaN)), delta);
-        // single-partition correction
-        assertEquals(1.0, shardManager.rangeSpanned(mockedTable(0.3, 0.3, Double.NaN)), delta);
+        // single-token-span correction
+        assertEquals(0.02, shardManager.rangeSpanned(mockedTable(0.3, 0.3, Double.NaN, 200)), delta);
+        // small partition count correction
+        assertEquals(0.0001, shardManager.rangeSpanned(mockedTable(0.3, 0.30001, Double.NaN, 1)), delta);
+        assertEquals(0.001, shardManager.rangeSpanned(mockedTable(0.3, 0.30001, Double.NaN, 10)), delta);
+        assertEquals(0.01, shardManager.rangeSpanned(mockedTable(0.3, 0.31, Double.NaN, 10)), delta);
 
         // reported coverage
         assertEquals(0.1, shardManager.rangeSpanned(mockedTable(0.5, 0.7, 0.1)), delta);
@@ -92,7 +92,7 @@ public class ShardManagerTest
         assertEquals(0.2, shardManager.rangeSpanned(mockedTable(0.5, 0.7, -1)), delta);
 
         // correction over coverage
-        assertEquals(1.0, shardManager.rangeSpanned(mockedTable(0.3, 0.5, 1e-50)), delta);
+        assertEquals(0.02, shardManager.rangeSpanned(mockedTable(0.3, 0.5, 1e-50, 200)), delta);
     }
 
     @Test
@@ -108,7 +108,7 @@ public class ShardManagerTest
         weightedRanges.add(new Splitter.WeightedRange(1.0, new Range<>(tokenAt(0.98), tokenAt(1.0))));
         double total = weightedRanges.stream().mapToDouble(wr -> wr.range().left.size(wr.range().right)).sum();
 
-        ShardManager shardManager = new ShardManagerNoDisks(weightedRanges);
+        ShardManager shardManager = new ShardManagerNoDisks(localRanges);
 
         // sanity check
         assertEquals(0.4, tokenAt(0.1).size(tokenAt(0.5)), delta);
@@ -122,10 +122,11 @@ public class ShardManagerTest
         assertEquals(0.1, shardManager.rangeSpanned(mockedTable(0.5, 0.8, Double.NaN)), delta);
 
         // single-partition correction
-        assertEquals(1.0, shardManager.rangeSpanned(mockedTable(0.3, 0.3, Double.NaN)), delta);
+        assertEquals(0.02 * total, shardManager.rangeSpanned(mockedTable(0.3, 0.3, Double.NaN, 200)), delta);
         // out-of-local-range correction
-        assertEquals(1.0, shardManager.rangeSpanned(mockedTable(0.6, 0.7, Double.NaN)), delta);
-        assertEquals(0.001, shardManager.rangeSpanned(mockedTable(0.6, 0.701, Double.NaN)), delta);
+        assertEquals(0.03, shardManager.rangeSpanned(mockedTable(0.6, 0.73, Double.NaN, 200)), delta);
+        // completely outside should use partition-based count
+        assertEquals(0.02 * total, shardManager.rangeSpanned(mockedTable(0.6, 0.7, Double.NaN, 200)), delta);
 
         // reported coverage
         assertEquals(0.1, shardManager.rangeSpanned(mockedTable(0.5, 0.7, 0.1)), delta);
@@ -134,7 +135,7 @@ public class ShardManagerTest
         assertEquals(0.1, shardManager.rangeSpanned(mockedTable(0.5, 0.8, -1)), delta);
 
         // correction over coverage, no recalculation
-        assertEquals(1.0, shardManager.rangeSpanned(mockedTable(0.5, 0.8, 1e-50)), delta);
+        assertEquals(0.02 * total, shardManager.rangeSpanned(mockedTable(0.5, 0.8, 1e-50, 200)), delta);
     }
 
     @Test
@@ -150,7 +151,7 @@ public class ShardManagerTest
         weightedRanges.add(new Splitter.WeightedRange(1.0, new Range<>(tokenAt(0.98), tokenAt(1.0))));
         double total = weightedRanges.stream().mapToDouble(wr -> wr.size()).sum();
 
-        ShardManager shardManager = new ShardManagerNoDisks(weightedRanges);
+        ShardManager shardManager = new ShardManagerNoDisks(localRanges);
 
         // sanity check
         assertEquals(0.4, tokenAt(0.1).size(tokenAt(0.5)), delta);
@@ -164,10 +165,10 @@ public class ShardManagerTest
         assertEquals(0.06, shardManager.rangeSpanned(mockedTable(0.5, 0.8, Double.NaN)), delta);
 
         // single-partition correction
-        assertEquals(1.0, shardManager.rangeSpanned(mockedTable(0.3, 0.3, Double.NaN)), delta);
+        assertEquals(0.02 * total, shardManager.rangeSpanned(mockedTable(0.3, 0.3, Double.NaN, 200)), delta);
         // out-of-local-range correction
-        assertEquals(1.0, shardManager.rangeSpanned(mockedTable(0.6, 0.7, Double.NaN)), delta);
-        assertEquals(0.001, shardManager.rangeSpanned(mockedTable(0.6, 0.701, Double.NaN)), delta);
+        assertEquals(0.02 * total, shardManager.rangeSpanned(mockedTable(0.6, 0.7, Double.NaN, 200)), delta);
+        assertEquals(0.03, shardManager.rangeSpanned(mockedTable(0.6, 0.73, Double.NaN)), delta);
 
         // reported coverage
         assertEquals(0.1, shardManager.rangeSpanned(mockedTable(0.5, 0.7, 0.1)), delta);
@@ -176,7 +177,7 @@ public class ShardManagerTest
         assertEquals(0.06, shardManager.rangeSpanned(mockedTable(0.5, 0.8, -1)), delta);
 
         // correction over coverage, no recalculation
-        assertEquals(1.0, shardManager.rangeSpanned(mockedTable(0.5, 0.8, 1e-50)), delta);
+        assertEquals(0.02 * total, shardManager.rangeSpanned(mockedTable(0.5, 0.8, 1e-50, 200)), delta);
     }
 
     Token tokenAt(double pos)
@@ -184,23 +185,23 @@ public class ShardManagerTest
         return partitioner.split(minimumToken, minimumToken, pos);
     }
 
-    DecoratedKey keyAt(double pos)
-    {
-        Token token = tokenAt(pos);
-        return new BufferDecoratedKey(token, ByteBuffer.allocate(0));
-    }
-
     Range<Token> range(double start, double end)
     {
         return new Range<>(tokenAt(start), tokenAt(end));
     }
 
-    SSTableReader mockedTable(double start, double end, double reportedCoverage)
+    CompactionSSTable mockedTable(double start, double end, double reportedCoverage)
     {
-        SSTableReader mock = Mockito.mock(SSTableReader.class);
-        Mockito.when(mock.getFirst()).thenReturn(keyAt(start));
-        Mockito.when(mock.getLast()).thenReturn(keyAt(end));
+        return mockedTable(start, end, reportedCoverage, ShardManager.PER_PARTITION_SPAN_THRESHOLD * 2);
+    }
+
+    CompactionSSTable mockedTable(double start, double end, double reportedCoverage, long estimatedKeys)
+    {
+        CompactionSSTable mock = Mockito.mock(CompactionSSTable.class);
+        Mockito.when(mock.getFirst()).thenReturn(tokenAt(start).minKeyBound());
+        Mockito.when(mock.getLast()).thenReturn(tokenAt(end).minKeyBound());
         Mockito.when(mock.tokenSpaceCoverage()).thenReturn(reportedCoverage);
+        Mockito.when(mock.estimatedKeys()).thenReturn(estimatedKeys);
         return mock;
     }
 
@@ -278,57 +279,57 @@ public class ShardManagerTest
 
     private void testShardBoundaries(int[] expected, int numShards, int numDisks, int[] rangeBounds)
     {
-        ColumnFamilyStore cfs = Mockito.mock(ColumnFamilyStore.class);
-        when(cfs.getPartitioner()).thenReturn(partitioner);
+        CompactionRealm realm = Mockito.mock(CompactionRealm.class);
+        when(realm.getPartitioner()).thenReturn(partitioner);
 
-        List<Range<Token>> ranges = new ArrayList<>();
+        List<Splitter.WeightedRange> ranges = new ArrayList<>();
         for (int i = 0; i < rangeBounds.length; i += 2)
-            ranges.add(new Range<>(getToken(rangeBounds[i + 0]), getToken(rangeBounds[i + 1])));
-        ranges = Range.sort(ranges);
-        ColumnFamilyStore.VersionedLocalRanges sortedRanges = localRanges(ranges.stream().map(x -> new Splitter.WeightedRange(1.0, x)).collect(Collectors.toList()));
+            ranges.add(new Splitter.WeightedRange(1.0, new Range<>(getToken(rangeBounds[i + 0]), getToken(rangeBounds[i + 1]))));
+        SortedLocalRanges sortedRanges = SortedLocalRanges.forTesting(realm, ranges);
 
-        List<Token> diskBoundaries = splitRanges(sortedRanges, numDisks);
-        int[] result = getShardBoundaries(cfs, numShards, diskBoundaries, sortedRanges);
+        List<Token> diskBoundaries = sortedRanges.split(numDisks);
+        int[] result = getShardBoundaries(numShards, diskBoundaries, sortedRanges);
         Assert.assertArrayEquals("Disks " + numDisks + " shards " + numShards + " expected " + Arrays.toString(expected) + " was " + Arrays.toString(result), expected, result);
     }
 
     private void testShardBoundariesWeighted(int[] expected, int numShards, int numDisks, int[] rangeBounds)
     {
-        ColumnFamilyStore cfs = Mockito.mock(ColumnFamilyStore.class);
-        when(cfs.getPartitioner()).thenReturn(partitioner);
+        CompactionRealm realm = Mockito.mock(CompactionRealm.class);
+        when(realm.getPartitioner()).thenReturn(partitioner);
 
         List<Splitter.WeightedRange> ranges = new ArrayList<>();
         for (int i = 0; i < rangeBounds.length; i += 2)
             ranges.add(new Splitter.WeightedRange(2.0 / (rangeBounds.length - i), new Range<>(getToken(rangeBounds[i + 0]), getToken(rangeBounds[i + 1]))));
-        ColumnFamilyStore.VersionedLocalRanges sortedRanges = localRanges(ranges);
+        SortedLocalRanges sortedRanges = SortedLocalRanges.forTesting(realm, ranges);
 
-        List<Token> diskBoundaries = splitRanges(sortedRanges, numDisks);
-        int[] result = getShardBoundaries(cfs, numShards, diskBoundaries, sortedRanges);
+        List<Token> diskBoundaries = sortedRanges.split(numDisks);
+        int[] result = getShardBoundaries(numShards, diskBoundaries, sortedRanges);
         Assert.assertArrayEquals("Disks " + numDisks + " shards " + numShards + " expected " + Arrays.toString(expected) + " was " + Arrays.toString(result), expected, result);
     }
 
     private void testShardBoundaries(int[] expected, int numShards, int[] diskPositions, int[] rangeBounds)
     {
-        ColumnFamilyStore cfs = Mockito.mock(ColumnFamilyStore.class);
-        when(cfs.getPartitioner()).thenReturn(partitioner);
+        CompactionRealm realm = Mockito.mock(CompactionRealm.class);
+        when(realm.getPartitioner()).thenReturn(partitioner);
 
         List<Splitter.WeightedRange> ranges = new ArrayList<>();
         for (int i = 0; i < rangeBounds.length; i += 2)
             ranges.add(new Splitter.WeightedRange(1.0, new Range<>(getToken(rangeBounds[i + 0]), getToken(rangeBounds[i + 1]))));
-        ColumnFamilyStore.VersionedLocalRanges sortedRanges = localRanges(ranges);
+        SortedLocalRanges sortedRanges = SortedLocalRanges.forTesting(realm, ranges);
 
         List<Token> diskBoundaries = Arrays.stream(diskPositions).mapToObj(this::getToken).collect(Collectors.toList());
-        int[] result = getShardBoundaries(cfs, numShards, diskBoundaries, sortedRanges);
+        int[] result = getShardBoundaries(numShards, diskBoundaries, sortedRanges);
         Assert.assertArrayEquals("Disks " + Arrays.toString(diskPositions) + " shards " + numShards + " expected " + Arrays.toString(expected) + " was " + Arrays.toString(result), expected, result);
     }
 
-    private int[] getShardBoundaries(ColumnFamilyStore cfs, int numShards, List<Token> diskBoundaries, ColumnFamilyStore.VersionedLocalRanges sortedRanges)
+    private int[] getShardBoundaries(int numShards, List<Token> diskBoundaries, SortedLocalRanges sortedRanges)
     {
-        DiskBoundaries db = makeDiskBoundaries(cfs, diskBoundaries);
-        when(cfs.localRangesWeighted()).thenReturn(sortedRanges);
-        when(cfs.getDiskBoundaries()).thenReturn(db);
+        DiskBoundaries db = Mockito.mock(DiskBoundaries.class);
+        when(db.getLocalRanges()).thenReturn(sortedRanges);
+        when(db.getPositions()).thenReturn(diskBoundaries);
 
-        final ShardTracker shardTracker = ShardManager.create(cfs)
+        var rs = Mockito.mock(AbstractReplicationStrategy.class);
+        final ShardTracker shardTracker = ShardManager.create(db, rs, false)
                                                       .boundaries(numShards);
         IntArrayList list = new IntArrayList();
         for (int i = 0; i < 100; ++i)
@@ -337,35 +338,6 @@ public class ShardManagerTest
                 list.addInt(fromToken(shardTracker.shardStart()));
         }
         return list.toIntArray();
-    }
-
-    ColumnFamilyStore.VersionedLocalRanges localRanges(List<Splitter.WeightedRange> ranges)
-    {
-        ColumnFamilyStore.VersionedLocalRanges versionedLocalRanges = new ColumnFamilyStore.VersionedLocalRanges(RING_VERSION_IRRELEVANT, ranges.size());
-        versionedLocalRanges.addAll(ranges);
-        return versionedLocalRanges;
-    }
-
-    ColumnFamilyStore.VersionedLocalRanges localRangesFull()
-    {
-        List<Splitter.WeightedRange> ranges = ImmutableList.of(new Splitter.WeightedRange(1.0,
-                                                                                          new Range<>(partitioner.getMinimumToken(),
-                                                                                                      partitioner.getMinimumToken())));
-        ColumnFamilyStore.VersionedLocalRanges versionedLocalRanges = new ColumnFamilyStore.VersionedLocalRanges(RING_VERSION_IRRELEVANT, ranges.size());
-        versionedLocalRanges.addAll(ranges);
-        return versionedLocalRanges;
-    }
-
-    List<Token> splitRanges(ColumnFamilyStore.VersionedLocalRanges ranges, int numDisks)
-    {
-        return ranges.get(0).left().getPartitioner().splitter().get().splitOwnedRanges(numDisks, ranges, false);
-    }
-
-    private static DiskBoundaries makeDiskBoundaries(ColumnFamilyStore cfs, List<Token> diskBoundaries)
-    {
-        List<PartitionPosition> diskPositions = diskBoundaries.stream().map(Token::maxKeyBound).collect(Collectors.toList());
-        DiskBoundaries db = new DiskBoundaries(cfs, null, diskPositions, RING_VERSION_IRRELEVANT, -1);
-        return db;
     }
 
     private Token getToken(int x)
@@ -381,18 +353,20 @@ public class ShardManagerTest
     @Test
     public void testRangeEnds()
     {
-        ColumnFamilyStore cfs = Mockito.mock(ColumnFamilyStore.class);
-        when(cfs.getPartitioner()).thenReturn(partitioner);
-        ColumnFamilyStore.VersionedLocalRanges sortedRanges = localRangesFull();
+        CompactionRealm realm = Mockito.mock(CompactionRealm.class);
+        when(realm.getPartitioner()).thenReturn(partitioner);
+        SortedLocalRanges sortedRanges = SortedLocalRanges.forTestingFull(realm);
 
         for (int numDisks = 1; numDisks <= 3; ++numDisks)
         {
-            List<Token> diskBoundaries = splitRanges(sortedRanges, numDisks);
-            DiskBoundaries db = makeDiskBoundaries(cfs, diskBoundaries);
-            when(cfs.localRangesWeighted()).thenReturn(sortedRanges);
-            when(cfs.getDiskBoundaries()).thenReturn(db);
+            List<Token> diskBoundaries = sortedRanges.split(numDisks);
+            DiskBoundaries db = Mockito.mock(DiskBoundaries.class);
+            when(db.getLocalRanges()).thenReturn(sortedRanges);
+            when(db.getPositions()).thenReturn(diskBoundaries);
 
-            ShardManager shardManager = ShardManager.create(cfs);
+            var rs = Mockito.mock(AbstractReplicationStrategy.class);
+
+            ShardManager shardManager = ShardManager.create(db, rs, false);
             for (int numShards = 1; numShards <= 3; ++numShards)
             {
                 ShardTracker iterator = shardManager.boundaries(numShards);

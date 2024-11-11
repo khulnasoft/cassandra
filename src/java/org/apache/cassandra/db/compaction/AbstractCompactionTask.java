@@ -17,43 +17,66 @@
  */
 package org.apache.cassandra.db.compaction;
 
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
 import org.apache.cassandra.io.FSDiskFullWriteError;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.WrappedRunnable;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 
+import static com.google.common.base.Throwables.propagate;
+
+
 public abstract class AbstractCompactionTask extends WrappedRunnable
 {
-    protected final ColumnFamilyStore cfs;
+    // See CNDB-10549
+    static final boolean SKIP_REPAIR_STATE_CHECKING =
+        CassandraRelevantProperties.COMPACTION_SKIP_REPAIR_STATE_CHECKING.getBoolean();
+
+    protected final CompactionRealm realm;
     protected LifecycleTransaction transaction;
     protected boolean isUserDefined;
     protected OperationType compactionType;
+    protected TableOperationObserver opObserver;
+    protected final List<CompactionObserver> compObservers;
 
     /**
-     * @param cfs
+     * @param realm
      * @param transaction the modifying managing the status of the sstables we're replacing
      */
-    public AbstractCompactionTask(ColumnFamilyStore cfs, LifecycleTransaction transaction)
+    protected AbstractCompactionTask(CompactionRealm realm, LifecycleTransaction transaction)
     {
-        this.cfs = cfs;
+        this.realm = realm;
         this.transaction = transaction;
         this.isUserDefined = false;
         this.compactionType = OperationType.COMPACTION;
-        // enforce contract that caller should mark sstables compacting
-        Set<SSTableReader> compacting = transaction.tracker.getCompacting();
-        for (SSTableReader sstable : transaction.originals())
-            assert compacting.contains(sstable) : sstable.getFilename() + " is not correctly marked compacting";
+        this.opObserver = TableOperationObserver.NOOP;
+        this.compObservers = new ArrayList<>();
 
-        validateSSTables(transaction.originals());
+        try
+        {
+            // enforce contract that caller should mark sstables compacting
+            Set<SSTableReader> compacting = transaction.getCompacting();
+            for (SSTableReader sstable : transaction.originals())
+                assert compacting.contains(sstable) : sstable.getFilename() + " is not correctly marked compacting";
+
+            validateSSTables(transaction.originals());
+        }
+        catch (Throwable err)
+        {
+            propagate(cleanup(err));
+        }
     }
 
     /**
@@ -61,13 +84,16 @@ public abstract class AbstractCompactionTask extends WrappedRunnable
      */
     private void validateSSTables(Set<SSTableReader> sstables)
     {
-        // do not allow  to be compacted together
+        if (SKIP_REPAIR_STATE_CHECKING)
+            return;
+
+        // do not allow sstables in different repair states to be compacted together
         if (!sstables.isEmpty())
         {
             Iterator<SSTableReader> iter = sstables.iterator();
             SSTableReader first = iter.next();
             boolean isRepaired = first.isRepaired();
-            TimeUUID pendingRepair = first.getPendingRepair();
+            UUID pendingRepair = first.getPendingRepair();
             while (iter.hasNext())
             {
                 SSTableReader next = iter.next();
@@ -91,28 +117,66 @@ public abstract class AbstractCompactionTask extends WrappedRunnable
     }
 
     /**
-     * executes the task and unmarks sstables compacting
+     * Executes the task after setting a new observer, normally the observer is the
+     * compaction manager metrics.
      */
-    public int execute(ActiveCompactionsTracker activeCompactions)
+    public int execute(TableOperationObserver observer)
     {
+        return setOpObserver(observer).execute();
+    }
+
+    /** Executes the task */
+    public int execute()
+    {
+        Throwable t = null;
         try
         {
-            return executeInternal(activeCompactions);
+            return executeInternal();
         }
-        catch(FSDiskFullWriteError e)
+        catch (FSDiskFullWriteError e)
         {
             RuntimeException cause = new RuntimeException("Converted from FSDiskFullWriteError: " + e.getMessage());
             cause.setStackTrace(e.getStackTrace());
+            t = cause;
             throw new RuntimeException("Throwing new Runtime to bypass exception handler when disk is full", cause);
+        }
+        catch (Throwable t1)
+        {
+            t = t1;
+            throw t1;
         }
         finally
         {
-            transaction.close();
+            Throwables.maybeFail(cleanup(t));
         }
     }
-    public abstract CompactionAwareWriter getCompactionAwareWriter(ColumnFamilyStore cfs, Directories directories, LifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables);
 
-    protected abstract int executeInternal(ActiveCompactionsTracker activeCompactions);
+    public Throwable cleanup(Throwable err)
+    {
+        final boolean isSuccess = err == null;
+        for (CompactionObserver compObserver : compObservers)
+            err = Throwables.perform(err, () -> compObserver.onCompleted(transaction.opId(), isSuccess));
+
+        return Throwables.perform(err, () -> transaction.close());
+    }
+
+    public abstract CompactionAwareWriter getCompactionAwareWriter(CompactionRealm realm, Directories directories, LifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables);
+
+    @VisibleForTesting
+    public LifecycleTransaction getTransaction()
+    {
+        return transaction;
+    }
+
+    @VisibleForTesting
+    public OperationType getCompactionType()
+    {
+        return compactionType;
+    }
+
+    protected abstract int executeInternal();
+
+    // TODO Eventually these three setters should be passed in to the constructor.
 
     public AbstractCompactionTask setUserDefined(boolean isUserDefined)
     {
@@ -124,6 +188,32 @@ public abstract class AbstractCompactionTask extends WrappedRunnable
     {
         this.compactionType = compactionType;
         return this;
+    }
+
+    /**
+     * Override the NO OP observer, this is normally overridden by the compaction metrics.
+     */
+    public AbstractCompactionTask setOpObserver(TableOperationObserver opObserver)
+    {
+        this.opObserver = opObserver;
+        return this;
+    }
+
+    public void addObserver(CompactionObserver compObserver)
+    {
+        compObservers.add(compObserver);
+    }
+
+    @VisibleForTesting
+    public List<CompactionObserver> getCompObservers()
+    {
+        return compObservers;
+    }
+
+    @VisibleForTesting
+    public LifecycleTransaction transaction()
+    {
+        return transaction;
     }
 
     public String toString()

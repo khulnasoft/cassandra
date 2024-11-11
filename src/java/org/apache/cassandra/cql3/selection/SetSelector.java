@@ -17,24 +17,18 @@
  */
 package org.apache.cassandra.cql3.selection;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 
-import com.google.common.base.Objects;
-
 import org.apache.cassandra.cql3.QueryOptions;
-import org.apache.cassandra.cql3.terms.Sets;
-import org.apache.cassandra.db.TypeSizes;
+import org.apache.cassandra.cql3.Sets;
 import org.apache.cassandra.db.filter.ColumnFilter.Builder;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.SetType;
-import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.serializers.CollectionSerializer;
 import org.apache.cassandra.transport.ProtocolVersion;
 
 /**
@@ -43,20 +37,6 @@ import org.apache.cassandra.transport.ProtocolVersion;
  */
 final class SetSelector extends Selector
 {
-    protected static final SelectorDeserializer deserializer = new SelectorDeserializer()
-    {
-        protected Selector deserialize(DataInputPlus in, int version, TableMetadata metadata) throws IOException
-        {
-            SetType<?> type = (SetType<?>) readType(metadata, in);
-            int size = in.readUnsignedVInt32();
-            List<Selector> elements = new ArrayList<>(size);
-            for (int i = 0; i < size; i++)
-                elements.add(serializer.deserialize(in, version, metadata));
-
-            return new SetSelector(type, elements);
-        }
-    };
-
     /**
      * The set type.
      */
@@ -90,37 +70,26 @@ final class SetSelector extends Selector
             elements.get(i).addFetchedColumns(builder);
     }
 
-    public void addInput(InputRow input)
+    public void addInput(ResultSetBuilder rs) throws InvalidRequestException
     {
         for (int i = 0, m = elements.size(); i < m; i++)
-            elements.get(i).addInput(input);
+            elements.get(i).addInput(rs);
     }
 
-    public ByteBuffer getOutput(ProtocolVersion protocolVersion)
+    public ByteBuffer getOutput(ProtocolVersion protocolVersion) throws InvalidRequestException
     {
         Set<ByteBuffer> buffers = new TreeSet<>(type.getElementsType());
         for (int i = 0, m = elements.size(); i < m; i++)
         {
             buffers.add(elements.get(i).getOutput(protocolVersion));
         }
-        return type.pack(new ArrayList<>(buffers));
+        return CollectionSerializer.pack(buffers, buffers.size(), protocolVersion);
     }
 
     public void reset()
     {
         for (int i = 0, m = elements.size(); i < m; i++)
             elements.get(i).reset();
-    }
-
-    @Override
-    public boolean isTerminal()
-    {
-        for (int i = 0, m = elements.size(); i < m; i++)
-        {
-            if (!elements.get(i).isTerminal())
-                return false;
-        }
-        return true;
     }
 
     public AbstractType<?> getType()
@@ -136,49 +105,7 @@ final class SetSelector extends Selector
 
     private SetSelector(AbstractType<?> type, List<Selector> elements)
     {
-        super(Kind.SET_SELECTOR);
         this.type = (SetType<?>) type;
         this.elements = elements;
-    }
-
-    @Override
-    public boolean equals(Object o)
-    {
-        if (this == o)
-            return true;
-
-        if (!(o instanceof SetSelector))
-            return false;
-
-        SetSelector s = (SetSelector) o;
-
-        return Objects.equal(type, s.type)
-            && Objects.equal(elements, s.elements);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hashCode(type, elements);
-    }
-
-    @Override
-    protected int serializedSize(int version)
-    {
-        int size = sizeOf(type) + TypeSizes.sizeofUnsignedVInt(elements.size());
-
-        for (int i = 0, m = elements.size(); i < m; i++)
-            size += serializer.serializedSize(elements.get(i), version);
-
-        return size;
-    }
-
-    @Override
-    protected void serialize(DataOutputPlus out, int version) throws IOException
-    {
-        writeType(out, type);
-        out.writeUnsignedVInt32(elements.size());
-        for (int i = 0, m = elements.size(); i < m; i++)
-            serializer.serialize(elements.get(i), out, version);
     }
 }

@@ -24,7 +24,7 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Tells jvm-dtest that a class should be shared across all {@link ClassLoader}s.
+ * Tells jvm-dtest that a class should be shared accross all {@link ClassLoader}s.
  *
  * Jvm-dtest relies on classloader isolation to run multiple cassandra instances in the same JVM, this makes it
  * so some classes do not get shared (outside a blesssed set of classes/packages). When the default behavior
@@ -36,10 +36,4 @@ import java.lang.annotation.Target;
 @Target({ ElementType.TYPE })
 public @interface Shared
 {
-    enum Scope { ANY, SIMULATION }
-    enum Recursive { NONE, INTERFACES /*(and enums and exceptions) */, ALL }
-    Scope[] scope() default Scope.ANY;
-    Recursive inner() default Recursive.NONE;
-    Recursive ancestors() default Recursive.NONE;
-    Recursive members() default Recursive.NONE;
 }

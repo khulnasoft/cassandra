@@ -19,52 +19,39 @@
 package org.apache.cassandra.net;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.ServerSocket;
-import java.net.UnknownHostException;
+
+import com.google.common.base.Throwables;
 
 public class SocketUtils
 {
-    /**
-     * Returns an available port for the given {@code bindAddress}. When an {@link IOException} occurs when opening a
-     * socket or if a {@link SecurityException} is raised because a manager exists and its checkListen method does
-     * not allow the operation, the {@code fallbackPort} is returned.
-     *
-     * @param bindAddress  the ip address for the interface where we need an available port number
-     * @param fallbackPort a port to return in case {@link SecurityException} or {@link IOException} is encountered
-     * @return an available port the given {@code bindAddress} when succeeds, otherwise the {@code fallbackPort}
-     * @throws RuntimeException if no IP address for the {@code bindAddress} could be found
-     */
-    public static synchronized int findAvailablePort(String bindAddress, int fallbackPort) throws RuntimeException
+    public static synchronized int findAvailablePort() throws RuntimeException
     {
+        ServerSocket ss = null;
         try
         {
-            return findAvailablePort(InetAddress.getByName(bindAddress), fallbackPort);
+            // let the system pick an ephemeral port
+            ss = new ServerSocket(0);
+            ss.setReuseAddress(true);
+            return ss.getLocalPort();
         }
-        catch (UnknownHostException e)
+        catch (IOException e)
         {
-            throw new RuntimeException(e);
+            throw Throwables.propagate(e);
         }
-    }
-
-    /**
-     * Returns an available port for the given {@code bindAddress}. When an {@link IOException} occurs when opening a
-     * socket or if a {@link SecurityException} is raised because a manager exists and its checkListen method does
-     * not allow the operation, the {@code fallbackPort} is returned.
-     *
-     * @param bindAddress  the ip address for the interface where we need an available port number
-     * @param fallbackPort a port to return in case {@link SecurityException} or {@link IOException} is encountered
-     * @return an available port the given {@code bindAddress} when succeeds, otherwise the {@code fallbackPort}
-     */
-    public static synchronized int findAvailablePort(InetAddress bindAddress, int fallbackPort)
-    {
-        try (ServerSocket socket = new ServerSocket(0, 50, bindAddress))
+        finally
         {
-            return socket.getLocalPort();
-        }
-        catch (SecurityException | IOException exception)
-        {
-            return fallbackPort;
+            if (ss != null)
+            {
+                try
+                {
+                    ss.close();
+                }
+                catch (IOException e)
+                {
+                    Throwables.propagate(e);
+                }
+            }
         }
     }
 }

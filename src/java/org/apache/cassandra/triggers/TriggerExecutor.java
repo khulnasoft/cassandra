@@ -19,22 +19,23 @@
 package org.apache.cassandra.triggers;
 
 import java.nio.ByteBuffer;
-import java.util.*;
-import java.util.concurrent.TimeUnit;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
 
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Lists;
 import com.google.common.collect.ListMultimap;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import org.apache.cassandra.config.Config;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryProcessor;
-import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.CounterMutation;
+import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.IMutation;
+import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.exceptions.CassandraException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
@@ -43,18 +44,14 @@ import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TriggerMetadata;
 import org.apache.cassandra.schema.Triggers;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.Pair;
 
 public class TriggerExecutor
 {
-    private static final Logger logger = LoggerFactory.getLogger(TriggerExecutor.class);
-    private static final NoSpamLogger skippedTriggerLogger = NoSpamLogger.getLogger(logger, 1, TimeUnit.MINUTES);
-
     public static final TriggerExecutor instance = new TriggerExecutor();
 
     private final Map<String, ITrigger> cachedTriggers = Maps.newConcurrentMap();
-    private final ClassLoader parent = TriggerExecutor.class.getClassLoader();
+    private final ClassLoader parent = Thread.currentThread().getContextClassLoader();
     private volatile ClassLoader customClassLoader;
 
     private TriggerExecutor()
@@ -230,16 +227,6 @@ public class TriggerExecutor
         Triggers triggers = update.metadata().triggers;
         if (triggers.isEmpty())
             return null;
-        Config.TriggersPolicy policy = DatabaseDescriptor.getTriggersPolicy();
-        if (policy == Config.TriggersPolicy.disabled)
-        {
-            skippedTriggerLogger.warn("Skipping execution of triggers due to configuration TriggersPolicy.disabled: {}", triggers);
-            return null;
-        }
-        if (policy == Config.TriggersPolicy.forbidden)
-        {
-            throw new TriggerDisabledException(String.format("Triggers are present but TriggersPolicy.forbidden is configured. Failing query that would execute triggers: %s", triggers));
-        }
         List<Mutation> tmutations = Lists.newLinkedList();
         Thread.currentThread().setContextClassLoader(customClassLoader);
         try
@@ -272,23 +259,8 @@ public class TriggerExecutor
         }
     }
 
-    public synchronized void loadTriggerClass(String triggerClass) throws Exception
-    {
-        // Allow loading the class regardless of Config, since this could happen as part of TCM replay via
-        // CreateTriggerStatement#apply.
-        // Check that triggerClass is available on the classpath, but do not initialize the class since that would
-        // execute static blocks.
-        customClassLoader.loadClass(triggerClass).getConstructor();
-    }
-
     public synchronized ITrigger loadTriggerInstance(String triggerClass) throws Exception
     {
-        Config.TriggersPolicy policy = DatabaseDescriptor.getTriggersPolicy();
-        if (policy == Config.TriggersPolicy.disabled || policy == Config.TriggersPolicy.forbidden)
-        {
-            throw new TriggerDisabledException(String.format("Refusing to load new trigger class %s with TriggersPolicy.%s", triggerClass, policy));
-        }
-
         // double check.
         if (cachedTriggers.get(triggerClass) != null)
             return cachedTriggers.get(triggerClass);

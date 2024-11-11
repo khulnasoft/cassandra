@@ -21,24 +21,27 @@ package org.apache.cassandra.index.sai.view;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.index.sai.IndexValidation;
+import org.apache.cassandra.index.sai.IndexContext;
 import org.apache.cassandra.index.sai.SSTableContext;
-import org.apache.cassandra.index.sai.StorageAttachedIndex;
-import org.apache.cassandra.index.sai.disk.SSTableIndex;
+import org.apache.cassandra.index.sai.SSTableIndex;
 import org.apache.cassandra.index.sai.StorageAttachedIndexGroup;
+import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.utils.Pair;
 
 /**
- * Maintain an atomic view for read requests, so that requests can read all data during concurrent compactions.
- * <p>
+ * Maintain a atomic view for read requests, so that requests can read all data during concurrent compactions.
+ *
  * All per-column {@link SSTableIndex} updates should be proxied by {@link StorageAttachedIndexGroup} to make
  * sure per-sstable {@link SSTableContext} are in-sync.
  */
@@ -46,16 +49,22 @@ public class IndexViewManager
 {
     private static final Logger logger = LoggerFactory.getLogger(IndexViewManager.class);
     
-    private final StorageAttachedIndex index;
+    private final IndexContext context;
     private final AtomicReference<View> view = new AtomicReference<>();
 
-    public IndexViewManager(StorageAttachedIndex index)
+    public IndexViewManager(IndexContext context)
     {
-        this.index = index;
-        this.view.set(new View(index.termType(), Collections.emptySet()));
+        this(context, Collections.emptySet());
     }
 
-    public View view()
+    @VisibleForTesting
+    IndexViewManager(IndexContext context, Collection<SSTableIndex> indices)
+    {
+        this.context = context;
+        this.view.set(new View(context, indices));
+    }
+
+    public View getView()
     {
         return view.get();
     }
@@ -65,19 +74,20 @@ public class IndexViewManager
      *
      * @param oldSSTables A set of SSTables to remove.
      * @param newSSTableContexts A set of SSTableContexts to add to tracker.
-     * @param validation Controls how indexes should be validated
+     * @param validate if true, per-column index files' header and footer will be validated.
      *
      * @return A set of SSTables which have attached to them invalid index components.
      */
-    public Collection<SSTableContext> update(Collection<SSTableReader> oldSSTables, Collection<SSTableContext> newSSTableContexts, IndexValidation validation)
+    public Set<SSTableContext> update(Collection<SSTableReader> oldSSTables, Collection<SSTableContext> newSSTableContexts, boolean validate)
     {
         // Valid indexes on the left and invalid SSTable contexts on the right...
-        Pair<Collection<SSTableIndex>, Collection<SSTableContext>> indexes = getBuiltIndexes(newSSTableContexts, validation);
+        Pair<Set<SSTableIndex>, Set<SSTableContext>> indexes = context.getBuiltIndexes(newSSTableContexts, validate);
 
         View currentView, newView;
-        Collection<SSTableIndex> newViewIndexes = new HashSet<>();
+        Map<Descriptor, SSTableIndex> newViewIndexes = new HashMap<>();
         Collection<SSTableIndex> releasableIndexes = new ArrayList<>();
-
+        Collection<SSTableReader> toRemove = new HashSet<>(oldSSTables);
+        
         do
         {
             currentView = view.get();
@@ -88,35 +98,52 @@ public class IndexViewManager
             {
                 // When aborting early open transaction, toRemove may have the same sstable files as newSSTableContexts,
                 // but different SSTableReader java objects with different start positions. So we need to release them
-                // from existing view.
+                // from existing view.  see DSP-19677
                 SSTableReader sstable = sstableIndex.getSSTable();
-                if (oldSSTables.contains(sstable) || newViewIndexes.contains(sstableIndex))
+                if (toRemove.contains(sstable))
                     releasableIndexes.add(sstableIndex);
                 else
-                    newViewIndexes.add(sstableIndex);
+                    addOrUpdateSSTableIndex(sstableIndex, newViewIndexes, releasableIndexes);
             }
 
             for (SSTableIndex sstableIndex : indexes.left)
             {
-                if (newViewIndexes.contains(sstableIndex))
-                    releasableIndexes.add(sstableIndex);
-                else
-                    newViewIndexes.add(sstableIndex);
+                addOrUpdateSSTableIndex(sstableIndex, newViewIndexes, releasableIndexes);
             }
 
-            newView = new View(index.termType(), newViewIndexes);
+            newView = new View(context, newViewIndexes.values());
         }
         while (!view.compareAndSet(currentView, newView));
 
         releasableIndexes.forEach(SSTableIndex::release);
 
         if (logger.isTraceEnabled())
-            logger.trace(index.identifier().logMessage("There are now {} active SSTable indexes."), view.get().getIndexes().size());
+            logger.trace(context.logMessage("There are now {} active SSTable indexes."), view.get().getIndexes().size());
 
         return indexes.right;
     }
 
-    public void drop(Collection<SSTableReader> sstablesToRebuild)
+    private static void addOrUpdateSSTableIndex(SSTableIndex ssTableIndex, Map<Descriptor, SSTableIndex> addTo, Collection<SSTableIndex> toRelease)
+    {
+        var descriptor = ssTableIndex.getSSTable().descriptor;
+        SSTableIndex previous = addTo.get(descriptor);
+        if (previous != null)
+        {
+            // If the new index use the same files that the exiting one (and the previous one is still complete, meaning
+            // that the files weren't corrupted), then keep the old one (no point in changing for the same thing).
+            if (previous.usedPerIndexComponents().isComplete() && ssTableIndex.usedPerIndexComponents().hasSameVersionAndGenerationThan(previous.usedPerIndexComponents()))
+            {
+                toRelease.add(ssTableIndex);
+                return;
+            }
+
+            // Otherwise, release the old, and we'll replace by the new one below.
+            toRelease.add(previous);
+        }
+        addTo.put(descriptor, ssTableIndex);
+    }
+
+    public void prepareSSTablesForRebuild(Collection<SSTableReader> sstablesToRebuild)
     {
         View currentView = view.get();
 
@@ -127,82 +154,29 @@ public class IndexViewManager
             if (!toRemove.contains(sstable))
                 continue;
 
-            index.markObsolete();
+            index.release();
         }
 
-        update(toRemove, Collections.emptyList(), IndexValidation.NONE);
+        update(toRemove, Collections.emptyList(), false);
     }
 
     /**
      * Called when index is dropped. Mark all {@link SSTableIndex} as released and per-column index files
-     * will be removed when in-flight queries are completed.
+     * will be removed when in-flight queries completed and {@code obsolete} is true.
+     *
+     * @param indexWasDropped true if the index is invalidated because it was dropped; false if the index is simply
+     *                        being unloaded.
      */
-    public void invalidate()
+    public void invalidate(boolean indexWasDropped)
     {
-        View previousView = view.getAndSet(new View(index.termType(), Collections.emptyList()));
+        View previousView = view.getAndSet(new View(context, Collections.emptyList()));
 
         for (SSTableIndex index : previousView)
         {
-            index.markObsolete();
+            if (indexWasDropped)
+                index.markIndexDropped();
+            else
+                index.release();
         }
-    }
-
-    /**
-     * @return the indexes that are built on the given SSTables on the left and corrupted indexes'
-     * corresponding contexts on the right
-     */
-    private Pair<Collection<SSTableIndex>, Collection<SSTableContext>> getBuiltIndexes(Collection<SSTableContext> sstableContexts, IndexValidation validation)
-    {
-        Set<SSTableIndex> valid = new HashSet<>(sstableContexts.size());
-        Set<SSTableContext> invalid = new HashSet<>();
-
-        for (SSTableContext sstableContext : sstableContexts)
-        {
-            if (sstableContext.sstable.isMarkedCompacted())
-                continue;
-
-            if (!sstableContext.indexDescriptor.isPerColumnIndexBuildComplete(index.identifier()))
-            {
-                logger.debug(index.identifier().logMessage("An on-disk index build for SSTable {} has not completed."), sstableContext.descriptor());
-                continue;
-            }
-
-            if (sstableContext.indexDescriptor.isIndexEmpty(index.termType(), index.identifier()))
-            {
-                logger.debug(index.identifier().logMessage("No on-disk index was built for SSTable {} because the SSTable " +
-                                                           "had no indexable rows for the index."), sstableContext.descriptor());
-                continue;
-            }
-
-            try
-            {
-                if (validation != IndexValidation.NONE)
-                {
-                    if (!sstableContext.indexDescriptor.validatePerIndexComponents(index.termType(), index.identifier(), validation, true, false))
-                    {
-                        invalid.add(sstableContext);
-                        continue;
-                    }
-                }
-
-                SSTableIndex ssTableIndex = sstableContext.newSSTableIndex(index);
-                logger.debug(index.identifier().logMessage("Successfully created index for SSTable {}."), sstableContext.descriptor());
-
-                // Try to add new index to the set, if set already has such index, we'll simply release and move on.
-                // This covers situation when SSTable collection has the same SSTable multiple
-                // times because we don't know what kind of collection it actually is.
-                if (!valid.add(ssTableIndex))
-                {
-                    ssTableIndex.release();
-                }
-            }
-            catch (Throwable e)
-            {
-                logger.warn(index.identifier().logMessage("Failed to update per-column components for SSTable {}"), sstableContext.descriptor(), e);
-                invalid.add(sstableContext);
-            }
-        }
-
-        return Pair.create(valid, invalid);
     }
 }

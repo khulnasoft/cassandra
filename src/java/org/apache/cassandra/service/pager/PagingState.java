@@ -22,6 +22,10 @@ import java.nio.ByteBuffer;
 import java.util.*;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.primitives.Ints;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.marshal.AbstractType;
@@ -47,6 +51,8 @@ import static org.apache.cassandra.utils.vint.VIntCoding.getUnsignedVInt;
 @SuppressWarnings("WeakerAccess")
 public class PagingState
 {
+    private static final Logger logger = LoggerFactory.getLogger(PagingState.class);
+
     public final ByteBuffer partitionKey;  // Can be null for single partition queries.
     public final RowMark rowMark;          // Can be null if not needed.
     public final int remaining;
@@ -113,23 +119,28 @@ public class PagingState
         }
         catch (IOException e)
         {
-            throw new ProtocolException("Invalid value for the paging state");
+            String msg =  "Failed to deserialize the paging state with protocol version: " + protocolVersion;
+            logger.trace(msg, e);
+            throw new ProtocolException(msg, protocolVersion);
         }
 
-        throw new ProtocolException("Invalid value for the paging state");
+        String msg =  "The serialized paging state does not match any serialization format for protocol version: " + protocolVersion;
+        logger.trace(msg);
+        throw new ProtocolException(msg, protocolVersion);
     }
 
     /*
      * Modern serde (> VERSION_3)
      */
 
+    @SuppressWarnings({ "resource", "RedundantSuppression" })
     private ByteBuffer modernSerialize() throws IOException
     {
         DataOutputBuffer out = new DataOutputBufferFixed(modernSerializedSize());
         writeWithVIntLength(null == partitionKey ? EMPTY_BYTE_BUFFER : partitionKey, out);
         writeWithVIntLength(null == rowMark ? EMPTY_BYTE_BUFFER : rowMark.mark, out);
-        out.writeUnsignedVInt32(remaining);
-        out.writeUnsignedVInt32(remainingInPartition);
+        out.writeUnsignedVInt(remaining);
+        out.writeUnsignedVInt(remainingInPartition);
         return out.buffer(false);
     }
 
@@ -195,6 +206,7 @@ public class PagingState
         return (int)value;
     }
 
+    @SuppressWarnings({ "resource", "RedundantSuppression" })
     private static PagingState modernDeserialize(ByteBuffer bytes, ProtocolVersion protocolVersion) throws IOException
     {
         if (protocolVersion.isSmallerThan(ProtocolVersion.V4))
@@ -204,8 +216,8 @@ public class PagingState
 
         ByteBuffer partitionKey = readWithVIntLength(in);
         ByteBuffer rawMark = readWithVIntLength(in);
-        int remaining = in.readUnsignedVInt32();
-        int remainingInPartition = in.readUnsignedVInt32();
+        int remaining = Ints.checkedCast(in.readUnsignedVInt());
+        int remainingInPartition = Ints.checkedCast(in.readUnsignedVInt());
 
         return new PagingState(partitionKey.hasRemaining() ? partitionKey : null,
                                rawMark.hasRemaining() ? new RowMark(rawMark, protocolVersion) : null,
@@ -229,6 +241,7 @@ public class PagingState
      */
 
     @VisibleForTesting
+    @SuppressWarnings({ "resource", "RedundantSuppression" })
     ByteBuffer legacySerialize(boolean withRemainingInPartition) throws IOException
     {
         DataOutputBuffer out = new DataOutputBufferFixed(legacySerializedSize(withRemainingInPartition));
@@ -279,6 +292,7 @@ public class PagingState
         return false;
     }
 
+    @SuppressWarnings({ "resource", "RedundantSuppression" })
     private static PagingState legacyDeserialize(ByteBuffer bytes, ProtocolVersion protocolVersion) throws IOException
     {
         if (protocolVersion.isGreaterThan(ProtocolVersion.V3))
@@ -396,9 +410,9 @@ public class PagingState
             }
             else
             {
-                // We froze the serialization version to 3.0 as we need to make sure this this doesn't change
-                //  It got bumped to 4.0 when 3.0 got dropped, knowing it didn't change
-                mark = Clustering.serializer.serialize(row.clustering(), MessagingService.VERSION_40, makeClusteringTypes(metadata));
+                // We froze the serialization version to 3.0 as we need to make this this doesn't change (that is, it has to be
+                // fix for a given version of the protocol).
+                mark = Clustering.serializer.serialize(row.clustering(), MessagingService.VERSION_30, makeClusteringTypes(metadata));
             }
             return new RowMark(mark, protocolVersion);
         }
@@ -410,7 +424,7 @@ public class PagingState
 
             return protocolVersion.isSmallerOrEqualTo(ProtocolVersion.V3)
                  ? decodeClustering(metadata, mark)
-                 : Clustering.serializer.deserialize(mark, MessagingService.VERSION_40, makeClusteringTypes(metadata));
+                 : Clustering.serializer.deserialize(mark, MessagingService.VERSION_30, makeClusteringTypes(metadata));
         }
 
         // Old (pre-3.0) encoding of cells. We need that for the protocol v3 as that is how things where encoded

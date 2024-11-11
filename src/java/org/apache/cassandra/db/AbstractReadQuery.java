@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.db;
 
-import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.filter.RowFilter;
@@ -32,13 +31,13 @@ import org.apache.cassandra.schema.TableMetadata;
 abstract class AbstractReadQuery extends MonitorableImpl implements ReadQuery
 {
     private final TableMetadata metadata;
-    private final long nowInSec;
+    private final int nowInSec;
 
     private final ColumnFilter columnFilter;
     private final RowFilter rowFilter;
     private final DataLimits limits;
 
-    protected AbstractReadQuery(TableMetadata metadata, long nowInSec, ColumnFilter columnFilter, RowFilter rowFilter, DataLimits limits)
+    protected AbstractReadQuery(TableMetadata metadata, int nowInSec, ColumnFilter columnFilter, RowFilter rowFilter, DataLimits limits)
     {
         this.metadata = metadata;
         this.nowInSec = nowInSec;
@@ -72,7 +71,7 @@ abstract class AbstractReadQuery extends MonitorableImpl implements ReadQuery
     }
 
     @Override
-    public long nowInSec()
+    public int nowInSec()
     {
         return nowInSec;
     }
@@ -103,17 +102,13 @@ abstract class AbstractReadQuery extends MonitorableImpl implements ReadQuery
         StringBuilder sb = new StringBuilder().append("SELECT ")
                                               .append(columnFilter().toCQLString())
                                               .append(" FROM ")
-                                              .append(ColumnIdentifier.maybeQuote(metadata().keyspace))
+                                              .append(metadata().keyspace)
                                               .append('.')
-                                              .append(ColumnIdentifier.maybeQuote(metadata().name));
+                                              .append(metadata().name);
         appendCQLWhereClause(sb);
 
         if (limits() != DataLimits.NONE)
             sb.append(' ').append(limits());
-
-        // ALLOW FILTERING might not be strictly necessary
-        sb.append(" ALLOW FILTERING");
-
         return sb.toString();
     }
 

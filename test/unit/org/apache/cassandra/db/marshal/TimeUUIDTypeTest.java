@@ -24,12 +24,8 @@ import java.util.UUID;
 import org.junit.Assert;
 import org.apache.cassandra.serializers.MarshalException;
 import org.junit.Test;
-
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 import static org.junit.Assert.assertEquals;
 
-import org.apache.cassandra.serializers.UUIDSerializer;
-import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.UUIDGen;
 
 public class TimeUUIDTypeTest
@@ -39,44 +35,44 @@ public class TimeUUIDTypeTest
     @Test
     public void testEquality()
     {
-        TimeUUID a = nextTimeUUID();
-        TimeUUID b = TimeUUID.fromBytes(a.msb(), a.lsb());
+        UUID a = UUIDGen.getTimeUUID();
+        UUID b = new UUID(a.getMostSignificantBits(), a.getLeastSignificantBits());
 
-        timeUUIDType.validate(a.toBytes());
-        timeUUIDType.validate(b.toBytes());
-        assertEquals(0, timeUUIDType.compare(a.toBytes(), b.toBytes()));
+        timeUUIDType.validate(ByteBuffer.wrap(UUIDGen.decompose(a)));
+        timeUUIDType.validate(ByteBuffer.wrap(UUIDGen.decompose(b)));
+        assertEquals(0, timeUUIDType.compare(ByteBuffer.wrap(UUIDGen.decompose(a)), ByteBuffer.wrap(UUIDGen.decompose(b))));
     }
 
     @Test
     public void testSmaller()
     {
-        TimeUUID a = nextTimeUUID();
-        TimeUUID b = nextTimeUUID();
-        TimeUUID c = nextTimeUUID();
+        UUID a = UUIDGen.getTimeUUID();
+        UUID b = UUIDGen.getTimeUUID();
+        UUID c = UUIDGen.getTimeUUID();
 
-        timeUUIDType.validate(a.toBytes());
-        timeUUIDType.validate(b.toBytes());
-        timeUUIDType.validate(c.toBytes());
+        timeUUIDType.validate(ByteBuffer.wrap(UUIDGen.decompose(a)));
+        timeUUIDType.validate(ByteBuffer.wrap(UUIDGen.decompose(b)));
+        timeUUIDType.validate(ByteBuffer.wrap(UUIDGen.decompose(c)));
 
-        assert timeUUIDType.compare(a.toBytes(), b.toBytes()) < 0;
-        assert timeUUIDType.compare(b.toBytes(), c.toBytes()) < 0;
-        assert timeUUIDType.compare(a.toBytes(), c.toBytes()) < 0;
+        assert timeUUIDType.compare(ByteBuffer.wrap(UUIDGen.decompose(a)), ByteBuffer.wrap(UUIDGen.decompose(b))) < 0;
+        assert timeUUIDType.compare(ByteBuffer.wrap(UUIDGen.decompose(b)), ByteBuffer.wrap(UUIDGen.decompose(c))) < 0;
+        assert timeUUIDType.compare(ByteBuffer.wrap(UUIDGen.decompose(a)), ByteBuffer.wrap(UUIDGen.decompose(c))) < 0;
     }
 
     @Test
     public void testBigger()
     {
-        TimeUUID a = nextTimeUUID();
-        TimeUUID b = nextTimeUUID();
-        TimeUUID c = nextTimeUUID();
+        UUID a = UUIDGen.getTimeUUID();
+        UUID b = UUIDGen.getTimeUUID();
+        UUID c = UUIDGen.getTimeUUID();
 
-        timeUUIDType.validate(a.toBytes());
-        timeUUIDType.validate(b.toBytes());
-        timeUUIDType.validate(c.toBytes());
+        timeUUIDType.validate(ByteBuffer.wrap(UUIDGen.decompose(a)));
+        timeUUIDType.validate(ByteBuffer.wrap(UUIDGen.decompose(b)));
+        timeUUIDType.validate(ByteBuffer.wrap(UUIDGen.decompose(c)));
 
-        assert timeUUIDType.compare(c.toBytes(), b.toBytes()) > 0;
-        assert timeUUIDType.compare(b.toBytes(), a.toBytes()) > 0;
-        assert timeUUIDType.compare(c.toBytes(), a.toBytes()) > 0;
+        assert timeUUIDType.compare(ByteBuffer.wrap(UUIDGen.decompose(c)), ByteBuffer.wrap(UUIDGen.decompose(b))) > 0;
+        assert timeUUIDType.compare(ByteBuffer.wrap(UUIDGen.decompose(b)), ByteBuffer.wrap(UUIDGen.decompose(a))) > 0;
+        assert timeUUIDType.compare(ByteBuffer.wrap(UUIDGen.decompose(c)), ByteBuffer.wrap(UUIDGen.decompose(a))) > 0;
     }
 
     @Test
@@ -157,7 +153,7 @@ public class TimeUUIDTypeTest
     {
         UUID uuid1 = UUID.fromString("00000000-0000-1000-0000-000000000000");
         assert uuid1.version() == 1;
-        timeUUIDType.validate(UUIDSerializer.instance.serialize(uuid1));
+        timeUUIDType.validate(ByteBuffer.wrap(UUIDGen.decompose(uuid1)));
     }
 
     @Test(expected = MarshalException.class)
@@ -165,7 +161,7 @@ public class TimeUUIDTypeTest
     {
         UUID uuid2 = UUID.fromString("00000000-0000-2100-0000-000000000000");
         assert uuid2.version() == 2;
-        timeUUIDType.validate(UUIDSerializer.instance.serialize(uuid2));
+        timeUUIDType.validate(ByteBuffer.wrap(UUIDGen.decompose(uuid2)));
     }
 
 

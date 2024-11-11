@@ -18,10 +18,8 @@
 
 package org.apache.cassandra.cql3;
 
-import org.apache.cassandra.cql3.restrictions.SimpleRestriction;
+import org.apache.cassandra.cql3.restrictions.SingleColumnRestriction;
 import org.apache.cassandra.cql3.restrictions.SingleRestriction;
-import org.apache.cassandra.cql3.terms.Term;
-import org.apache.cassandra.cql3.terms.Terms;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 
@@ -43,53 +41,64 @@ public class Ordering
         this.direction = direction;
     }
 
-    public static abstract class Expression
+    public interface Expression
     {
-        protected final ColumnMetadata columnMetadata;
+        boolean hasNonClusteredOrdering();
 
-        public Expression(ColumnMetadata columnMetadata)
+        SingleRestriction toRestriction();
+
+        ColumnMetadata getColumn();
+    }
+
+    /**
+     * Represents a single column in
+     * <code>ORDER BY column</code>
+     */
+    public static class SingleColumn implements Expression
+    {
+        public final ColumnMetadata column;
+        private final Ordering.Direction direction;
+
+        public SingleColumn(ColumnMetadata column, Ordering.Direction direction)
         {
-            this.columnMetadata = columnMetadata;
+            this.column = column;
+            this.direction = direction;
         }
 
+        @Override
         public boolean hasNonClusteredOrdering()
         {
-            return false;
+            return !column.isClusteringColumn();
         }
 
+        @Override
         public SingleRestriction toRestriction()
         {
-            throw new UnsupportedOperationException();
+            return new SingleColumnRestriction.OrderRestriction(column, direction == Direction.DESC ? Operator.ORDER_BY_DESC : Operator.ORDER_BY_ASC);
         }
 
+        @Override
         public ColumnMetadata getColumn()
         {
-            return columnMetadata;
+            return column;
         }
     }
 
     /**
-     * Represents a single column in <code>ORDER BY column</code>
+     * An expression used in Approximate Nearest Neighbor ordering.
+     * <code>ORDER BY column ANN OF value</code>
      */
-    public static class SingleColumn extends Expression
+    public static class Ann implements Expression
     {
-        public SingleColumn(ColumnMetadata columnMetadata)
-        {
-            super(columnMetadata);
-        }
-    }
-
-    /**
-     * An expression used in Approximate Nearest Neighbor ordering. <code>ORDER BY column ANN OF value</code>
-     */
-    public static class Ann extends Expression
-    {
+        final ColumnMetadata column;
         final Term vectorValue;
+        final Direction direction;
 
-        public Ann(ColumnMetadata columnMetadata, Term vectorValue)
+        public Ann(ColumnMetadata column, Term vectorValue, Direction direction)
         {
-            super(columnMetadata);
+            this.column = column;
             this.vectorValue = vectorValue;
+            this.direction = direction;
         }
 
         @Override
@@ -101,9 +110,13 @@ public class Ordering
         @Override
         public SingleRestriction toRestriction()
         {
-            return new SimpleRestriction(ColumnsExpression.singleColumn(columnMetadata),
-                                         Operator.ANN,
-                                         Terms.of(vectorValue));
+            return new SingleColumnRestriction.AnnRestriction(column, vectorValue);
+        }
+
+        @Override
+        public ColumnMetadata getColumn()
+        {
+            return column;
         }
     }
 
@@ -112,16 +125,16 @@ public class Ordering
 
 
     /**
-     * Represents ANTLR's abstract syntax tree of a single element in the {@code ORDER BY} clause.
+     * Represents the AST of a single element in the ORDER BY clause.
      * This comes directly out of CQL parser.
      */
     public static class Raw
     {
 
         final Expression expression;
-        final Direction direction;
+        final Ordering.Direction direction;
 
-        public Raw(Expression expression, Direction direction)
+        public Raw(Expression expression, Ordering.Direction direction)
         {
             this.expression = expression;
             this.direction = direction;
@@ -133,12 +146,12 @@ public class Ordering
          */
         public Ordering bind(TableMetadata table, VariableSpecifications boundNames)
         {
-            return new Ordering(expression.bind(table, boundNames), direction);
+            return new Ordering(expression.bind(table, boundNames, direction), direction);
         }
 
         public interface Expression
         {
-            Ordering.Expression bind(TableMetadata table, VariableSpecifications boundNames);
+            Ordering.Expression bind(TableMetadata table, VariableSpecifications boundNames, Ordering.Direction direction);
         }
 
         public static class SingleColumn implements Expression
@@ -151,9 +164,9 @@ public class Ordering
             }
 
             @Override
-            public Ordering.Expression bind(TableMetadata table, VariableSpecifications boundNames)
+            public Ordering.Expression bind(TableMetadata table, VariableSpecifications boundNames, Ordering.Direction direction)
             {
-                return new Ordering.SingleColumn(table.getExistingColumn(column));
+                return new Ordering.SingleColumn(table.getExistingColumn(column), direction);
             }
         }
 
@@ -169,12 +182,12 @@ public class Ordering
             }
 
             @Override
-            public Ordering.Expression bind(TableMetadata table, VariableSpecifications boundNames)
+            public Ordering.Expression bind(TableMetadata table, VariableSpecifications boundNames, Direction direction)
             {
                 ColumnMetadata column = table.getExistingColumn(columnId);
                 Term value = vectorValue.prepare(table.keyspace, column);
                 value.collectMarkerSpecification(boundNames);
-                return new Ordering.Ann(column, value);
+                return new Ordering.Ann(column, value, direction);
             }
         }
     }

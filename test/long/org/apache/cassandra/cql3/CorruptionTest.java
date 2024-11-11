@@ -17,6 +17,8 @@
  */
 package org.apache.cassandra.cql3;
 
+
+import java.io.FileWriter;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -29,20 +31,20 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.datastax.driver.core.BoundStatement;
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.ConsistencyLevel;
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.Row;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.policies.LoggingRetryPolicy;
-import com.datastax.driver.core.policies.Policies;
-import com.datastax.driver.core.utils.Bytes;
+import com.khulnasoft.driver.core.BoundStatement;
+import com.khulnasoft.driver.core.Cluster;
+import com.khulnasoft.driver.core.ConsistencyLevel;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.Row;
+import com.khulnasoft.driver.core.Session;
+import com.khulnasoft.driver.core.policies.LoggingRetryPolicy;
+import com.khulnasoft.driver.core.policies.Policies;
+import com.khulnasoft.driver.core.utils.Bytes;
 import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.util.File;
-import org.apache.cassandra.io.util.FileWriter;
+import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.service.EmbeddedCassandraService;
 
 public class CorruptionTest
@@ -155,12 +157,10 @@ public class CorruptionTest
                     String basename = "bad-data-tid" + Thread.currentThread().getId();
                     File put = new File(basename+"-put");
                     File get = new File(basename+"-get");
-                    try (FileWriter pw = put.newWriter(File.WriteMode.OVERWRITE))
-                    {
+                    try(FileWriter pw = new FileWriter(put.toJavaIOFile())) {
                         pw.write(new String(putdata));
                     }
-                    try (FileWriter pw = get.newWriter(File.WriteMode.OVERWRITE))
-                    {
+                    try(FileWriter pw = new FileWriter(get.toJavaIOFile())) {
                         pw.write(new String(getdata));
                     }
                 }
@@ -184,7 +184,7 @@ public class CorruptionTest
         BoundStatement boundStatement = new BoundStatement(getStatement);
         boundStatement.setBytes(0, ByteBuffer.wrap(key));
 
-        final com.datastax.driver.core.ResultSet resultSet =  session.execute(boundStatement);
+        final com.khulnasoft.driver.core.ResultSet resultSet =  session.execute(boundStatement);
         final Row row = resultSet.one();
         if (row != null)
         {

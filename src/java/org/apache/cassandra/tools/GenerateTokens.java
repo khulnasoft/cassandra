@@ -21,11 +21,13 @@ package org.apache.cassandra.tools;
 import java.util.Arrays;
 
 import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.GnuParser;
 import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
+
 import org.slf4j.LoggerFactory;
 
 import ch.qos.logback.classic.Level;
@@ -106,7 +108,7 @@ public class GenerateTokens
         }
         catch (Throwable t)
         {
-            logger.warn(t, "Error running tool.");
+            logger.warn("Error running tool.", t);
             System.exit(1);
         }
     }
@@ -152,3 +154,4 @@ public class GenerateTokens
         new HelpFormatter().printHelp(usage, header, options, "");
     }
 }
+

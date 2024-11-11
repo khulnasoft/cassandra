@@ -30,7 +30,7 @@ import org.apache.cassandra.db.lifecycle.View;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
+import org.apache.cassandra.io.sstable.format.big.BigTableReader;
 import org.apache.cassandra.locator.RangesAtEndpoint;
 import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.service.ActiveRepairService;
@@ -41,7 +41,6 @@ import org.apache.cassandra.streaming.StreamReceiver;
 import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.TableStreamManager;
 import org.apache.cassandra.streaming.messages.StreamMessageHeader;
-import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.concurrent.Ref;
 import org.apache.cassandra.utils.concurrent.Refs;
 import org.slf4j.Logger;
@@ -51,6 +50,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Implements the streaming interface for the native cassandra storage engine.
@@ -82,8 +82,9 @@ public class CassandraStreamManager implements TableStreamManager
         return new CassandraStreamReceiver(cfs, session, totalStreams);
     }
 
+    @SuppressWarnings("resource")   // references placed onto returned collection or closed on error
     @Override
-    public Collection<OutgoingStream> createOutgoingStreams(StreamSession session, RangesAtEndpoint replicas, TimeUUID pendingRepair, PreviewKind previewKind)
+    public Collection<OutgoingStream> createOutgoingStreams(StreamSession session, RangesAtEndpoint replicas, UUID pendingRepair, PreviewKind previewKind)
     {
         Refs<SSTableReader> refs = new Refs<>();
         try
@@ -105,10 +106,7 @@ public class CassandraStreamManager implements TableStreamManager
                 }
                 else
                 {
-                    predicate = s -> {
-                        StatsMetadata sstableMetadata = s.getSSTableMetadata();
-                        return sstableMetadata.pendingRepair != ActiveRepairService.NO_PENDING_REPAIR && sstableMetadata.pendingRepair.equals(pendingRepair);
-                    };
+                    predicate = s -> s.isPendingRepair() && s.getSSTableMetadata().pendingRepair.equals(pendingRepair);
                 }
 
                 for (Range<PartitionPosition> keyRange : keyRanges)
@@ -130,7 +128,6 @@ public class CassandraStreamManager implements TableStreamManager
                 return sstables;
             }).refs);
 
-            // This call is normally preceded by a memtable flush in StreamSession.addTransferRanges.
             // Persistent memtables will not flush, make an sstable with their data.
             cfs.writeAndAddMemtableRanges(session.getPendingRepair(), () -> Range.normalize(keyRanges), refs);
 
@@ -141,9 +138,9 @@ public class CassandraStreamManager implements TableStreamManager
             for (SSTableReader sstable : refs)
             {
                 List<Range<Token>> ranges = sstable.isRepaired() ? normalizedFullRanges : normalizedAllRanges;
-                List<SSTableReader.PartitionPositionBounds> sections = sstable.getPositionsForRanges(ranges);
+                List<BigTableReader.PartitionPositionBounds> sections = sstable.getPositionsForRanges(ranges);
 
-                Ref<SSTableReader> ref = refs.get(sstable);
+                Ref<? extends SSTableReader> ref = refs.get(sstable);
                 if (sections.isEmpty())
                 {
                     ref.release();

@@ -20,21 +20,19 @@ package org.apache.cassandra.utils.memory;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.utils.concurrent.OpOrder;
-import org.apache.cassandra.utils.concurrent.Semaphore;
 import org.apache.cassandra.utils.concurrent.OpOrder.Group;
-
-import static org.apache.cassandra.utils.concurrent.Semaphore.newSemaphore;
 
 /**
  * This NativeAllocator uses global slab allocation strategy
- * with slab size that scales exponentially from 8KiB to 1MiB to
- * serve allocation of up to 128KiB.
+ * with slab size that scales exponentially from 8kb to 1Mb to
+ * serve allocation of up to 128kb.
  * <p>
  * </p>
  * The slab allocation reduces heap fragmentation from small
@@ -79,7 +77,7 @@ public class NativeAllocator extends MemtableAllocator
         @Override
         public void newRow(Clustering<?> clustering)
         {
-            if (clustering != Clustering.STATIC_CLUSTERING)
+            if (clustering != Clustering.EMPTY && clustering != Clustering.STATIC_CLUSTERING)
                 clustering = new NativeClustering(allocator, writeOp, clustering);
             super.newRow(clustering);
         }
@@ -180,7 +178,7 @@ public class NativeAllocator extends MemtableAllocator
         if (currentRegion.compareAndSet(current, next))
             regions.add(next);
         else if (!raceAllocated.stash(next))
-            MemoryUtil.free(next.peer);
+            MemoryUtil.free(next.peer, next.capacity);
     }
 
     private long allocateOversize(int size)
@@ -200,7 +198,7 @@ public class NativeAllocator extends MemtableAllocator
     public void setDiscarded()
     {
         for (Region region : regions)
-            MemoryUtil.free(region.peer);
+            MemoryUtil.free(region.peer, region.capacity);
 
         super.setDiscarded();
     }
@@ -209,10 +207,10 @@ public class NativeAllocator extends MemtableAllocator
     private static class RaceAllocated
     {
         final ConcurrentLinkedQueue<Region> stash = new ConcurrentLinkedQueue<>();
-        final Semaphore permits = newSemaphore(8);
+        final Semaphore permits = new Semaphore(8);
         boolean stash(Region region)
         {
-            if (!permits.tryAcquire(1))
+            if (!permits.tryAcquire())
                 return false;
             stash.add(region);
             return true;
@@ -221,7 +219,7 @@ public class NativeAllocator extends MemtableAllocator
         {
             Region next = stash.poll();
             if (next != null)
-                permits.release(1);
+                permits.release();
             return next;
         }
     }

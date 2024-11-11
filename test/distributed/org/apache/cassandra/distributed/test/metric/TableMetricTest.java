@@ -43,13 +43,13 @@ import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.distributed.test.TestBaseImpl;
-import org.apache.cassandra.schema.SystemDistributedKeyspace;
+import org.apache.cassandra.repair.SystemDistributedKeyspace;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaKeyspace;
 import org.apache.cassandra.tracing.TraceKeyspace;
 import org.apache.cassandra.utils.MBeanWrapper;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.ORG_APACHE_CASSANDRA_DISABLE_MBEAN_REGISTRATION;
+import static org.apache.cassandra.config.CassandraRelevantProperties.IS_DISABLED_MBEAN_REGISTRATION;
 import static org.apache.cassandra.config.CassandraRelevantProperties.MBEAN_REGISTRATION_CLASS;
 
 public class TableMetricTest extends TestBaseImpl
@@ -57,7 +57,7 @@ public class TableMetricTest extends TestBaseImpl
     static
     {
         MBEAN_REGISTRATION_CLASS.setString(MapMBeanWrapper.class.getName());
-        ORG_APACHE_CASSANDRA_DISABLE_MBEAN_REGISTRATION.setBoolean(false);
+        IS_DISABLED_MBEAN_REGISTRATION.setBoolean(false);
     }
     private static volatile Map<String, Collection<String>> SYSTEM_TABLES = null;
     private static Set<String> TABLE_METRIC_NAMES = ImmutableSet.of("WriteLatency");

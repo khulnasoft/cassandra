@@ -19,27 +19,23 @@ package org.apache.cassandra.audit;
 
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
-import java.util.Map;
 import java.util.UUID;
 import javax.annotation.Nullable;
 
-import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.lang3.StringUtils;
 
 import org.apache.cassandra.auth.AuthenticatedUser;
 import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.nodes.virtual.NodeConstants;
+import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.utils.FBUtilities;
 
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
-
 public class AuditLogEntry
 {
-    static final String DEFAULT_KEY_VALUE_SEPARATOR = ":";
-    static final String DEFAULT_FIELD_SEPARATOR = "|";
     private final InetAddressAndPort host = FBUtilities.getBroadcastAddressAndPort();
     private final InetAddressAndPort source;
     private final String user;
@@ -51,69 +47,60 @@ public class AuditLogEntry
     private final String operation;
     private final QueryOptions options;
     private final QueryState state;
-    private final Map<String, Object> metadata;
 
-    private AuditLogEntry(Builder builder)
+    private AuditLogEntry(AuditLogEntryType type,
+                          InetAddressAndPort source,
+                          String user,
+                          long timestamp,
+                          UUID batch,
+                          String keyspace,
+                          String scope,
+                          String operation,
+                          QueryOptions options,
+                          QueryState state)
     {
-        this.type = builder.type;
-        this.source = builder.source;
-        this.user = builder.user;
-        this.timestamp = builder.timestamp;
-        this.batch = builder.batch;
-        this.keyspace = builder.keyspace;
-        this.scope = builder.scope;
-        this.operation = builder.operation;
-        this.options = builder.options;
-        this.state = builder.state;
-        this.metadata = builder.metadata;
+        this.type = type;
+        this.source = source;
+        this.user = user;
+        this.timestamp = timestamp;
+        this.batch = batch;
+        this.keyspace = keyspace;
+        this.scope = scope;
+        this.operation = operation;
+        this.options = options;
+        this.state = state;
     }
 
-    @VisibleForTesting
-    public String getLogString()
-    {
-        return getLogString(DEFAULT_KEY_VALUE_SEPARATOR, DEFAULT_FIELD_SEPARATOR);
-    }
-
-    String getLogString(String keyValueSeparator, String fieldSeparator)
+    String getLogString()
     {
         StringBuilder builder = new StringBuilder(100);
-        builder.append("user").append(keyValueSeparator).append(user)
-               .append(fieldSeparator).append("host").append(keyValueSeparator).append(host);
-
-        // Source is only expected to be null during testing
-        // in MacOS when running in-jvm dtests
-        if (source != null)
+        builder.append("user:").append(user)
+               .append("|host:").append(host)
+               .append("|source:").append(source.address);
+        if (source.port > 0)
         {
-            builder.append(fieldSeparator).append("source").append(keyValueSeparator).append(source.getAddress());
-            if (source.getPort() > 0)
-            {
-                builder.append(fieldSeparator).append("port").append(keyValueSeparator).append(source.getPort());
-            }
+            builder.append("|port:").append(source.port);
         }
 
-        builder.append(fieldSeparator).append("timestamp").append(keyValueSeparator).append(timestamp)
-               .append(fieldSeparator).append("type").append(keyValueSeparator).append(type)
-               .append(fieldSeparator).append("category").append(keyValueSeparator).append(type.getCategory());
+        builder.append("|timestamp:").append(timestamp)
+               .append("|type:").append(type)
+               .append("|category:").append(type.getCategory());
 
         if (batch != null)
         {
-            builder.append(fieldSeparator).append("batch").append(keyValueSeparator).append(batch);
+            builder.append("|batch:").append(batch);
         }
         if (StringUtils.isNotBlank(keyspace))
         {
-            builder.append(fieldSeparator).append("ks").append(keyValueSeparator).append(keyspace);
+            builder.append("|ks:").append(keyspace);
         }
         if (StringUtils.isNotBlank(scope))
         {
-            builder.append(fieldSeparator).append("scope").append(keyValueSeparator).append(scope);
+            builder.append("|scope:").append(scope);
         }
         if (StringUtils.isNotBlank(operation))
         {
-            builder.append(fieldSeparator).append("operation").append(keyValueSeparator).append(operation);
-        }
-        if (metadata != null && !metadata.isEmpty())
-        {
-            metadata.forEach((key, value) -> builder.append(fieldSeparator).append(key).append(keyValueSeparator).append(value));
+            builder.append("|operation:").append(operation);
         }
         return builder.toString();
     }
@@ -202,7 +189,6 @@ public class AuditLogEntry
         private String operation;
         private QueryOptions options;
         private QueryState state;
-        private Map<String, Object> metadata;
 
         public Builder(QueryState queryState)
         {
@@ -212,21 +198,15 @@ public class AuditLogEntry
 
             if (clientState != null)
             {
-                InetSocketAddress addr = clientState.getRemoteAddress();
-                if (addr != null)
+                if (clientState.getRemoteAddress() != null)
                 {
+                    InetSocketAddress addr = clientState.getRemoteAddress();
                     source = InetAddressAndPort.getByAddressOverrideDefaults(addr.getAddress(), addr.getPort());
                 }
 
-                AuthenticatedUser authenticatedUser = clientState.getUser();
-                if (authenticatedUser != null)
+                if (clientState.getUser() != null)
                 {
-                    user = authenticatedUser.getName();
-
-                    if (authenticatedUser.getMetadata() != null)
-                    {
-                        metadata = Map.copyOf(authenticatedUser.getMetadata());
-                    }
+                    user = clientState.getUser().getName();
                 }
                 keyspace = clientState.getRawKeyspace();
             }
@@ -236,7 +216,7 @@ public class AuditLogEntry
                 user = AuthenticatedUser.SYSTEM_USER.getName();
             }
 
-            timestamp = currentTimeMillis();
+            timestamp = System.currentTimeMillis();
         }
 
         public Builder(AuditLogEntry entry)
@@ -251,7 +231,6 @@ public class AuditLogEntry
             operation = entry.operation;
             options = entry.options;
             state = entry.state;
-            metadata = entry.metadata != null ? Map.copyOf(entry.metadata) : null;
         }
 
         public Builder setType(AuditLogEntryType type)
@@ -333,16 +312,22 @@ public class AuditLogEntry
             return this;
         }
 
-        public Builder setMetadata(Map<String, Object> metadata)
-        {
-            this.metadata = metadata != null ? Map.copyOf(metadata) : null;
-            return this;
-        }
-
         public AuditLogEntry build()
         {
-            timestamp = timestamp > 0 ? timestamp : currentTimeMillis();
-            return new AuditLogEntry(this);
+            timestamp = timestamp > 0 ? timestamp : System.currentTimeMillis();
+            filterSystemViews();
+            return new AuditLogEntry(type, source, user, timestamp, batch, keyspace, scope, operation, options, state);
+        }
+
+        // We need to filter out the system_views.local_node and system_views.peer_nodes tables
+        // so that queries to system.local, system.peers_v2 and system.peers are logged correctly
+        private void filterSystemViews()
+        {
+            if (type == AuditLogEntryType.SELECT && NodeConstants.canBeMapped(keyspace, scope))
+            {
+                keyspace = SchemaConstants.SYSTEM_KEYSPACE_NAME;
+                scope = NodeConstants.mapViewToTable(scope);
+            }
         }
     }
 }

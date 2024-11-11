@@ -35,7 +35,7 @@ public class Comparables
     /**
      * Returns the maximum of 2 values given a comparator of those values. On ties, returns the first argument.
      */
-    public static <C, T extends C> T max(T a, T b, Comparator<C> comparator)
+    public static <T> T max(T a, T b, Comparator<T> comparator)
     {
         return comparator.compare(a, b) < 0 ? b : a;
     }
@@ -51,7 +51,7 @@ public class Comparables
     /**
      * Returns the minimum of 2 values given a comparator of those values. On ties, returns the first argument.
      */
-    public static <C, T extends C> T min(T a, T b, Comparator<C> comparator)
+    public static <T> T min(T a, T b, Comparator<T> comparator)
     {
         return comparator.compare(a, b) > 0 ? b : a;
     }

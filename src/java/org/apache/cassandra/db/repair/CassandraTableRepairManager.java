@@ -20,45 +20,44 @@ package org.apache.cassandra.db.repair;
 
 import java.io.IOException;
 import java.util.Collection;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
 
 import com.google.common.base.Predicate;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.db.compaction.OperationType;
+import org.apache.cassandra.db.compaction.RepairFinishedCompactionTask;
+import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.metrics.TopPartitionTracker;
-import org.apache.cassandra.repair.SharedContext;
 import org.apache.cassandra.repair.TableRepairManager;
 import org.apache.cassandra.repair.ValidationPartitionIterator;
-import org.apache.cassandra.repair.NoSuchRepairSessionException;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.repair.consistent.LocalSessions;
 import org.apache.cassandra.service.ActiveRepairService;
 
 public class CassandraTableRepairManager implements TableRepairManager
 {
+    private static final Logger logger = LoggerFactory.getLogger(CassandraTableRepairManager.class);
     private final ColumnFamilyStore cfs;
-    private final SharedContext ctx;
 
     public CassandraTableRepairManager(ColumnFamilyStore cfs)
     {
-        this(cfs, SharedContext.Global.instance);
-    }
-
-    public CassandraTableRepairManager(ColumnFamilyStore cfs, SharedContext ctx)
-    {
         this.cfs = cfs;
-        this.ctx = ctx;
     }
 
     @Override
-    public ValidationPartitionIterator getValidationIterator(Collection<Range<Token>> ranges, TimeUUID parentId, TimeUUID sessionID, boolean isIncremental, long nowInSec, TopPartitionTracker.Collector topPartitionCollector) throws IOException, NoSuchRepairSessionException
+    public ValidationPartitionIterator getValidationIterator(Collection<Range<Token>> ranges, UUID parentId, UUID sessionID, boolean isIncremental, int nowInSec) throws IOException
     {
-        return new CassandraValidationIterator(cfs, ctx, ranges, parentId, sessionID, isIncremental, nowInSec, topPartitionCollector);
+        return new CassandraValidationIterator(cfs, ranges, parentId, sessionID, isIncremental, nowInSec);
     }
 
     @Override
@@ -68,9 +67,38 @@ public class CassandraTableRepairManager implements TableRepairManager
     }
 
     @Override
-    public void incrementalSessionCompleted(TimeUUID sessionID)
+    public synchronized void incrementalSessionCompleted(UUID sessionID)
     {
-        CompactionManager.instance.submitBackground(cfs);
+        LocalSessions sessions = ActiveRepairService.instance.consistent.local;
+        if (sessions.isSessionInProgress(sessionID))
+            return;
+
+        Set<SSTableReader> pendingRepairSSTables = cfs.getPendingRepairSSTables(sessionID);
+        if (pendingRepairSSTables.isEmpty())
+            return;
+
+        logger.debug("Number of sstables in pending repair: {} for session {}", pendingRepairSSTables.size(), sessionID);
+        LifecycleTransaction txn = cfs.getTracker().tryModify(pendingRepairSSTables, OperationType.COMPACTION);
+        if (txn == null)
+            return;
+
+        boolean isTransient = false;
+        for (SSTableReader sstable : pendingRepairSSTables)
+        {
+            if (sstable.isTransient())
+            {
+                isTransient = true;
+                break;
+            }
+        }
+
+        long repairedAt = sessions.getFinalSessionRepairedAt(sessionID);
+        RepairFinishedCompactionTask task = new RepairFinishedCompactionTask(cfs,
+                                                                             txn,
+                                                                             sessionID,
+                                                                             repairedAt,
+                                                                             isTransient);
+        task.run();
     }
 
     @Override
@@ -78,7 +106,7 @@ public class CassandraTableRepairManager implements TableRepairManager
     {
         try
         {
-            ActiveRepairService.instance().snapshotExecutor.submit(() -> {
+            ActiveRepairService.instance.snapshotExecutor.submit(() -> {
                 if (force || !cfs.snapshotExists(name))
                 {
                     cfs.snapshot(name, new Predicate<SSTableReader>()
@@ -87,7 +115,7 @@ public class CassandraTableRepairManager implements TableRepairManager
                         {
                             return sstable != null &&
                                    !sstable.metadata().isIndex() && // exclude SSTables from 2i
-                                   new Bounds<>(sstable.getFirst().getToken(), sstable.getLast().getToken()).intersects(ranges);
+                                   new Bounds<>(sstable.first.getToken(), sstable.last.getToken()).intersects(ranges);
                         }
                     }, true, false); //ephemeral snapshot, if repair fails, it will be cleaned next startup
                 }
@@ -95,6 +123,8 @@ public class CassandraTableRepairManager implements TableRepairManager
         }
         catch (Exception ex)
         {
+            if (ex instanceof InterruptedException)
+                Thread.currentThread().interrupt();
             throw new RuntimeException(String.format("Unable to take a snapshot %s on %s.%s", name, cfs.metadata.keyspace, cfs.metadata.name), ex);
         }
 

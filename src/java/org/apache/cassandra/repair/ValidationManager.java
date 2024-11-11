@@ -30,19 +30,19 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.compaction.CompactionInterruptedException;
+import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.db.compaction.TableOperation;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.metrics.CompactionMetrics;
 import org.apache.cassandra.metrics.TableMetrics;
-import org.apache.cassandra.metrics.TopPartitionTracker;
-import org.apache.cassandra.repair.state.ValidationState;
-import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MerkleTree;
 import org.apache.cassandra.utils.MerkleTrees;
+import org.apache.cassandra.utils.NonThrowingCloseable;
 
-public class ValidationManager implements IValidationManager
+public class ValidationManager
 {
     private static final Logger logger = LoggerFactory.getLogger(ValidationManager.class);
 
@@ -52,13 +52,13 @@ public class ValidationManager implements IValidationManager
 
     private static MerkleTrees createMerkleTrees(ValidationPartitionIterator validationIterator, Collection<Range<Token>> ranges, ColumnFamilyStore cfs)
     {
-        MerkleTrees trees = new MerkleTrees(cfs.getPartitioner());
+        MerkleTrees tree = new MerkleTrees(cfs.getPartitioner());
         long allPartitions = validationIterator.estimatedPartitions();
         Map<Range<Token>, Long> rangePartitionCounts = validationIterator.getRangePartitionCounts();
 
         // The repair coordinator must hold RF trees in memory at once, so a given validation compaction can only
         // use 1 / RF of the allowed space.
-        long availableBytes = (DatabaseDescriptor.getRepairSessionSpaceInMiB() * 1048576) /
+        long availableBytes = (DatabaseDescriptor.getRepairSessionSpaceInMegabytes() * 1048576) /
                               cfs.keyspace.getReplicationStrategy().getReplicationFactor().allReplicas;
 
         for (Range<Token> range : ranges)
@@ -76,108 +76,86 @@ public class ValidationManager implements IValidationManager
                            : 0;
             // determine tree depth from number of partitions, capping at max tree depth (CASSANDRA-5263)
             int depth = numPartitions > 0 ? (int) Math.min(Math.ceil(Math.log(numPartitions) / Math.log(2)), maxDepth) : 0;
-            trees.addMerkleTree((int) Math.pow(2, depth), range);
+            tree.addMerkleTree((int) Math.pow(2, depth), range);
         }
         if (logger.isDebugEnabled())
         {
             // MT serialize may take time
-            logger.debug("Created {} merkle trees with merkle trees size {}, {} partitions, {} bytes", trees.ranges().size(), trees.size(), allPartitions, MerkleTrees.serializer.serializedSize(trees, 0));
+            logger.debug("Created {} merkle trees with merkle trees size {}, {} partitions, {} bytes", tree.ranges().size(), tree.size(), allPartitions, MerkleTrees.serializer.serializedSize(tree, 0));
         }
 
-        return trees;
+        return tree;
     }
 
-    private static ValidationPartitionIterator getValidationIterator(TableRepairManager repairManager, Validator validator, TopPartitionTracker.Collector topPartitionCollector) throws IOException, NoSuchRepairSessionException
+    private static ValidationPartitionIterator getValidationIterator(TableRepairManager repairManager, Validator validator) throws IOException
     {
         RepairJobDesc desc = validator.desc;
-        return repairManager.getValidationIterator(desc.ranges, desc.parentSessionId, desc.sessionId, validator.isIncremental, validator.nowInSec, topPartitionCollector);
+        return repairManager.getValidationIterator(desc.ranges, desc.parentSessionId, desc.sessionId, validator.isIncremental, validator.nowInSec);
     }
 
     /**
      * Performs a readonly "compaction" of all sstables in order to validate complete rows,
      * but without writing the merge result
      */
-    public static void doValidation(ColumnFamilyStore cfs, Validator validator) throws IOException, NoSuchRepairSessionException
+    @SuppressWarnings("resource")
+    private void doValidation(ColumnFamilyStore cfs, Validator validator) throws IOException
     {
-        SharedContext ctx = validator.ctx;
-        Clock clock = ctx.clock();
         // this isn't meant to be race-proof, because it's not -- it won't cause bugs for a CFS to be dropped
         // mid-validation, or to attempt to validate a droped CFS.  this is just a best effort to avoid useless work,
         // particularly in the scenario where a validation is submitted before the drop, and there are compactions
         // started prior to the drop keeping some sstables alive.  Since validationCompaction can run
         // concurrently with other compactions, it would otherwise go ahead and scan those again.
-        ValidationState state = validator.state;
         if (!cfs.isValid())
-        {
-            state.phase.skip(String.format("Table %s is not valid", cfs));
             return;
-        }
-
-        TopPartitionTracker.Collector topPartitionCollector = null;
-        if (cfs.topPartitions != null && DatabaseDescriptor.topPartitionsEnabled() && isTopPartitionSupported(validator))
-            topPartitionCollector = new TopPartitionTracker.Collector(validator.desc.ranges);
 
         // Create Merkle trees suitable to hold estimated partitions for the given ranges.
         // We blindly assume that a partition is evenly distributed on all sstables for now.
-        long start = clock.nanoTime();
-        try (ValidationPartitionIterator vi = getValidationIterator(ctx.repairManager(cfs), validator, topPartitionCollector))
+        long start = System.nanoTime();
+        long partitionCount = 0;
+        long estimatedTotalBytes = 0;
+        try (ValidationPartitionIterator vi = getValidationIterator(cfs.getRepairManager(), validator))
         {
-            state.phase.start(vi.estimatedPartitions(), vi.getEstimatedBytes());
-            MerkleTrees trees = createMerkleTrees(vi, validator.desc.ranges, cfs);
-            // validate the CF as we iterate over it
-            validator.prepare(cfs, trees, topPartitionCollector);
-            while (vi.hasNext())
+            MerkleTrees tree = createMerkleTrees(vi, validator.desc.ranges, cfs);
+            TableOperation op = vi.getCompactionIterator().getOperation();
+            try (NonThrowingCloseable cls = CompactionManager.instance.active.onOperationStart(op))
             {
-                try (UnfilteredRowIterator partition = vi.next())
+                // validate the CF as we iterate over it
+                validator.prepare(cfs, tree);
+                while (vi.hasNext())
                 {
-                    validator.add(partition);
-                    state.partitionsProcessed++;
-                    state.bytesRead = vi.getBytesRead();
-                    if (state.partitionsProcessed % 1024 == 0) // update every so often
-                        state.updated();
+                    try (UnfilteredRowIterator partition = vi.next())
+                    {
+                        validator.add(partition);
+                        partitionCount++;
+                    }
                 }
+                validator.complete();
             }
-            validator.complete();
+            finally
+            {
+                estimatedTotalBytes = vi.getEstimatedBytes();
+                partitionCount = vi.estimatedPartitions();
+            }
         }
         finally
         {
-            cfs.metric.bytesValidated.update(state.estimatedTotalBytes);
-            cfs.metric.partitionsValidated.update(state.partitionsProcessed);
-            if (topPartitionCollector != null)
-                cfs.topPartitions.merge(topPartitionCollector);
+            cfs.metric.bytesValidated.update(estimatedTotalBytes);
+            cfs.metric.partitionsValidated.update(partitionCount);
         }
         if (logger.isDebugEnabled())
         {
-            long duration = TimeUnit.NANOSECONDS.toMillis(clock.nanoTime() - start);
+            long duration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
             logger.debug("Validation of {} partitions (~{}) finished in {} msec, for {}",
-                         state.partitionsProcessed,
-                         FBUtilities.prettyPrintMemory(state.estimatedTotalBytes),
+                         partitionCount,
+                         FBUtilities.prettyPrintMemory(estimatedTotalBytes),
                          duration,
                          validator.desc);
-        }
-    }
-
-    private static boolean isTopPartitionSupported(Validator validator)
-    {
-        // supported: --validate, --full, --full --preview
-        switch (validator.getPreviewKind())
-        {
-            case NONE:
-                return !validator.isIncremental;
-            case ALL:
-            case REPAIRED:
-                return true;
-            case UNREPAIRED:
-                return false;
-            default:
-                throw new AssertionError("Unknown preview kind: " + validator.getPreviewKind());
         }
     }
 
     /**
      * Does not mutate data, so is not scheduled.
      */
-    @Override
     public Future<?> submitValidation(ColumnFamilyStore cfs, Validator validator)
     {
         Callable<Object> validation = new Callable<Object>()
@@ -188,15 +166,15 @@ public class ValidationManager implements IValidationManager
                 {
                     doValidation(cfs, validator);
                 }
-                catch (PreviewRepairConflictWithIncrementalRepairException | NoSuchRepairSessionException | CompactionInterruptedException e)
+                catch (PreviewRepairConflictWithIncrementalRepairException e)
                 {
-                    validator.fail(e);
+                    validator.fail();
                     logger.warn(e.getMessage());
                 }
                 catch (Throwable e)
                 {
                     // we need to inform the remote end of our failure, otherwise it will hang on repair forever
-                    validator.fail(e);
+                    validator.fail();
                     logger.error("Validation failed.", e);
                     throw e;
                 }

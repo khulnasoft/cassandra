@@ -18,18 +18,11 @@
 package org.apache.cassandra.db.aggregation;
 
 import java.io.IOException;
-import java.util.Collections;
-import java.util.List;
 
-import org.apache.cassandra.cql3.QueryOptions;
-import org.apache.cassandra.cql3.functions.Function;
-import org.apache.cassandra.cql3.selection.Selector;
 import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.schema.TableMetadata;
 
 /**
  * Defines how rows should be grouped for creating aggregates.
@@ -51,11 +44,6 @@ public abstract class AggregationSpecification
     };
 
     /**
-     * Factory for <code>AggregationSpecification</code> that group all the row together.
-     */
-    public static final AggregationSpecification.Factory AGGREGATE_EVERYTHING_FACTORY = options -> AGGREGATE_EVERYTHING;
-
-    /**
      * The <code>AggregationSpecification</code> kind.
      */
     private final Kind kind;
@@ -63,9 +51,9 @@ public abstract class AggregationSpecification
     /**
      * The <code>AggregationSpecification</code> kinds.
      */
-    public enum Kind
+    public static enum Kind
     {
-        AGGREGATE_EVERYTHING, AGGREGATE_BY_PK_PREFIX, AGGREGATE_BY_PK_PREFIX_WITH_SELECTOR
+        AGGREGATE_EVERYTHING, AGGREGATE_BY_PK_PREFIX
     }
 
     /**
@@ -101,88 +89,37 @@ public abstract class AggregationSpecification
     public abstract GroupMaker newGroupMaker(GroupingState state);
 
     /**
-     * Creates a new {@code Factory} instance to create {@code AggregationSpecification} that will build aggregates
-     * based on primary key columns.
+     * Creates a new <code>AggregationSpecification</code> instance that will build aggregates based on primary key
+     * columns.
      *
      * @param comparator the comparator used to compare the clustering prefixes
      * @param clusteringPrefixSize the number of clustering columns used to create the aggregates
-     * @return a  new {@code Factory} instance to create {@code AggregationSpecification} that will build aggregates
-     * based on primary key columns.
+     * @return a new <code>AggregationSpecification</code> instance that will build aggregates based on primary key
+     * columns
      */
-    public static AggregationSpecification.Factory aggregatePkPrefixFactory(ClusteringComparator comparator,
-                                                                            int clusteringPrefixSize)
+    public static AggregationSpecification aggregatePkPrefix(ClusteringComparator comparator, int clusteringPrefixSize)
     {
-        return options -> new  AggregateByPkPrefix(comparator, clusteringPrefixSize);
-    }
-
-    public static AggregationSpecification.Factory aggregatePkPrefixFactoryWithSelector(final ClusteringComparator comparator,
-                                                                                        final int clusteringPrefixSize,
-                                                                                        final Selector.Factory factory,
-                                                                                        final List<ColumnMetadata> columns)
-    {
-        return new Factory()
-        {
-            @Override
-            public void addFunctionsTo(List<Function> functions)
-            {
-                factory.addFunctionsTo(functions);
-            }
-
-            @Override
-            public AggregationSpecification newInstance(QueryOptions options)
-            {
-                Selector selector = factory.newInstance(options);
-                selector.validateForGroupBy();
-                return new  AggregateByPkPrefixWithSelector(comparator,
-                                                            clusteringPrefixSize,
-                                                            selector,
-                                                            columns);
-            }
-        };
-    }
-    
-    /**
-     * Factory for {@code AggregationSpecification}.
-     *
-     */
-    public static interface Factory
-    {
-        /**
-         * Creates a new {@code AggregationSpecification} instance after having binded the parameters.
-         *
-         * @param options the query options
-         * @return a new {@code AggregationSpecification} instance.
-         */
-        public AggregationSpecification newInstance(QueryOptions options);
-
-        public default void addFunctionsTo(List<Function> functions)
-        {
-        }
+        return new AggregateByPkPrefix(comparator, clusteringPrefixSize);
     }
 
     /**
      * <code>AggregationSpecification</code> that build aggregates based on primary key columns
      */
-    private static class AggregateByPkPrefix extends AggregationSpecification
+    private static final class AggregateByPkPrefix extends AggregationSpecification
     {
         /**
          * The number of clustering component to compare.
          */
-        protected final int clusteringPrefixSize;
+        private final int clusteringPrefixSize;
 
         /**
          * The comparator used to compare the clustering prefixes.
          */
-        protected final ClusteringComparator comparator;
+        private final ClusteringComparator comparator;
 
         public AggregateByPkPrefix(ClusteringComparator comparator, int clusteringPrefixSize)
         {
-            this(Kind.AGGREGATE_BY_PK_PREFIX, comparator, clusteringPrefixSize);
-        }
-
-        protected AggregateByPkPrefix(Kind kind, ClusteringComparator comparator, int clusteringPrefixSize)
-        {
-            super(kind);
+            super(Kind.AGGREGATE_BY_PK_PREFIX);
             this.comparator = comparator;
             this.clusteringPrefixSize = clusteringPrefixSize;
         }
@@ -190,39 +127,7 @@ public abstract class AggregationSpecification
         @Override
         public GroupMaker newGroupMaker(GroupingState state)
         {
-            return GroupMaker.newPkPrefixGroupMaker(comparator, clusteringPrefixSize, state);
-        }
-    }
-
-    /**
-     * <code>AggregationSpecification</code> that build aggregates based on primary key columns using a selector.
-     */
-    private static final class AggregateByPkPrefixWithSelector extends AggregateByPkPrefix
-    {
-        /**
-         * The selector.
-         */
-        private final Selector selector;
-
-        /**
-         * The columns used by the selector.
-         */
-        private final List<ColumnMetadata> columns;
-
-        public AggregateByPkPrefixWithSelector(ClusteringComparator comparator,
-                                               int clusteringPrefixSize,
-                                               Selector selector,
-                                               List<ColumnMetadata> columns)
-        {
-            super(Kind.AGGREGATE_BY_PK_PREFIX_WITH_SELECTOR, comparator, clusteringPrefixSize);
-            this.selector = selector;
-            this.columns = columns;
-        }
-
-        @Override
-        public GroupMaker newGroupMaker(GroupingState state)
-        {
-            return GroupMaker.newSelectorGroupMaker(comparator, clusteringPrefixSize, selector, columns, state);
+            return GroupMaker.newInstance(comparator, clusteringPrefixSize, state);
         }
     }
 
@@ -236,22 +141,14 @@ public abstract class AggregationSpecification
                 case AGGREGATE_EVERYTHING:
                     break;
                 case AGGREGATE_BY_PK_PREFIX:
-                    out.writeUnsignedVInt32(((AggregateByPkPrefix) aggregationSpec).clusteringPrefixSize);
-                    break;
-                case AGGREGATE_BY_PK_PREFIX_WITH_SELECTOR:
-                    AggregateByPkPrefixWithSelector spec = (AggregateByPkPrefixWithSelector) aggregationSpec;
-                    out.writeUnsignedVInt32(spec.clusteringPrefixSize);
-                    Selector.serializer.serialize(spec.selector, out, version);
-                    // Ideally we should serialize the columns but that will break backward compatibility.
-                    // So for the moment we can rebuild the list from the prefix size as we know that there will be
-                    // only one column and that its indice will be: clusteringPrefixSize - 1.
+                    out.writeUnsignedVInt(((AggregateByPkPrefix) aggregationSpec).clusteringPrefixSize);
                     break;
                 default:
-                    throw new AssertionError("Unknow aggregation kind: " + aggregationSpec.kind());
+                    throw new AssertionError();
             }
         }
 
-        public AggregationSpecification deserialize(DataInputPlus in, int version, TableMetadata metadata) throws IOException
+        public AggregationSpecification deserialize(DataInputPlus in, int version, ClusteringComparator comparator) throws IOException
         {
             Kind kind = Kind.values()[in.readUnsignedByte()];
             switch (kind)
@@ -259,17 +156,10 @@ public abstract class AggregationSpecification
                 case AGGREGATE_EVERYTHING:
                     return AggregationSpecification.AGGREGATE_EVERYTHING;
                 case AGGREGATE_BY_PK_PREFIX:
-                    return new AggregateByPkPrefix(metadata.comparator, in.readUnsignedVInt32());
-                case AGGREGATE_BY_PK_PREFIX_WITH_SELECTOR:
-                    int clusteringPrefixSize = in.readUnsignedVInt32();
-                    Selector selector = Selector.serializer.deserialize(in, version, metadata);
-                    ColumnMetadata functionArgument = metadata.clusteringColumns().get(clusteringPrefixSize - 1);
-                    return new AggregateByPkPrefixWithSelector(metadata.comparator,
-                                                               clusteringPrefixSize,
-                                                               selector,
-                                                               Collections.singletonList(functionArgument));
+                    int clusteringPrefixSize = (int) in.readUnsignedVInt();
+                    return AggregationSpecification.aggregatePkPrefix(comparator, clusteringPrefixSize);
                 default:
-                    throw new AssertionError("Unknow aggregation kind: " + kind);
+                    throw new AssertionError();
             }
         }
 
@@ -283,13 +173,8 @@ public abstract class AggregationSpecification
                 case AGGREGATE_BY_PK_PREFIX:
                     size += TypeSizes.sizeofUnsignedVInt(((AggregateByPkPrefix) aggregationSpec).clusteringPrefixSize);
                     break;
-                case AGGREGATE_BY_PK_PREFIX_WITH_SELECTOR:
-                    AggregateByPkPrefixWithSelector spec = (AggregateByPkPrefixWithSelector) aggregationSpec;
-                    size += TypeSizes.sizeofUnsignedVInt(spec.clusteringPrefixSize);
-                    size += Selector.serializer.serializedSize(spec.selector, version);
-                    break;
                 default:
-                    throw new AssertionError("Unknow aggregation kind: " + aggregationSpec.kind());
+                    throw new AssertionError();
             }
             return size;
         }

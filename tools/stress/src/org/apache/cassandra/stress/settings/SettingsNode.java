@@ -31,7 +31,7 @@ import java.util.*;
 
 import com.google.common.net.HostAndPort;
 
-import com.datastax.driver.core.Host;
+import com.khulnasoft.driver.core.Host;
 import org.apache.cassandra.stress.util.ResultLogger;
 
 public class SettingsNode implements Serializable

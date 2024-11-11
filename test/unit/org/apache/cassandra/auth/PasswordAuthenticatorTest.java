@@ -19,60 +19,35 @@ package org.apache.cassandra.auth;
 
 
 import java.nio.charset.StandardCharsets;
-import java.util.Map;
 
+import com.google.common.collect.Iterables;
+import org.junit.AfterClass;
 import org.junit.Assert;
-import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import org.apache.cassandra.distributed.shared.WithProperties;
-import org.apache.cassandra.ServerTestUtils;
-import org.mindrot.jbcrypt.BCrypt;
-
-import com.datastax.driver.core.Authenticator;
-import com.datastax.driver.core.EndPoint;
-import com.datastax.driver.core.PlainTextAuthProvider;
-import org.apache.cassandra.config.DatabaseDescriptor;
+import com.khulnasoft.driver.core.Authenticator;
+import com.khulnasoft.driver.core.EndPoint;
+import com.khulnasoft.driver.core.PlainTextAuthProvider;
+import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.exceptions.AuthenticationException;
 import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.SchemaConstants;
-import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.transport.messages.AuthenticateMessage;
+import org.apache.cassandra.schema.TableMetadata;
 
-import static org.apache.cassandra.auth.AuthTestUtils.ALL_ROLES;
-import static org.apache.cassandra.auth.CassandraRoleManager.DEFAULT_SUPERUSER_PASSWORD;
-import static org.apache.cassandra.auth.CassandraRoleManager.getGensaltLogRounds;
-import static org.apache.cassandra.auth.PasswordAuthenticator.SaslNegotiator;
-import static org.apache.cassandra.auth.PasswordAuthenticator.checkpw;
-import static org.apache.cassandra.config.CassandraRelevantProperties.AUTH_BCRYPT_GENSALT_LOG2_ROUNDS;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.Assert.assertEquals;
+import static org.apache.cassandra.auth.CassandraRoleManager.*;
+import static org.apache.cassandra.auth.PasswordAuthenticator.*;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
-import static org.mindrot.jbcrypt.BCrypt.gensalt;
 import static org.mindrot.jbcrypt.BCrypt.hashpw;
+import static org.mindrot.jbcrypt.BCrypt.gensalt;
 
 public class PasswordAuthenticatorTest extends CQLTester
 {
-    private final static PasswordAuthenticator authenticator = new PasswordAuthenticator();
 
-    @BeforeClass
-    public static void setupClass() throws Exception
-    {
-        ServerTestUtils.prepareServerNoRegister();
-        DatabaseDescriptor.daemonInitialization();
-        StorageService.instance.initServer();
-    }
-
-    @Before
-    public void setup() throws Exception
-    {
-        ColumnFamilyStore.getIfExists(SchemaConstants.AUTH_KEYSPACE_NAME, AuthKeyspace.ROLES).truncateBlocking();
-        ColumnFamilyStore.getIfExists(SchemaConstants.AUTH_KEYSPACE_NAME, AuthKeyspace.ROLE_MEMBERS).truncateBlocking();
-    }
+    private static PasswordAuthenticator authenticator = new PasswordAuthenticator();
 
     @Test
     public void testCheckpw()
@@ -121,12 +96,22 @@ public class PasswordAuthenticatorTest extends CQLTester
 
     private void executeSaltRoundsPropertyTest(Integer rounds)
     {
-        try (WithProperties properties = new WithProperties().set(AUTH_BCRYPT_GENSALT_LOG2_ROUNDS, rounds))
+        String oldProperty = System.getProperty(GENSALT_LOG2_ROUNDS_PROPERTY);
+        try
         {
+            System.setProperty(GENSALT_LOG2_ROUNDS_PROPERTY, rounds.toString());
             getGensaltLogRounds();
-            Assert.fail("Property " + AUTH_BCRYPT_GENSALT_LOG2_ROUNDS.getKey() + " must be in interval [4,30]");
+            Assert.fail("Property " + GENSALT_LOG2_ROUNDS_PROPERTY + " must be in interval [4,30]");
+        }
+        finally
+        {
+            if (oldProperty != null)
+                System.setProperty(GENSALT_LOG2_ROUNDS_PROPERTY, oldProperty);
+            else
+                System.clearProperty(GENSALT_LOG2_ROUNDS_PROPERTY);
         }
     }
+
 
     @Test(expected = AuthenticationException.class)
     public void testEmptyUsername()
@@ -176,35 +161,18 @@ public class PasswordAuthenticatorTest extends CQLTester
         negotiator.getAuthenticatedUser();
     }
 
-    @Test
-    public void warmCacheLoadsAllEntriesFromTables()
+    @BeforeClass
+    public static void setUp()
     {
-        IRoleManager roleManager = new AuthTestUtils.LocalCassandraRoleManager();
-        roleManager.setup();
-        for (RoleResource r : ALL_ROLES)
-        {
-            RoleOptions options = new RoleOptions();
-            options.setOption(IRoleManager.Option.PASSWORD, "hash_for_" + r.getRoleName());
-            roleManager.createRole(AuthenticatedUser.ANONYMOUS_USER, r, options);
-        }
-
-        Map<String, String> cacheEntries = authenticator.bulkLoader().get();
-
-        assertEquals(ALL_ROLES.length, cacheEntries.size());
-        cacheEntries.forEach((username, hash) -> assertTrue(BCrypt.checkpw("hash_for_" + username, hash)));
+        SchemaLoader.createKeyspace(SchemaConstants.AUTH_KEYSPACE_NAME,
+                                    KeyspaceParams.simple(1),
+                                    Iterables.toArray(AuthKeyspace.metadata().tables, TableMetadata.class));
+        authenticator.setup();
     }
 
-    @Test
-    public void warmCacheWithEmptyTable()
+    @AfterClass
+    public static void tearDown()
     {
-        Map<String, String> cacheEntries = authenticator.bulkLoader().get();
-        assertTrue(cacheEntries.isEmpty());
-    }
-
-    @Test
-    public void testDefaultAuthenticateMessage()
-    {
-        AuthenticateMessage authenticateMessage = authenticator.getAuthenticateMessage(null);
-        assertThat(authenticateMessage.authenticator).isEqualTo(PasswordAuthenticator.class.getName());
+        schemaChange("DROP KEYSPACE " + SchemaConstants.AUTH_KEYSPACE_NAME);
     }
 }

@@ -31,8 +31,8 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.Session;
+import com.khulnasoft.driver.core.Cluster;
+import com.khulnasoft.driver.core.Session;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueue;
 import net.openhft.chronicle.queue.impl.table.SingleTableStore;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -41,7 +41,6 @@ import org.apache.cassandra.service.EmbeddedCassandraService;
 import org.apache.cassandra.service.StorageService;
 
 import static java.nio.file.Files.list;
-import static org.apache.cassandra.config.CassandraRelevantProperties.SUPERUSER_SETUP_DELAY_MS;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -70,8 +69,7 @@ public class AuditLoggerCleanupTest
         emptyCq4File = Files.createFile(auditLogDirRoot.toPath().resolve("20220928-12" + SingleChronicleQueue.SUFFIX)).toFile();
         emptyMetadataFile = Files.createFile(auditLogDirRoot.toPath().resolve("metadata" + SingleTableStore.SUFFIX)).toFile();
 
-        SUPERUSER_SETUP_DELAY_MS.setLong(0);
-
+        System.setProperty("cassandra.superuser_setup_delay_ms", "0");
         embedded = new EmbeddedCassandraService();
         embedded.start();
     }

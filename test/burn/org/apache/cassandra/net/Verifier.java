@@ -32,11 +32,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.carrotsearch.hppc.LongObjectHashMap;
+import com.carrotsearch.hppc.predicates.LongObjectPredicate;
 import com.carrotsearch.hppc.procedures.LongObjectProcedure;
+import com.carrotsearch.hppc.procedures.LongProcedure;
 import org.apache.cassandra.net.Verifier.ExpiredMessageEvent.ExpirationType;
 import org.apache.cassandra.utils.concurrent.WaitQueue;
 
 import static java.util.concurrent.TimeUnit.*;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.apache.cassandra.net.MessagingService.VERSION_40;
 import static org.apache.cassandra.net.MessagingService.current_version;
 import static org.apache.cassandra.net.ConnectionType.LARGE_MESSAGES;
@@ -62,9 +65,7 @@ import static org.apache.cassandra.net.Verifier.EventType.SEND_FRAME;
 import static org.apache.cassandra.net.Verifier.EventType.SENT_FRAME;
 import static org.apache.cassandra.net.Verifier.EventType.SERIALIZE;
 import static org.apache.cassandra.net.Verifier.ExpiredMessageEvent.ExpirationType.ON_SENT;
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
-import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
-import static org.apache.cassandra.utils.concurrent.WaitQueue.newWaitQueue;
+import static org.apache.cassandra.utils.MonotonicClock.approxTime;
 
 /**
  * This class is a single-threaded verifier monitoring a single link, with events supplied by inbound and outbound threads
@@ -765,12 +766,11 @@ public class Verifier
                         assert m.is(ENQUEUE);
                         m.serialize = e.at;
                         m.messagingVersion = e.messagingVersion;
-                        assert m.messagingVersion >= VERSION_40;
                         if (current_version != e.messagingVersion)
                             controller.adjust(m.message.serializedSize(current_version), m.message.serializedSize(e.messagingVersion));
 
                         m.processOnEventLoop = willProcessOnEventLoop(outbound.type(), m.message, e.messagingVersion);
-                        m.expiresAtNanos = expiresAtNanos(m.message);
+                        m.expiresAtNanos = expiresAtNanos(m.message, e.messagingVersion);
                         int mi = enqueueing.indexOf(m);
                         for (int i = 0 ; i < mi ; ++i)
                         {
@@ -1110,7 +1110,7 @@ public class Verifier
                                 throw new IllegalStateException();
                         }
 
-                        now = nanoTime();
+                        now = System.nanoTime();
                         if (m.expiresAtNanos > now)
                         {
                             // we fix the conversion AlmostSameTime for an entire run, which should suffice to guarantee these comparisons
@@ -1281,7 +1281,7 @@ public class Verifier
 
         // we use a concurrent skip list to permit efficient searching, even if we always append
         final ConcurrentSkipListMap<Long, Chunk> chunkList = new ConcurrentSkipListMap<>();
-        final WaitQueue writerWaiting = newWaitQueue();
+        final WaitQueue writerWaiting = new WaitQueue();
 
         volatile Chunk writerChunk = new Chunk(0);
         Chunk readerChunk = writerChunk;
@@ -1356,7 +1356,7 @@ public class Verifier
 
         public Event await(long id, long timeout, TimeUnit unit) throws InterruptedException
         {
-            return await(id, nanoTime() + unit.toNanos(timeout));
+            return await(id, System.nanoTime() + unit.toNanos(timeout));
         }
 
         public Event await(long id, long deadlineNanos) throws InterruptedException
@@ -1370,7 +1370,7 @@ public class Verifier
             readerWaiting = Thread.currentThread();
             while (null == (result = chunk.get(id)))
             {
-                long waitNanos = deadlineNanos - nanoTime();
+                long waitNanos = deadlineNanos - System.nanoTime();
                 if (waitNanos <= 0)
                     return null;
                 LockSupport.parkNanos(waitNanos);
@@ -1622,15 +1622,18 @@ public class Verifier
     private static boolean willProcessOnEventLoop(ConnectionType type, Message<?> message, int messagingVersion)
     {
         int size = message.serializedSize(messagingVersion);
-        if (type == ConnectionType.SMALL_MESSAGES)
+        if (type == ConnectionType.SMALL_MESSAGES && messagingVersion >= VERSION_40)
             return size <= LARGE_MESSAGE_THRESHOLD;
-        else
+        else if (messagingVersion >= VERSION_40)
             return size <= DEFAULT_BUFFER_SIZE;
+        else
+            return size <= LARGE_MESSAGE_THRESHOLD;
     }
 
-    private static long expiresAtNanos(Message<?> message)
+    private static long expiresAtNanos(Message<?> message, int messagingVersion)
     {
-        return message.expiresAtNanos();
+        return messagingVersion < VERSION_40 ? message.verb().expiresAtNanos(message.createdAtNanos())
+                                             : message.expiresAtNanos();
     }
 
 }

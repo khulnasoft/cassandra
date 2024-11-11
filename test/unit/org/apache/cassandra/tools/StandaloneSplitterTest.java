@@ -25,7 +25,6 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.tools.ToolRunner.ToolResult;
 import org.assertj.core.api.Assertions;
 import org.hamcrest.CoreMatchers;
@@ -43,7 +42,7 @@ public class StandaloneSplitterTest extends OfflineToolUtils
         // the legacy tables use a different partitioner :(
         // (Don't use ByteOrderedPartitioner.class.getName() as that would initialize the class and work
         // against the goal of this test to check classes and threads initialized by the tool.)
-        CassandraRelevantProperties.PARTITIONER.setString("org.apache.cassandra.dht.ByteOrderedPartitioner");
+        System.setProperty("cassandra.partitioner", "org.apache.cassandra.dht.ByteOrderedPartitioner");
     }
 
     @Test

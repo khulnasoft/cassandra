@@ -19,12 +19,8 @@
 package org.apache.cassandra.transport;
 
 import java.io.IOException;
-import java.net.SocketAddress;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-
-import javax.net.ssl.SSLException;
-import javax.net.ssl.SSLHandshakeException;
 
 import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableSet;
@@ -38,7 +34,6 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.unix.Errors;
 import org.apache.cassandra.exceptions.OverloadedException;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.metrics.ClientMetrics;
 import org.apache.cassandra.net.FrameEncoder;
 import org.apache.cassandra.transport.messages.ErrorMessage;
@@ -73,7 +68,7 @@ public class ExceptionHandlers
             // Provide error message to client in case channel is still open
             if (ctx.channel().isOpen())
             {
-                Predicate<Throwable> handler = getUnexpectedExceptionHandler(ctx.channel(), false);
+                UnexpectedChannelExceptionHandler handler = new UnexpectedChannelExceptionHandler(ctx.channel(), false);
                 ErrorMessage errorMessage = ErrorMessage.fromException(cause, handler);
                 Envelope response = errorMessage.encode(version);
                 FrameEncoder.Payload payload = allocator.allocate(true, CQLMessageHandler.envelopeSize(response.header));
@@ -94,16 +89,8 @@ public class ExceptionHandlers
                     JVMStabilityInspector.inspectThrowable(cause);
                 }
             }
-            
-            if (DatabaseDescriptor.getClientErrorReportingExclusions().contains(ctx.channel().remoteAddress()))
-            {
-                // Sometimes it is desirable to ignore exceptions from specific IPs; such as when security scans are
-                // running.  To avoid polluting logs and metrics, metrics are not updated when the IP is in the exclude
-                // list.
-                logger.debug("Excluding client exception for {}; address contained in client_error_reporting_exclusions", ctx.channel().remoteAddress(), cause);
-                return;
-            }
-            logClientNetworkingExceptions(cause, ctx.channel().remoteAddress());
+
+            logClientNetworkingExceptions(cause);
         }
 
         private static boolean isFatal(Throwable cause)
@@ -113,7 +100,7 @@ public class ExceptionHandlers
         }
     }
 
-    static void logClientNetworkingExceptions(Throwable cause, SocketAddress clientAddress)
+    static void logClientNetworkingExceptions(Throwable cause)
     {
         if (Throwables.anyCauseMatches(cause, t -> t instanceof ProtocolException))
         {
@@ -132,37 +119,15 @@ public class ExceptionHandlers
             NoSpamLogger.log(logger, NoSpamLogger.Level.INFO, 1, TimeUnit.MINUTES, cause.getMessage());
         }
         else if (Throwables.anyCauseMatches(cause, t -> t instanceof Errors.NativeIoException))
+            {
+                ClientMetrics.instance.markUnknownException();
+                logger.trace("Native exception in client networking", cause);
+            }
+            else
         {
             ClientMetrics.instance.markUnknownException();
-            logger.trace("Native exception in client networking", cause);
+            logger.warn("Unknown exception in client networking", cause);
         }
-        else if (Throwables.anyCauseMatches(cause, t -> t instanceof SSLHandshakeException))
-        {
-            ClientMetrics.instance.markSSLHandshakeException();
-            NoSpamLogger.log(logger, NoSpamLogger.Level.WARN, 1, TimeUnit.MINUTES, "SSLHandshakeException in client networking with peer {} {}", clientAddress, cause.getMessage());
-        }
-        else if (Throwables.anyCauseMatches(cause, t -> t instanceof SSLException))
-        {
-            NoSpamLogger.log(logger, NoSpamLogger.Level.WARN, 1, TimeUnit.MINUTES, "SSLException in client networking with peer {} {}", clientAddress, cause.getMessage());
-        }
-        else
-        {
-            ClientMetrics.instance.markUnknownException();
-            logger.warn("Unknown exception in client networking with peer {} {}", clientAddress, cause.getMessage());
-        }
-    }
-
-    static Predicate<Throwable> getUnexpectedExceptionHandler(Channel channel, boolean alwaysLogAtError)
-    {
-        SocketAddress address = channel.remoteAddress();
-        if (DatabaseDescriptor.getClientErrorReportingExclusions().contains(address))
-        {
-            return cause -> {
-                logger.debug("Excluding client exception for {}; address contained in client_error_reporting_exclusions", address, cause);
-                return true;
-            };
-        }
-        return new UnexpectedChannelExceptionHandler(channel, alwaysLogAtError);
     }
 
     /**

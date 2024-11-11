@@ -40,10 +40,10 @@ public class UpgradeableCluster extends AbstractCluster<IUpgradeableInstance> im
         super(builder);
     }
 
-    protected IUpgradeableInstance newInstanceWrapper(Versions.Version version, IInstanceConfig config)
+    protected IUpgradeableInstance newInstanceWrapper(int generation, Versions.Version version, IInstanceConfig config)
     {
         config.set(Constants.KEY_DTEST_API_CONFIG_CHECK, false);
-        return new Wrapper(version, config);
+        return new Wrapper(generation, version, config);
     }
 
     public static Builder build()

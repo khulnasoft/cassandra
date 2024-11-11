@@ -22,46 +22,32 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
-import java.util.function.Function;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
-import javax.annotation.Nullable;
 
+import com.google.common.annotations.VisibleForTesting;
+
+import org.apache.cassandra.db.ConsistencyLevel;
+
+import org.apache.cassandra.locator.EndpointsForToken;
+import org.apache.cassandra.locator.ReplicaPlan;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.IMutation;
-import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.WriteType;
 import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.exceptions.WriteFailureException;
 import org.apache.cassandra.exceptions.WriteTimeoutException;
-import org.apache.cassandra.locator.EndpointsForToken;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.locator.ReplicaPlan;
-import org.apache.cassandra.locator.ReplicaPlan.ForWrite;
-import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.RequestCallback;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.transport.Dispatcher;
-import org.apache.cassandra.utils.concurrent.Condition;
-import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
+import org.apache.cassandra.net.Message;
+import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.utils.concurrent.SimpleCondition;
 
-import static java.lang.Long.MAX_VALUE;
-import static java.lang.Math.min;
-import static java.util.concurrent.TimeUnit.MICROSECONDS;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
-import static java.util.stream.Collectors.toList;
-import static org.apache.cassandra.config.DatabaseDescriptor.getCounterWriteRpcTimeout;
-import static org.apache.cassandra.config.DatabaseDescriptor.getWriteRpcTimeout;
-import static org.apache.cassandra.db.WriteType.COUNTER;
 import static org.apache.cassandra.locator.Replicas.countInOurDc;
-import static org.apache.cassandra.schema.Schema.instance;
-import static org.apache.cassandra.service.StorageProxy.WritePerformer;
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
-import static org.apache.cassandra.utils.concurrent.Condition.newOneTimeCondition;
 
 public abstract class AbstractWriteResponseHandler<T> implements RequestCallback<T>
 {
@@ -69,17 +55,16 @@ public abstract class AbstractWriteResponseHandler<T> implements RequestCallback
 
     //Count down until all responses and expirations have occured before deciding whether the ideal CL was reached.
     private AtomicInteger responsesAndExpirations;
-    private final Condition condition = newOneTimeCondition();
-    protected final ReplicaPlan.ForWrite replicaPlan;
+    private final SimpleCondition condition = new SimpleCondition();
+    protected final ReplicaPlan.ForTokenWrite replicaPlan;
 
     protected final Runnable callback;
     protected final WriteType writeType;
-    private static final AtomicIntegerFieldUpdater<AbstractWriteResponseHandler> failuresUpdater =
-        AtomicIntegerFieldUpdater.newUpdater(AbstractWriteResponseHandler.class, "failures");
-    private volatile int failures = 0;
-    private final Map<InetAddressAndPort, RequestFailureReason> failureReasonByEndpoint;
-    private final Dispatcher.RequestTime requestTime;
-    private @Nullable final Supplier<Mutation> hintOnFailure;
+    private static final AtomicIntegerFieldUpdater<AbstractWriteResponseHandler> failuresUpdater
+    = AtomicIntegerFieldUpdater.newUpdater(AbstractWriteResponseHandler.class, "failures");
+    protected volatile int failures = 0;
+    protected final Map<InetAddressAndPort, RequestFailureReason> failureReasonByEndpoint;
+    private final long queryStartNanoTime;
 
     /**
       * Delegate to another WriteResponseHandler or possibly this one to track if the ideal consistency level was reached.
@@ -96,70 +81,77 @@ public abstract class AbstractWriteResponseHandler<T> implements RequestCallback
 
     /**
      * @param callback           A callback to be called when the write is successful.
-     * @param hintOnFailure
-     * @param requestTime
+     * @param queryStartNanoTime
      */
-    protected AbstractWriteResponseHandler(ForWrite replicaPlan, Runnable callback, WriteType writeType,
-                                           Supplier<Mutation> hintOnFailure, Dispatcher.RequestTime requestTime)
+    protected AbstractWriteResponseHandler(ReplicaPlan.ForTokenWrite replicaPlan,
+                                           Runnable callback,
+                                           WriteType writeType,
+                                           long queryStartNanoTime)
     {
         this.replicaPlan = replicaPlan;
         this.callback = callback;
         this.writeType = writeType;
-        this.hintOnFailure = hintOnFailure;
         this.failureReasonByEndpoint = new ConcurrentHashMap<>();
-        this.requestTime = requestTime;
+        this.queryStartNanoTime = queryStartNanoTime;
     }
 
     public void get() throws WriteTimeoutException, WriteFailureException
     {
-        long timeoutNanos = currentTimeoutNanos();
+        boolean success = await();
 
-        boolean signaled;
-        try
+        if (!success)
         {
-            signaled = condition.await(timeoutNanos, NANOSECONDS);
+            int blockedFor = blockFor();
+            int acks = ackCount();
+            // It's pretty unlikely, but we can race between exiting await above and here, so
+            // that we could now have enough acks. In that case, we "lie" on the acks count to
+            // avoid sending confusing info to the user (see CASSANDRA-6491).
+            if (acks >= blockedFor)
+                acks = blockedFor - 1;
+            throw new WriteTimeoutException(writeType, replicaPlan.consistencyLevel(), acks, blockedFor);
         }
-        catch (InterruptedException e)
-        {
-            throw new UncheckedInterruptedException(e);
-        }
-
-        if (!signaled)
-            throwTimeout();
 
         if (blockFor() + failures > candidateReplicaCount())
         {
-            if (RequestCallback.isTimeout(this.failureReasonByEndpoint.keySet().stream()
-                                                                      .filter(this::waitingFor) // DatacenterWriteResponseHandler filters errors from remote DCs
-                                                                      .collect(Collectors.toMap(Function.identity(), this.failureReasonByEndpoint::get))))
-                throwTimeout();
-
-            throw new WriteFailureException(replicaPlan.consistencyLevel(), ackCount(), blockFor(), writeType, this.failureReasonByEndpoint);
+            throw new WriteFailureException(replicaPlan.consistencyLevel(), ackCount(), blockFor(), writeType, failureReasonByEndpoint);
         }
-
-        if (replicaPlan.stillAppliesTo(ClusterMetadata.current()))
-            return;
     }
 
-    private void throwTimeout()
+    public boolean await()
     {
-        int blockedFor = blockFor();
-        int acks = ackCount();
-        // It's pretty unlikely, but we can race between exiting await above and here, so
-        // that we could now have enough acks. In that case, we "lie" on the acks count to
-        // avoid sending confusing info to the user (see CASSANDRA-6491).
-        if (acks >= blockedFor)
-            acks = blockedFor - 1;
-        throw new WriteTimeoutException(writeType, replicaPlan.consistencyLevel(), acks, blockedFor);
+        long timeoutNanos = currentTimeoutNanos();
+
+        try
+        {
+            return condition.await(timeoutNanos, NANOSECONDS);
+        }
+        catch (InterruptedException ex)
+        {
+            throw new AssertionError(ex);
+        }
     }
 
-    public final long currentTimeoutNanos()
+    public long currentTimeoutNanos()
     {
-        long now = nanoTime();
-        long requestTimeout = writeType == COUNTER
-                              ? getCounterWriteRpcTimeout(NANOSECONDS)
-                              : getWriteRpcTimeout(NANOSECONDS);
-        return requestTime.computeTimeout(now, requestTimeout);
+        long requestTimeout = writeType == WriteType.COUNTER
+                              ? DatabaseDescriptor.getCounterWriteRpcTimeout(NANOSECONDS)
+                              : DatabaseDescriptor.getWriteRpcTimeout(NANOSECONDS);
+        return requestTimeout - (System.nanoTime() - queryStartNanoTime);
+    }
+
+    public ReplicaPlan.ForTokenWrite replicaPlan()
+    {
+        return replicaPlan;
+    }
+
+    public WriteType writeType()
+    {
+        return writeType;
+    }
+
+    public long queryStartNanoTime()
+    {
+        return queryStartNanoTime;
     }
 
     /**
@@ -200,7 +192,7 @@ public abstract class AbstractWriteResponseHandler<T> implements RequestCallback
         }
     }
 
-    protected final void logFailureOrTimeoutToIdealCLDelegate()
+    public final void expired()
     {
         //Tracking ideal CL was not configured
         if (idealCLDelegate == null)
@@ -220,19 +212,14 @@ public abstract class AbstractWriteResponseHandler<T> implements RequestCallback
         }
     }
 
-    public final void expired()
-    {
-        logFailureOrTimeoutToIdealCLDelegate();
-    }
-
     /**
      * @return the minimum number of endpoints that must respond.
      */
-    protected int blockFor()
+    public int blockFor()
     {
         // During bootstrap, we have to include the pending endpoints or we may fail the consistency level
         // guarantees (see #833)
-        return replicaPlan.writeQuorum();
+        return replicaPlan.blockFor();
     }
 
     /**
@@ -240,7 +227,7 @@ public abstract class AbstractWriteResponseHandler<T> implements RequestCallback
      *       this needs to be aware of which nodes are live/down
      * @return the total number of endpoints the request can send to.
      */
-    protected int candidateReplicaCount()
+    public int candidateReplicaCount()
     {
         if (replicaPlan.consistencyLevel().isDatacenterLocal())
             return countInOurDc(replicaPlan.liveAndDown()).allReplicas();
@@ -256,7 +243,7 @@ public abstract class AbstractWriteResponseHandler<T> implements RequestCallback
     /**
      * @return true if the message counts towards the blockFor() threshold
      */
-    protected boolean waitingFor(InetAddressAndPort from)
+    public boolean waitingFor(InetAddressAndPort from)
     {
         return true;
     }
@@ -264,29 +251,42 @@ public abstract class AbstractWriteResponseHandler<T> implements RequestCallback
     /**
      * @return number of responses received
      */
-    protected abstract int ackCount();
+    public abstract int ackCount();
 
     /**
      * null message means "response from local write"
      */
     public abstract void onResponse(Message<T> msg);
 
-    protected void signal()
+    public void signal()
     {
         //The ideal CL should only count as a strike if the requested CL was achieved.
         //If the requested CL is not achieved it's fine for the ideal CL to also not be achieved.
-        if (idealCLDelegate != null && blockFor() + failures <= candidateReplicaCount())
+        if (idealCLDelegate != null)
         {
             idealCLDelegate.requestedCLAchieved = true;
-            if (idealCLDelegate == this)
-            {
-                replicaPlan.keyspace().metric.idealCLWriteLatency.addNano(nanoTime() - requestTime.startedAtNanos());
-            }
         }
 
         condition.signalAll();
         if (callback != null)
             callback.run();
+    }
+
+    /**
+     * @return true if condition is signaled either for success or failure
+     */
+    @VisibleForTesting
+    public boolean isCompleted()
+    {
+        return condition.isSignaled();
+    }
+
+    /**
+     * @return true if condition is signaled for failure
+     */
+    public boolean isCompletedExceptionally()
+    {
+        return isCompleted() && blockFor() + failures > candidateReplicaCount();
     }
 
     @Override
@@ -300,13 +300,8 @@ public abstract class AbstractWriteResponseHandler<T> implements RequestCallback
 
         failureReasonByEndpoint.put(from, failureReason);
 
-        logFailureOrTimeoutToIdealCLDelegate();
-
         if (blockFor() + n > candidateReplicaCount())
             signal();
-
-        if (hintOnFailure != null && StorageProxy.shouldHint(replicaPlan.lookup(from)) && requestTime.shouldSendHints())
-            StorageProxy.submitHint(hintOnFailure.get(), replicaPlan.lookup(from), null);
     }
 
     @Override
@@ -327,9 +322,13 @@ public abstract class AbstractWriteResponseHandler<T> implements RequestCallback
         {
             // The condition being signaled is a valid proxy for the CL being achieved
             // Only mark it as failed if the requested CL was achieved.
-            if (!condition.isSignalled() && requestedCLAchieved)
+            if (!condition.isSignaled() && requestedCLAchieved)
             {
                 replicaPlan.keyspace().metric.writeFailedIdealCL.inc();
+            }
+            else
+            {
+                replicaPlan.keyspace().metric.idealCLWriteLatency.addNano(System.nanoTime() - queryStartNanoTime);
             }
         }
     }
@@ -337,39 +336,38 @@ public abstract class AbstractWriteResponseHandler<T> implements RequestCallback
     /**
      * Cheap Quorum backup.  If we failed to reach quorum with our initial (full) nodes, reach out to other nodes.
      */
-    public void maybeTryAdditionalReplicas(IMutation mutation, WritePerformer writePerformer, String localDC)
+    public void maybeTryAdditionalReplicas(IMutation mutation, StorageProxy.WritePerformer writePerformer, String localDC)
     {
         EndpointsForToken uncontacted = replicaPlan.liveUncontacted();
         if (uncontacted.isEmpty())
             return;
 
-        long timeout = MAX_VALUE;
+        long timeout = Long.MAX_VALUE;
         List<ColumnFamilyStore> cfs = mutation.getTableIds().stream()
-                                              .map(instance::getColumnFamilyStoreInstance)
-                                              .collect(toList());
+                                              .map(Schema.instance::getColumnFamilyStoreInstance)
+                                              .collect(Collectors.toList());
         for (ColumnFamilyStore cf : cfs)
-            timeout = min(timeout, cf.additionalWriteLatencyMicros);
+            timeout = Math.min(timeout, cf.additionalWriteLatencyNanos);
 
         // no latency information, or we're overloaded
-        if (timeout > mutation.getTimeout(MICROSECONDS))
+        if (timeout > mutation.getTimeout(NANOSECONDS))
             return;
 
         try
         {
-            if (!condition.await(timeout, MICROSECONDS))
+            if (!condition.await(timeout, NANOSECONDS))
             {
                 for (ColumnFamilyStore cf : cfs)
                     cf.metric.additionalWrites.inc();
 
-                writePerformer.apply(mutation, replicaPlan.withContacts(uncontacted),
+                writePerformer.apply(mutation, replicaPlan.withContact(uncontacted),
                                      (AbstractWriteResponseHandler<IMutation>) this,
-                                     localDC,
-                                     requestTime);
+                                     localDC);
             }
         }
-        catch (InterruptedException e)
+        catch (InterruptedException ex)
         {
-            throw new UncheckedInterruptedException(e);
+            throw new AssertionError(ex);
         }
     }
 }

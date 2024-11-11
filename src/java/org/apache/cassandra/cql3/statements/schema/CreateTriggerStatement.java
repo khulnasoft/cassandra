@@ -17,15 +17,15 @@
  */
 package org.apache.cassandra.cql3.statements.schema;
 
+import java.util.function.UnaryOperator;
+
 import org.apache.cassandra.audit.AuditLogContext;
 import org.apache.cassandra.audit.AuditLogEntryType;
-import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.QualifiedName;
-import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.cql3.statements.RawKeyspaceAwareStatement;
 import org.apache.cassandra.schema.*;
 import org.apache.cassandra.schema.Keyspaces.KeyspacesDiff;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.triggers.TriggerExecutor;
 import org.apache.cassandra.transport.Event.SchemaChange;
 import org.apache.cassandra.transport.Event.SchemaChange.Change;
@@ -38,19 +38,18 @@ public final class CreateTriggerStatement extends AlterSchemaStatement
     private final String triggerClass;
     private final boolean ifNotExists;
 
-    public CreateTriggerStatement(String keyspaceName, String tableName, String triggerName, String triggerClass, boolean ifNotExists)
+    public CreateTriggerStatement(String queryString, String keyspaceName, String tableName,
+                                  String triggerName, String triggerClass, boolean ifNotExists)
     {
-        super(keyspaceName);
+        super(queryString, keyspaceName);
         this.tableName = tableName;
         this.triggerName = triggerName;
         this.triggerClass = triggerClass;
         this.ifNotExists = ifNotExists;
     }
 
-    @Override
-    public Keyspaces apply(ClusterMetadata metadata)
+    public Keyspaces apply(Keyspaces schema)
     {
-        Keyspaces schema = metadata.schema.getKeyspaces();
         KeyspaceMetadata keyspace = schema.getNullable(keyspaceName);
         if (null == keyspace)
             throw ire("Keyspace '%s' doesn't exist", keyspaceName);
@@ -73,13 +72,11 @@ public final class CreateTriggerStatement extends AlterSchemaStatement
 
         try
         {
-            TriggerExecutor.instance.loadTriggerClass(triggerClass);
+            TriggerExecutor.instance.loadTriggerInstance(triggerClass);
         }
         catch (Exception e)
         {
-            InvalidRequestException thrown = ire("Trigger class '%s' couldn't be loaded", triggerClass);
-            thrown.initCause(e);
-            throw thrown;
+            throw ire("Trigger class '%s' couldn't be loaded", triggerClass);
         }
 
         TableMetadata newTable = table.withSwapped(table.triggers.with(TriggerMetadata.create(triggerName, triggerClass)));
@@ -107,7 +104,7 @@ public final class CreateTriggerStatement extends AlterSchemaStatement
         return String.format("%s (%s, %s)", getClass().getSimpleName(), keyspaceName, triggerName);
     }
 
-    public static final class Raw extends CQLStatement.Raw
+    public static final class Raw extends RawKeyspaceAwareStatement<CreateTriggerStatement>
     {
         private final QualifiedName tableName;
         private final String triggerName;
@@ -122,10 +119,12 @@ public final class CreateTriggerStatement extends AlterSchemaStatement
             this.ifNotExists = ifNotExists;
         }
 
-        public CreateTriggerStatement prepare(ClientState state)
+        @Override
+        public CreateTriggerStatement prepare(ClientState state, UnaryOperator<String> keyspaceMapper)
         {
-            String keyspaceName = tableName.hasKeyspace() ? tableName.getKeyspace() : state.getKeyspace();
-            return new CreateTriggerStatement(keyspaceName, tableName.getName(), triggerName, triggerClass, ifNotExists);
+            String keyspaceName = keyspaceMapper.apply(tableName.hasKeyspace() ? tableName.getKeyspace() : state.getKeyspace());
+            return new CreateTriggerStatement(rawCQLStatement, keyspaceName, tableName.getName(),
+                                              triggerName, triggerClass, ifNotExists);
         }
     }
 }

@@ -30,7 +30,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 import com.google.common.util.concurrent.RateLimiter;
-import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics;
+import org.apache.commons.math.stat.descriptive.DescriptiveStatistics;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -54,7 +54,6 @@ import org.apache.cassandra.utils.Throwables;
 import static org.apache.cassandra.transport.BurnTestUtil.SizeCaps;
 import static org.apache.cassandra.transport.BurnTestUtil.generateQueryMessage;
 import static org.apache.cassandra.transport.BurnTestUtil.generateRows;
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 
 @RunWith(Parameterized.class)
 public class SimpleClientPerfTest
@@ -95,6 +94,7 @@ public class SimpleClientPerfTest
         }
     }
 
+    @SuppressWarnings({"IOResourceOpenedButNotSafelyClosed", "resource"})
     @Test
     public void measureSmall() throws Throwable
     {
@@ -107,6 +107,7 @@ public class SimpleClientPerfTest
                  version);
     }
 
+    @SuppressWarnings({"IOResourceOpenedButNotSafelyClosed", "resource"})
     @Test
     public void measureSmallWithCompression() throws Throwable
     {
@@ -119,6 +120,7 @@ public class SimpleClientPerfTest
                  version);
     }
 
+    @SuppressWarnings({"IOResourceOpenedButNotSafelyClosed", "resource"})
     @Test
     public void measureLarge() throws Throwable
     {
@@ -131,6 +133,7 @@ public class SimpleClientPerfTest
                  version);
     }
 
+    @SuppressWarnings({"IOResourceOpenedButNotSafelyClosed", "resource"})
     @Test
     public void measureLargeWithCompression() throws Throwable
     {
@@ -159,7 +162,7 @@ public class SimpleClientPerfTest
                                             .withPort(port)
                                             .build();
 
-        ClientMetrics.instance.init(server);
+        ClientMetrics.instance.init(Collections.singleton(server));
         server.start();
 
         Message.Type.QUERY.unsafeSetCodec(new Message.Codec<QueryMessage>()
@@ -169,8 +172,7 @@ public class SimpleClientPerfTest
                 QueryMessage queryMessage = QueryMessage.codec.decode(body, version);
                 return new QueryMessage(queryMessage.query, queryMessage.options)
                 {
-                    @Override
-                    protected Message.Response execute(QueryState state, Dispatcher.RequestTime requestTime, boolean traceRequest)
+                    protected Message.Response execute(QueryState state, long queryStartNanoTime, boolean traceRequest)
                     {
                         int idx = Integer.parseInt(queryMessage.query); // unused
                         return generateRows(idx, responseCaps);
@@ -217,9 +219,9 @@ public class SimpleClientPerfTest
                                 try
                                 {
                                     limiter.acquire();
-                                    long nanoStart = nanoTime();
+                                    long nanoStart = System.nanoTime();
                                     client.execute(messages);
-                                    long elapsed = nanoTime() - nanoStart;
+                                    long elapsed = System.nanoTime() - nanoStart;
 
                                     lock.lock();
                                     try

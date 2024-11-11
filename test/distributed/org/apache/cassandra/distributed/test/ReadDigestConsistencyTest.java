@@ -31,9 +31,6 @@ import org.apache.cassandra.distributed.api.ConsistencyLevel;
 import org.apache.cassandra.distributed.api.ICoordinator;
 import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.utils.Throwables;
-import org.apache.cassandra.utils.TimeUUID;
-
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 
 public class ReadDigestConsistencyTest extends TestBaseImpl
 {
@@ -68,7 +65,7 @@ public class ReadDigestConsistencyTest extends TestBaseImpl
 
     public static void checkTraceForDigestMismatch(ICoordinator coordinator, String query, Object... boundValues)
     {
-        UUID sessionId = TimeUUID.Generator.nextTimeUUID().asUUID();
+        UUID sessionId = UUID.randomUUID();
         try
         {
             coordinator.executeWithTracing(sessionId, query, ConsistencyLevel.ALL, boundValues);
@@ -103,7 +100,7 @@ public class ReadDigestConsistencyTest extends TestBaseImpl
                                              Arrays.toString(boundValues),
                                              coordinator.instance().broadcastAddress(),
                                              coordinator.instance().getReleaseVersionString()),
-                                             toLowerCaseLocalized(activity).contains("mismatch for key"));
+                               activity.toLowerCase().contains("mismatch for key"));
         }
     }
 

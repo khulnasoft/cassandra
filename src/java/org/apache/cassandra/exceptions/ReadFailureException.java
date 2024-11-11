@@ -33,10 +33,4 @@ public class ReadFailureException extends RequestFailureException
         super(ExceptionCode.READ_FAILURE, consistency, received, blockFor, ImmutableMap.copyOf(failureReasonByEndpoint));
         this.dataPresent = dataPresent;
     }
-
-    protected ReadFailureException(String msg, ConsistencyLevel consistency, int received, int blockFor, boolean dataPresent, Map<InetAddressAndPort, RequestFailureReason> failureReasonByEndpoint)
-    {
-        super(ExceptionCode.READ_FAILURE, msg, consistency, received, blockFor, failureReasonByEndpoint);
-        this.dataPresent = dataPresent;
-    }
 }

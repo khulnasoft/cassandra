@@ -22,13 +22,12 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.Before;
 import org.junit.Test;
 
-import static org.apache.cassandra.utils.concurrent.BlockingQueues.newBlockingQueue;
-import static org.apache.cassandra.utils.concurrent.WeightedQueue.NATURAL_WEIGHER;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
@@ -206,9 +205,9 @@ public class WeightedQueueTest
     public void testOfferWrappedQueueRefuses() throws Exception
     {
         queue = new WeightedQueue<>(10, new BadQueue(true), WeightedQueue.NATURAL_WEIGHER);
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
         assertFalse(queue.offer(new Object()));
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
     }
 
     /**
@@ -218,7 +217,7 @@ public class WeightedQueueTest
     public void testOfferWrappedQueueThrows() throws Exception
     {
         queue = new WeightedQueue<>(10, new BadQueue(false), WeightedQueue.NATURAL_WEIGHER);
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
         try
         {
             assertFalse(queue.offer(new Object()));
@@ -228,7 +227,7 @@ public class WeightedQueueTest
         {
             //expected and desired
         }
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
     }
 
     /**
@@ -247,7 +246,7 @@ public class WeightedQueueTest
     @Test
     public void testCustomWeigher() throws Exception
     {
-        queue = new WeightedQueue<>(10, newBlockingQueue(), weighable -> 10 );
+        queue = new WeightedQueue<>(10, new LinkedBlockingQueue<>(), weighable -> 10 );
         assertTrue(queue.offer(new Object()));
         assertFalse(queue.offer(new Object()));
     }
@@ -320,9 +319,9 @@ public class WeightedQueueTest
     public void testTimedOfferWrappedQueueRefuses() throws Exception
     {
         queue = new WeightedQueue<>(10, new BadQueue(true), WeightedQueue.NATURAL_WEIGHER);
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
         assertFalse(queue.offer(new Object(), 1, TimeUnit.MICROSECONDS));
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
     }
 
     /**
@@ -332,7 +331,7 @@ public class WeightedQueueTest
     public void testTimedOfferWrappedQueueThrows() throws Exception
     {
         queue = new WeightedQueue<>(10, new BadQueue(false), WeightedQueue.NATURAL_WEIGHER);
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
         try
         {
             assertFalse(queue.offer(new Object(), 1, TimeUnit.MICROSECONDS));
@@ -342,26 +341,26 @@ public class WeightedQueueTest
         {
             //expected and desired
         }
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
     }
 
 
     @Test
     public void testPoll() throws Exception
     {
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
         assertNull(queue.poll());
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
         Object o = new Object();
         assertTrue(queue.offer(o));
-        assertEquals(9, queue.availableWeight.permits());
+        assertEquals(9, queue.availableWeight.availablePermits());
         WeightedQueue.Weighable weighable = weighable(9);
         assertTrue(queue.offer(weighable));
-        assertEquals(0, queue.availableWeight.permits());
+        assertEquals(0, queue.availableWeight.availablePermits());
         assertEquals(o, queue.poll());
-        assertEquals(1, queue.availableWeight.permits());
+        assertEquals(1, queue.availableWeight.availablePermits());
         assertEquals(weighable, queue.poll());
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
     }
 
     @Test(expected = NullPointerException.class)
@@ -374,9 +373,9 @@ public class WeightedQueueTest
     public void testPutFullBlocks() throws Exception
     {
         WeightedQueue.Weighable weighable = weighable(10);
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
         queue.put(weighable);
-        assertEquals(0, queue.availableWeight.permits());
+        assertEquals(0, queue.availableWeight.availablePermits());
         Object o = new Object();
         Thread t = new Thread(() -> {
             try
@@ -390,19 +389,19 @@ public class WeightedQueueTest
         t.start();
         Thread.sleep(100);
         assertTrue(t.getState() != Thread.State.TERMINATED);
-        assertEquals(0, queue.availableWeight.permits());
+        assertEquals(0, queue.availableWeight.availablePermits());
         assertEquals(weighable, queue.poll());
-        assertTrue(queue.availableWeight.permits() > 0);
+        assertTrue(queue.availableWeight.availablePermits() > 0);
         t.join();
         assertEquals(o, queue.poll());
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
     }
 
     @Test
     public void testPutWrappedQueueThrows() throws Exception
     {
         queue = new WeightedQueue<>(10, new BadQueue(false), WeightedQueue.NATURAL_WEIGHER);
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
         try
         {
             queue.put(new Object());
@@ -412,7 +411,7 @@ public class WeightedQueueTest
         {
             //expected and desired
         }
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
     }
 
     @Test(expected = IllegalArgumentException.class)
@@ -449,11 +448,11 @@ public class WeightedQueueTest
         t.start();
         Thread.sleep(500);
         assertTrue(t.getState() != Thread.State.TERMINATED);
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
         queue.offer(new Object());
         t.join(60 * 1000);
         assertEquals(t.getState(), Thread.State.TERMINATED);
-        assertEquals(10, queue.availableWeight.permits());
+        assertEquals(10, queue.availableWeight.availablePermits());
     }
 
     @Test(expected = IllegalArgumentException.class)
@@ -465,7 +464,7 @@ public class WeightedQueueTest
     @Test(expected = IllegalArgumentException.class)
     public void testConstructor2LTZeroWeightThrows() throws Exception
     {
-        new WeightedQueue(0, newBlockingQueue(), NATURAL_WEIGHER);
+        new WeightedQueue(0, new LinkedBlockingQueue<>(), WeightedQueue.NATURAL_WEIGHER);
     }
 
     @Test(expected = NullPointerException.class)
@@ -477,7 +476,7 @@ public class WeightedQueueTest
     @Test(expected = NullPointerException.class)
     public void testConstructorNullWeigherThrows() throws Exception
     {
-        new WeightedQueue(1, newBlockingQueue(), null);
+        new WeightedQueue(1, new LinkedBlockingQueue<>(), null);
     }
 
     /**

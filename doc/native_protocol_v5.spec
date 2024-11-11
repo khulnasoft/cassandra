@@ -1207,13 +1207,6 @@ Table of Contents
   value.  Implementors should pad positive values that have a MSB >= 0x80
   with a leading 0x00 byte.
 
-5.25 vector
-
-  For a vector of n dimensions of a fixed-length type, a sequence of those n elements.
-  For a vector with variable-length elements, the size of the elements will preced
-  each element.  Each element is the [bytes] representing the serialized value.  The
-  number of dimensions is not encoded, since it's part of the type definition.
-
 
 6. User Defined Types
 
@@ -1323,7 +1316,7 @@ Table of Contents
                              - "VIEW": the timeout occured when a write involves
                                VIEW update and failure to acqiure local view(MV)
                                lock for key within timeout
-                             - "CDC": the timeout occured when cdc_total_space is
+                             - "CDC": the timeout occured when cdc_total_space_in_mb is
                                exceeded when doing a write to data tracked by cdc.
                 <contentions> is a [short] that describes the number of contentions occured during the CAS operation.
                               The field only presents when the <writeType> is "CAS".
@@ -1406,7 +1399,7 @@ Table of Contents
                              - "VIEW": the failure occured when a write involves
                                VIEW update and failure to acqiure local view(MV)
                                lock for key within timeout
-                             - "CDC": the failure occured when cdc_total_space is
+                             - "CDC": the failure occured when cdc_total_space_in_mb is
                                exceeded when doing a write to data tracked by cdc.
     0x1600    CDC_WRITE_FAILURE: // todo
     0x1700    CAS_WRITE_UNKNOWN: An exception occured due to contended Compare And Set write/update.

@@ -18,7 +18,6 @@
 package org.apache.cassandra.db.compaction;
 
 import java.util.Iterator;
-import java.util.Map;
 
 import org.junit.After;
 import org.junit.Before;
@@ -27,20 +26,18 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
-import org.apache.cassandra.db.DirectoriesTest;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.utils.CloseableIterator;
 import org.apache.cassandra.utils.FBUtilities;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.junit.Assert.assertEquals;
@@ -53,11 +50,11 @@ public class PartialCompactionsTest extends SchemaLoader
     @BeforeClass
     public static void initSchema()
     {
-        SchemaLoader.prepareServer();
+        CompactionManager.instance.disableAutoCompaction();
+
         SchemaLoader.createKeyspace(KEYSPACE,
                                     KeyspaceParams.simple(1),
                                     SchemaLoader.standardCFMD(KEYSPACE, TABLE));
-        CompactionManager.instance.disableAutoCompaction();
 
         LimitableDataDirectory.applyTo(KEYSPACE, TABLE);
     }
@@ -148,7 +145,7 @@ public class PartialCompactionsTest extends SchemaLoader
             .build()
             .applyUnsafe();
         }
-        cfs.forceBlockingFlush(ColumnFamilyStore.FlushReason.UNIT_TESTS);
+        cfs.forceBlockingFlush(UNIT_TESTS);
     }
 
     private static void createTombstonesSSTable(ColumnFamilyStore cfs, int firstKey, int endKey)
@@ -157,7 +154,7 @@ public class PartialCompactionsTest extends SchemaLoader
         {
             RowUpdateBuilder.deleteRow(cfs.metadata(), 1, "key1", String.valueOf(i)).applyUnsafe();
         }
-        cfs.forceBlockingFlush(ColumnFamilyStore.FlushReason.UNIT_TESTS);
+        cfs.forceBlockingFlush(UNIT_TESTS);
     }
 
     private static class LimitableDataDirectory extends Directories.DataDirectory
@@ -193,7 +190,7 @@ public class PartialCompactionsTest extends SchemaLoader
             ColumnFamilyStore store = keyspace.getColumnFamilyStore(cf);
             TableMetadataRef metadata = store.metadata;
             keyspace.dropCf(metadata.id, true);
-            ColumnFamilyStore cfs = ColumnFamilyStore.createColumnFamilyStore(keyspace, cf, metadata.get(), wrapDirectoriesOf(store), false, false);
+            ColumnFamilyStore cfs = ColumnFamilyStore.createColumnFamilyStore(keyspace, cf, metadata, wrapDirectoriesOf(store), false, false, true);
             keyspace.initCfCustom(cfs);
         }
 
@@ -205,29 +202,7 @@ public class PartialCompactionsTest extends SchemaLoader
             {
                 wrapped[i] = new LimitableDataDirectory(original[i]);
             }
-            return new Directories(cfs.metadata(), wrapped)
-            {
-                @Override
-                public boolean hasDiskSpaceForCompactionsAndStreams(Map<File, Long> expectedNewWriteSizes, Map<File, Long> totalCompactionWriteRemaining)
-                {
-                    return hasDiskSpaceForCompactionsAndStreams(expectedNewWriteSizes, totalCompactionWriteRemaining, file -> {
-                        for (DataDirectory location : getWriteableLocations())
-                        {
-                            if (file.toPath().startsWith(location.location.toPath())) {
-                                LimitableDataDirectory directory = (LimitableDataDirectory) location;
-                                if (directory.availableSpace != null)
-                                {
-                                    DirectoriesTest.FakeFileStore store = new DirectoriesTest.FakeFileStore();
-                                    // reverse the computation in Directories.getAvailableSpaceForCompactions
-                                    store.usableSpace = Math.round(directory.availableSpace / DatabaseDescriptor.getMaxSpaceForCompactionsPerDrive()) + DatabaseDescriptor.getMinFreeSpacePerDriveInBytes();
-                                    return store;
-                                }
-                            }
-                        }
-                        return Directories.getFileStore(file);
-                    });
-                }
-            };
+            return new Directories(cfs.metadata(), wrapped);
         }
     }
 }

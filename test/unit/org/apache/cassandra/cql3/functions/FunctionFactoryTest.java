@@ -30,6 +30,7 @@ import java.util.UUID;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import org.apache.cassandra.cql3.AssignmentTestable;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.Duration;
 import org.apache.cassandra.cql3.UntypedResultSet;
@@ -37,7 +38,6 @@ import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.TimeUUID;
 
 public class FunctionFactoryTest extends CQLTester
 {
@@ -48,20 +48,16 @@ public class FunctionFactoryTest extends CQLTester
     private static final FunctionFactory IDENTITY = new FunctionFactory("identity", FunctionParameter.anyType(true))
     {
         @Override
-        protected NativeFunction doGetOrCreateFunction(List<AbstractType<?>> argTypes, AbstractType<?> receiverType)
+        protected NativeFunction doGetOrCreateFunction(List<? extends AssignmentTestable> args,
+                                                       List<AbstractType<?>> argTypes,
+                                                       AbstractType<?> receiverType)
         {
             return new NativeScalarFunction(name.name, argTypes.get(0), argTypes.get(0))
             {
                 @Override
-                public Arguments newArguments(ProtocolVersion version)
+                public ByteBuffer execute(ProtocolVersion protocol, List<ByteBuffer> parameters)
                 {
-                    return FunctionArguments.newNoopInstance(version, 1);
-                }
-
-                @Override
-                public ByteBuffer execute(Arguments arguments)
-                {
-                    return arguments.containsNulls() ? null : arguments.get(0);
+                    return parameters.get(0);
                 }
             };
         }
@@ -74,25 +70,27 @@ public class FunctionFactoryTest extends CQLTester
     private static final FunctionFactory TO_STRING = new FunctionFactory("tostring", FunctionParameter.anyType(false))
     {
         @Override
-        protected NativeFunction doGetOrCreateFunction(List<AbstractType<?>> argTypes, AbstractType<?> receiverType)
+        protected NativeFunction doGetOrCreateFunction(List<? extends AssignmentTestable> args,
+                                                       List<AbstractType<?>> argTypes,
+                                                       AbstractType<?> receiverType)
         {
             return new NativeScalarFunction(name.name, UTF8Type.instance, argTypes.get(0))
             {
                 @Override
-                public ByteBuffer execute(Arguments arguments)
+                public ByteBuffer execute(ProtocolVersion protocol, List<ByteBuffer> parameters)
                 {
-                    if (arguments.containsNulls())
+                    ByteBuffer value = parameters.get(0);
+                    if (value == null)
                         return null;
 
-                    Object value = arguments.get(0);
-                    return UTF8Type.instance.decompose(value.toString());
+                    return UTF8Type.instance.decompose(argTypes.get(0).compose(value).toString());
                 }
             };
         }
     };
 
     private static final UUID uuid = UUID.fromString("62c3e96f-55cd-493b-8c8e-5a18883a1698");
-    private static final TimeUUID timeUUID = TimeUUID.fromString("00346642-2d2f-11ed-a261-0242ac120002");
+    private static final UUID timeUUID = UUID.fromString("00346642-2d2f-11ed-a261-0242ac120002");
     private static final BigInteger bigint = new BigInteger("12345678901234567890");
     private static final BigDecimal bigdecimal = new BigDecimal("1234567890.1234567890");
     private static final Date date = new Date();
@@ -242,7 +240,6 @@ public class FunctionFactoryTest extends CQLTester
         testLiteral("{false}", set(false));
         testLiteral(String.format("{%s}", uuid), set(uuid));
         testLiteral(String.format("{%s}", timeUUID), set(timeUUID));
-        testLiteral(String.format("{%s, %s}", uuid, timeUUID), set(uuid, timeUUID.asUUID()));
     }
 
     @Test
@@ -282,7 +279,6 @@ public class FunctionFactoryTest extends CQLTester
         testLiteral("[false]", list(false));
         testLiteral(String.format("[%s]", uuid), list(uuid));
         testLiteral(String.format("[%s]", timeUUID), list(timeUUID));
-        testLiteral(String.format("[%s, %s]", uuid, timeUUID), list(uuid, timeUUID.asUUID()));
     }
 
     @Test

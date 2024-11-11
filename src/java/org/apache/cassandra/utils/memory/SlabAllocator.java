@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,8 +33,8 @@ import org.apache.cassandra.utils.concurrent.OpOrder;
 
 /**
 + * The SlabAllocator is a bump-the-pointer allocator that allocates
-+ * large (1MiB) global regions and then doles them out to threads that
-+ * request smaller sized (up to 128KiB) slices into the array.
++ * large (1MB) global regions and then doles them out to threads that
++ * request smaller sized (up to 128kb) slices into the array.
  * <p></p>
  * The purpose of this class is to combat heap fragmentation in long lived
  * objects: by ensuring that all allocations with similar lifetimes
@@ -48,7 +49,8 @@ public class SlabAllocator extends MemtableBufferAllocator
 {
     private static final Logger logger = LoggerFactory.getLogger(SlabAllocator.class);
 
-    private final static int REGION_SIZE = 1024 * 1024;
+    @VisibleForTesting
+    public final static int REGION_SIZE = 1024 * 1024;
     private final static int MAX_CLONED_SIZE = 128 * 1024; // bigger than this don't go in the region
 
     // globally stash any Regions we allocate but are beaten to using, and use these up before allocating any more
@@ -73,6 +75,17 @@ public class SlabAllocator extends MemtableBufferAllocator
     public EnsureOnHeap ensureOnHeap()
     {
         return ensureOnHeap;
+    }
+
+    @Override
+    public long unusedReservedOnHeapMemory()
+    {
+        if (!allocateOnHeapOnly)
+            return 0;
+        Region current = currentRegion.get();
+        if (current == null)
+            return 0;
+        return current.unusedReservedMemory();
     }
 
     public ByteBuffer allocate(int size)
@@ -142,8 +155,7 @@ public class SlabAllocator extends MemtableBufferAllocator
                 if (!allocateOnHeapOnly)
                     offHeapRegions.add(region);
                 regionCount.incrementAndGet();
-                if (logger.isTraceEnabled())
-                    logger.trace("{} regions now allocated in {}", regionCount, this);
+                logger.trace("{} regions now allocated in {}", regionCount, this);
                 return region;
             }
 
@@ -153,9 +165,10 @@ public class SlabAllocator extends MemtableBufferAllocator
         }
     }
 
-    public Cloner cloner(OpOrder.Group writeOp)
+    @Override
+    public Cloner cloner(OpOrder.Group opGroup)
     {
-        return allocator(writeOp);
+        return allocator(opGroup);
     }
 
     /**
@@ -211,6 +224,11 @@ public class SlabAllocator extends MemtableBufferAllocator
         {
             return "Region@" + System.identityHashCode(this) +
                    "waste=" + Math.max(0, data.capacity() - nextFreeOffset.get());
+        }
+
+        long unusedReservedMemory()
+        {
+            return data.capacity() - nextFreeOffset.get();
         }
     }
 }

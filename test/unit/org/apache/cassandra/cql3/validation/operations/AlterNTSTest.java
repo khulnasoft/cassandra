@@ -22,12 +22,8 @@ import java.util.List;
 
 import org.junit.Test;
 
-import com.datastax.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.PreparedStatement;
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
-import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.service.ClientWarn;
 import org.assertj.core.api.Assertions;
 
@@ -103,18 +99,5 @@ public class AlterNTSTest extends CQLTester
         execute("ALTER KEYSPACE " + ks + " WITH replication = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 }");
         warnings = ClientWarn.instance.getWarnings();
         assertNull(warnings);
-    }
-
-    @Test
-    public void testAlterKeyspaceSystem_AuthWithNTSOnlyAcceptsConfiguredDataCenterNames() throws Throwable
-    {
-        requireAuthentication();
-
-        // Add a peer in another DC
-        ClusterMetadataTestHelper.register(InetAddressAndPort.getByName("127.0.0.2"), DATA_CENTER_REMOTE, RACK1);
-
-        // try modifying the system_auth keyspace without second DC which has active node.
-        assertInvalidThrow(ConfigurationException.class, "ALTER KEYSPACE system_auth WITH replication = { 'class' : 'NetworkTopologyStrategy', '" + DATA_CENTER + "' : 2 }");
-        execute("ALTER KEYSPACE " + SchemaConstants.AUTH_KEYSPACE_NAME + " WITH replication = {'class' : 'NetworkTopologyStrategy', '" + DATA_CENTER + "' : 1 , '" + DATA_CENTER_REMOTE + "' : 1 }");
     }
 }

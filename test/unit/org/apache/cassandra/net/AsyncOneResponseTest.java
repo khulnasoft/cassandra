@@ -23,7 +23,6 @@ import java.util.concurrent.TimeUnit;
 import org.junit.Assert;
 import org.junit.Test;
 
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 import static org.junit.Assert.assertTrue;
 
 public class AsyncOneResponseTest
@@ -44,9 +43,9 @@ public class AsyncOneResponseTest
         final long expectedTimeoutMillis = 1000; // Should time out after roughly this time
         final long schedulingError = 10; // Scheduling is imperfect
 
-        long startTime = nanoTime();
+        long startTime = System.nanoTime();
         boolean timeout = !response.await(expectedTimeoutMillis, TimeUnit.MILLISECONDS);
-        long endTime = nanoTime();
+        long endTime = System.nanoTime();
 
         assertTrue(timeout);
         assertTrue(TimeUnit.NANOSECONDS.toMillis(endTime - startTime) > (expectedTimeoutMillis - schedulingError));

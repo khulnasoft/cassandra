@@ -19,30 +19,29 @@
 package org.apache.cassandra.cql3.validation.entities.udfverify;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 
-import org.apache.cassandra.cql3.functions.Arguments;
+import org.apache.cassandra.cql3.functions.types.TypeCodec;
 import org.apache.cassandra.cql3.functions.JavaUDF;
 import org.apache.cassandra.cql3.functions.UDFContext;
-import org.apache.cassandra.cql3.functions.UDFDataType;
+import org.apache.cassandra.transport.ProtocolVersion;
 
 /**
  * Used by {@link org.apache.cassandra.cql3.validation.entities.UFVerifierTest}.
  */
 public final class CallFinalize extends JavaUDF
 {
-    public CallFinalize(UDFDataType returnType, UDFContext udfContext)
+    public CallFinalize(TypeCodec<Object> returnDataType, TypeCodec<Object>[] argDataTypes, UDFContext udfContext)
     {
-        super(returnType, udfContext);
+        super(returnDataType, argDataTypes, udfContext);
     }
 
-    @Override
-    protected Object executeAggregateImpl(Object state, Arguments arguments)
+    protected Object executeAggregateImpl(ProtocolVersion protocolVersion, Object firstParam, List<ByteBuffer> params)
     {
         throw new UnsupportedOperationException();
     }
 
-    @Override
-    protected ByteBuffer executeImpl(Arguments arguments)
+    protected ByteBuffer executeImpl(ProtocolVersion protocolVersion, List<ByteBuffer> params)
     {
         try
         {

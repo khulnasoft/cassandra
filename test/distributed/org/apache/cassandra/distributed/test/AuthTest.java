@@ -20,31 +20,39 @@ package org.apache.cassandra.distributed.test;
 
 import java.io.IOException;
 import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 import org.junit.Test;
 
-import com.datastax.driver.core.PlainTextAuthProvider;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.policies.DCAwareRoundRobinPolicy;
+import com.khulnasoft.driver.core.PlainTextAuthProvider;
+import com.khulnasoft.driver.core.Row;
+import com.khulnasoft.driver.core.Session;
+import com.khulnasoft.driver.core.exceptions.AuthenticationException;
+import com.khulnasoft.driver.core.policies.DCAwareRoundRobinPolicy;
+import org.apache.cassandra.auth.CassandraRoleManager;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
 import org.apache.cassandra.distributed.api.ICoordinator;
 import org.apache.cassandra.distributed.api.IInstanceConfig;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.distributed.api.IMessageFilters.Filter;
+import org.apache.cassandra.distributed.api.SimpleQueryResult;
 import org.apache.cassandra.distributed.api.TokenSupplier;
 import org.apache.cassandra.locator.SimpleSeedProvider;
-import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.service.StorageService;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.apache.cassandra.distributed.action.GossipHelper.withProperty;
+import static org.apache.cassandra.distributed.api.ConsistencyLevel.ONE;
 import static org.apache.cassandra.distributed.api.Feature.GOSSIP;
 import static org.apache.cassandra.distributed.api.Feature.NATIVE_PROTOCOL;
 import static org.apache.cassandra.distributed.api.Feature.NETWORK;
-import static org.apache.cassandra.distributed.util.Auth.waitForExistingRoles;
 import static org.awaitility.Awaitility.await;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 public class AuthTest extends TestBaseImpl
@@ -68,9 +76,7 @@ public class AuthTest extends TestBaseImpl
     }
 
     /**
-     * CASSANDRA-12525 has solved this issue in a way that was reconciling the passwords (ie any override of the password would
-     * supercede default password as soon as node learns about existence of other peers). With transactional metadata, this
-     * issue simply does not exist since nodes always know about the auth placements.
+     * See CASSANDRA-12525 for more information.
      */
     @Test
     public void testZeroTimestampForDefaultRoleCreation() throws Exception
@@ -79,8 +85,7 @@ public class AuthTest extends TestBaseImpl
                                         .withNodes(1)
                                         .withTokenSupplier(TokenSupplier.evenlyDistributedTokens(2, 1))
                                         .withConfig(config -> config.with(NETWORK, GOSSIP, NATIVE_PROTOCOL)
-                                                                    .set("authenticator", "PasswordAuthenticator")
-                                                                    .set("credentials_validity", "2s")) // revert to OSS default
+                                                                    .set("authenticator", "PasswordAuthenticator"))
                                         .start())
         {
             waitForExistingRoles(cluster.get(1));
@@ -98,38 +103,42 @@ public class AuthTest extends TestBaseImpl
             IInvokableInstance secondNode = getSecondNode(cluster);
 
             // drop all communication between nodes
-            Filter to = cluster.filters().inbound()
-                               .messagesMatching((i, i1, msg) -> !Verb.fromId(msg.verb()).toString().contains("TCM"))
-                               .drop();
-            Filter from = cluster.filters().outbound()
-                                 .messagesMatching((i, i1, msg) -> !Verb.fromId(msg.verb()).toString().contains("TCM"))
-                                 .drop();
+            Filter to = cluster.filters().allVerbs().inbound().drop();
+            Filter from = cluster.filters().allVerbs().outbound().drop();
 
             secondNode.startup();
+            waitForExistingRoles(secondNode);
+
+            long passwordWritetimeOnSecondNode = getPasswordWritetime(cluster.coordinator(2));
+
+            // as new node thinks it is alone in cluster, it created new role with TIMESTAMP 0
+            assertEquals(0, passwordWritetimeOnSecondNode);
+
+            // the fact we can still log in with old password shows we dropped all communication
+            // and the second node thinks that it is alone in the cluster, so it created new cassandra role
+            // with default password
+            doWithSession("127.0.0.2",
+                          "datacenter2",
+                          "cassandra", session -> session.execute("select * from system.local"));
 
             // turn off filters
             to.off();
             from.off();
 
-            try
-            {
-                waitForExistingRoles(secondNode);
-            }
-            catch (Throwable t)
-            {
-                assertTrue(t.getMessage().contains("ReadTimeoutException"));
-            }
+            // be sure the first peer is there for the second node
+            await()
+            .atMost(1, TimeUnit.MINUTES)
+            .pollInterval(10, SECONDS)
+            .until(() -> {
+                List<Row> rows = doWithSession("127.0.0.2",
+                                               "datacenter2",
+                                               "cassandra",
+                                               session -> session.execute("select * from system.peers")).all();
+                if (rows.isEmpty())
+                    return false;
 
-            // Node has started with auto_bootstrap=false, and it just so happens that this key belongs to node2, so we get no results
-            assertEquals(0L,
-                         cluster.coordinator(2)
-                                .execute("SELECT WRITETIME (salted_hash) from system_auth.roles where role = 'cassandra'",
-                                         ConsistencyLevel.LOCAL_ONE)[0][0]);
-
-            // since Auth is initialized once per cluster now, we naturally can _not_ authenticate because the keyspace is
-            doWithSession("127.0.0.2",
-                          "datacenter2",
-                          "cassandra", session -> session.execute("select * from system.local"));
+                return rows.get(0).getInet("peer").getHostAddress().equals("127.0.0.1");
+            });
 
             // change the replication strategy
             doWithSession("127.0.0.2",
@@ -152,6 +161,42 @@ public class AuthTest extends TestBaseImpl
         }
     }
 
+    @Test
+    public void testSkipDefaultRoleCreation() throws Exception
+    {
+        try (Cluster cluster = builder().withDCs(1)
+                                        .withNodes(1)
+                                        .withTokenSupplier(TokenSupplier.evenlyDistributedTokens(1, 1))
+                                        .withConfig(config -> config.with(NETWORK, GOSSIP, NATIVE_PROTOCOL)
+                                                                    .with()
+                                                                    .set("authenticator", "PasswordAuthenticator"))
+                                        .createWithoutStarting()) // don't start the cluster yet as we need to set the skip_default_role_setup property first
+        {
+            withProperty("cassandra.skip_default_role_setup", true,
+                         cluster::startup);
+
+            waitForExistingRoles(cluster.get(1));
+
+            long writeTime = getPasswordWritetime(cluster.coordinator(1));
+            // TIMESTAMP 1 when skip_default_role_setup is true
+            assertEquals(1, writeTime);
+
+            String defaultRoleQuery = "select is_superuser, can_login, salted_hash from system_auth.roles where role = 'cassandra'";
+            SimpleQueryResult result = cluster.coordinator(1).executeWithResult(defaultRoleQuery, ONE);
+            assertTrue(result.hasNext());
+            org.apache.cassandra.distributed.api.Row row = result.next();
+            assertFalse(row.get("is_superuser"));
+            assertFalse(row.get("can_login"));
+            assertEquals("", row.get("salted_hash"));
+
+            // make sure SU cannot really login
+            assertThrows(AuthenticationException.class, () -> doWithSession("127.0.0.1",
+                                                                            "datacenter1",
+                                                                            "cassandra",
+                                                                            session -> session.execute(defaultRoleQuery)));
+        }
+    }
+
     private IInvokableInstance getSecondNode(Cluster cluster)
     {
         IInstanceConfig config = cluster.newInstanceConfig();
@@ -159,6 +204,14 @@ public class AuthTest extends TestBaseImpl
         config.set("seed_provider", new IInstanceConfig.ParameterizedClass(SimpleSeedProvider.class.getName(),
                                                                            Collections.singletonMap("seeds", "127.0.0.1, 127.0.0.2")));
         return cluster.bootstrap(config);
+    }
+
+    private void waitForExistingRoles(IInvokableInstance instance)
+    {
+        await().pollDelay(1, SECONDS)
+               .pollInterval(1, SECONDS)
+               .atMost(30, SECONDS)
+               .until(() -> instance.callOnInstance(CassandraRoleManager::hasExistingRoles));
     }
 
     private long getPasswordWritetime(ICoordinator coordinator)
@@ -177,12 +230,12 @@ public class AuthTest extends TestBaseImpl
 
     private <V> V doWithSession(String host, String datacenter, String password, Function<Session, V> fn)
     {
-        com.datastax.driver.core.Cluster.Builder builder = com.datastax.driver.core.Cluster.builder()
+        com.khulnasoft.driver.core.Cluster.Builder builder = com.khulnasoft.driver.core.Cluster.builder()
                                                                                            .withLoadBalancingPolicy(new DCAwareRoundRobinPolicy.Builder().withLocalDc(datacenter).build())
                                                                                            .withAuthProvider(new PlainTextAuthProvider("cassandra", password))
                                                                                            .addContactPoint(host);
 
-        try (com.datastax.driver.core.Cluster c = builder.build(); Session session = c.connect())
+        try (com.khulnasoft.driver.core.Cluster c = builder.build(); Session session = c.connect())
         {
             return fn.apply(session);
         }

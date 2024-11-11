@@ -39,13 +39,12 @@ import org.apache.cassandra.db.compaction.Upgrader;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
+import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.OutputHandler;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_UTIL_ALLOW_TOOL_REINIT_FOR_TEST;
 import static org.apache.cassandra.tools.BulkLoader.CmdLineOptions;
 
 public class StandaloneUpgrader
@@ -58,14 +57,17 @@ public class StandaloneUpgrader
     public static void main(String args[])
     {
         Options options = Options.parseArgs(args);
-        if (TEST_UTIL_ALLOW_TOOL_REINIT_FOR_TEST.getBoolean())
+        if (Boolean.getBoolean(Util.ALLOW_TOOL_REINIT_FOR_TEST))
             DatabaseDescriptor.toolInitialization(false); //Necessary for testing
         else
             Util.initDatabaseDescriptor();
-        ClusterMetadataService.initializeForTools(false);
+
         try
         {
-            if (Schema.instance.getTableMetadata(options.keyspace, options.cf) == null)
+            // load keyspace descriptions.
+            Schema.instance.loadFromDisk();
+
+            if (Schema.instance.getTableMetadataRef(options.keyspace, options.cf) == null)
                 throw new IllegalArgumentException(String.format("Unknown keyspace/table %s.%s",
                                                                  options.keyspace,
                                                                  options.cf));
@@ -86,13 +88,13 @@ public class StandaloneUpgrader
             for (Map.Entry<Descriptor, Set<Component>> entry : lister.sortedList())
             {
                 Set<Component> components = entry.getValue();
-                if (!components.containsAll(entry.getKey().getFormat().primaryComponents()))
+                if (!components.contains(Component.DATA) || !components.contains(Component.PRIMARY_INDEX))
                     continue;
 
                 try
                 {
-                    SSTableReader sstable = SSTableReader.openNoValidation(entry.getKey(), components, cfs);
-                    if (sstable.descriptor.version.equals(DatabaseDescriptor.getSelectedSSTableFormat().getLatestVersion()))
+                    SSTableReader sstable = entry.getKey().getFormat().getReaderFactory().openNoValidation(entry.getKey(), components, cfs);
+                    if (sstable.descriptor.version.equals(SSTableFormat.Type.current().info.getLatestVersion()))
                     {
                         sstable.selfRef().release();
                         continue;

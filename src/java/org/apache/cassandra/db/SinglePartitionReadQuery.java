@@ -46,14 +46,16 @@ import org.apache.cassandra.transport.ProtocolVersion;
 public interface SinglePartitionReadQuery extends ReadQuery
 {
     public static Group<? extends SinglePartitionReadQuery> createGroup(TableMetadata metadata,
-                                                                        long nowInSec,
+                                                                        int nowInSec,
                                                                         ColumnFilter columnFilter,
                                                                         RowFilter rowFilter,
                                                                         DataLimits limits,
                                                                         List<DecoratedKey> partitionKeys,
                                                                         ClusteringIndexFilter clusteringIndexFilter)
     {
-        return SinglePartitionReadCommand.Group.create(metadata, nowInSec, columnFilter, rowFilter, limits, partitionKeys, clusteringIndexFilter);
+        return metadata.isVirtual()
+             ? VirtualTableSinglePartitionReadQuery.Group.create(metadata, nowInSec, columnFilter, rowFilter, limits, partitionKeys, clusteringIndexFilter)
+             : SinglePartitionReadCommand.Group.create(metadata, nowInSec, columnFilter, rowFilter, limits, partitionKeys, clusteringIndexFilter);
     }
 
 
@@ -69,12 +71,12 @@ public interface SinglePartitionReadQuery extends ReadQuery
      * @return a newly created read query. The returned query will use no row filter and have no limits.
      */
     public static SinglePartitionReadQuery create(TableMetadata metadata,
-                                                  long nowInSec,
+                                                  int nowInSec,
                                                   DecoratedKey key,
                                                   ColumnFilter columnFilter,
                                                   ClusteringIndexFilter filter)
     {
-        return create(metadata, nowInSec, columnFilter, RowFilter.none(), DataLimits.NONE, key, filter);
+        return create(metadata, nowInSec, columnFilter, RowFilter.NONE, DataLimits.NONE, key, filter);
     }
 
     /**
@@ -91,14 +93,16 @@ public interface SinglePartitionReadQuery extends ReadQuery
      * @return a newly created read query.
      */
     public static SinglePartitionReadQuery create(TableMetadata metadata,
-                                                  long nowInSec,
+                                                  int nowInSec,
                                                   ColumnFilter columnFilter,
                                                   RowFilter rowFilter,
                                                   DataLimits limits,
                                                   DecoratedKey partitionKey,
                                                   ClusteringIndexFilter clusteringIndexFilter)
     {
-        return SinglePartitionReadCommand.create(metadata, nowInSec, columnFilter, rowFilter, limits, partitionKey, clusteringIndexFilter);
+        return metadata.isVirtual()
+             ? VirtualTableSinglePartitionReadQuery.create(metadata, nowInSec, columnFilter, rowFilter, limits, partitionKey, clusteringIndexFilter)
+             : SinglePartitionReadCommand.create(metadata, nowInSec, columnFilter, rowFilter, limits, partitionKey, clusteringIndexFilter);
     }
 
     /**
@@ -161,7 +165,7 @@ public interface SinglePartitionReadQuery extends ReadQuery
     {
         public final List<T> queries;
         private final DataLimits limits;
-        private final long nowInSec;
+        private final int nowInSec;
         private final boolean selectsFullPartitions;
 
         public Group(List<T> queries, DataLimits limits)
@@ -176,14 +180,7 @@ public interface SinglePartitionReadQuery extends ReadQuery
                 assert queries.get(i).nowInSec() == nowInSec;
         }
 
-        @Override
-        public void maybeValidateIndex()
-        {
-            for (ReadQuery query : queries)
-                query.maybeValidateIndex();
-        }
-
-        public long nowInSec()
+        public int nowInSec()
         {
             return nowInSec;
         }
@@ -282,12 +279,6 @@ public interface SinglePartitionReadQuery extends ReadQuery
             // Note that the only difference between the query in a group must be the partition key on which
             // they applied.
             return queries.get(0).columnFilter();
-        }
-
-        @Override
-        public void trackWarnings()
-        {
-            queries.forEach(ReadQuery::trackWarnings);
         }
 
         @Override

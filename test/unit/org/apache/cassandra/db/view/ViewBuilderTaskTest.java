@@ -24,7 +24,6 @@ import java.util.stream.IntStream;
 
 import org.junit.Test;
 
-import org.apache.cassandra.Util;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.SystemKeyspace;
@@ -35,6 +34,7 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.transport.ProtocolVersion;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.junit.Assert.assertEquals;
 
 public class ViewBuilderTaskTest extends CQLTester
@@ -60,7 +60,7 @@ public class ViewBuilderTaskTest extends CQLTester
                                                   "PRIMARY KEY (v, k, c)", viewName));
 
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
-        View view = cfs.keyspace.viewManager.forTable(cfs.metadata()).iterator().next();
+        View view = cfs.keyspace.viewManager.forTable(cfs.metadata().id).iterator().next();
 
         // Insert the dataset
         for (int k = 0; k < 100; k++)
@@ -85,8 +85,8 @@ public class ViewBuilderTaskTest extends CQLTester
                               int expectedRowsInView) throws Throwable
             {
                 // Truncate the materialized view (not the base table)
-                Util.flush(cfs.viewManager);
-                cfs.viewManager.truncateBlocking(cfs.forceBlockingFlush(ColumnFamilyStore.FlushReason.UNIT_TESTS), System.currentTimeMillis());
+                cfs.viewManager.forceBlockingFlush(UNIT_TESTS);
+                cfs.viewManager.truncateBlocking(cfs.forceBlockingFlush(UNIT_TESTS), System.currentTimeMillis());
                 assertRowCount(execute("SELECT * FROM " + viewName), 0);
 
                 // Get the tokens from the referenced inserted rows

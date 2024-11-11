@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.utils.btree;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.BTREE_BRANCH_SHIFT;
 import static org.apache.cassandra.utils.btree.BTreeRemoval.remove;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -38,7 +37,7 @@ public class BTreeRemovalTest
 {
     static
     {
-        BTREE_BRANCH_SHIFT.setInt(3);
+        System.setProperty("cassandra.btree.branchshift", "3");
     }
 
     private static final Comparator<Integer> CMP = new Comparator<Integer>()

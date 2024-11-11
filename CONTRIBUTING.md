@@ -33,6 +33,6 @@ Use [Cassandra JIRA](https://issues.apache.org/jira/browse/CASSANDRA/) to create
 - Code style [wiki page](https://cwiki.apache.org/confluence/display/CASSANDRA2/CodeStyle)
 - Running Cassandra in IDEA [guide](https://cwiki.apache.org/confluence/display/CASSANDRA2/RunningCassandraInIDEA)
 - Running Cassandra in Eclipse [guide](https://cwiki.apache.org/confluence/display/CASSANDRA2/RunningCassandraInEclipse)
-- Cassandra Cluster Manager - [CCM](https://github.com/pcmanus/ccm) and a guide [blog post](http://www.datastax.com/dev/blog/ccm-a-development-tool-for-creating-local-cassandra-clusters)
+- Cassandra Cluster Manager - [CCM](https://github.com/pcmanus/ccm) and a guide [blog post](http://www.khulnasoft.com/dev/blog/ccm-a-development-tool-for-creating-local-cassandra-clusters)
 - Cassandra Distributed Tests aka [dtests](https://github.com/apache/cassandra-dtest)
 - Cassandra Testing Guidelines - see TESTING.md

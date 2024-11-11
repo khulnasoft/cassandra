@@ -51,6 +51,7 @@ import org.apache.cassandra.locator.Endpoints;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.locator.ReplicaPlan;
+import org.apache.cassandra.locator.ReplicaPlans;
 import org.apache.cassandra.schema.ColumnMetadata;
 
 public class RowIteratorMergeListener<E extends Endpoints<E>>
@@ -67,8 +68,8 @@ public class RowIteratorMergeListener<E extends Endpoints<E>>
     private final PartitionUpdate.Builder[] repairs;
     private final Row.Builder[] currentRows;
     private final RowDiffListener diffListener;
-    private final ReplicaPlan.ForRead<E, ?> readPlan;
-    private final ReplicaPlan.ForWrite repairPlan;
+    private final ReplicaPlan.ForRead<E> readPlan;
+    private final ReplicaPlan.ForTokenWrite writePlan;
 
     // The partition level deletion for the merge row.
     private DeletionTime partitionLevelDeletion;
@@ -79,18 +80,15 @@ public class RowIteratorMergeListener<E extends Endpoints<E>>
     // For each source, record if there is an open range to send as repair, and from where.
     private final ClusteringBound<?>[] markerToRepair;
 
-    private final ReadRepair<E, ?> readRepair;
+    private final ReadRepair readRepair;
 
-    public RowIteratorMergeListener(DecoratedKey partitionKey, RegularAndStaticColumns columns, boolean isReversed, ReplicaPlan.ForRead<E, ?> readPlan, ReadCommand command, ReadRepair<E, ?> readRepair)
+    public RowIteratorMergeListener(DecoratedKey partitionKey, RegularAndStaticColumns columns, boolean isReversed, ReplicaPlan.ForRead<E> readPlan, ReadCommand command, ReadRepair readRepair)
     {
         this.partitionKey = partitionKey;
         this.columns = columns;
         this.isReversed = isReversed;
         this.readPlan = readPlan;
-        if (readPlan instanceof ReplicaPlan.ForTokenRead)
-            this.repairPlan = ((ReplicaPlan.ForTokenRead)readPlan).repairPlan();
-        else
-            this.repairPlan = ((ReplicaPlan.ForRangeRead)readPlan).repairPlan(partitionKey.getToken());
+        this.writePlan = ReplicaPlans.forReadRepair(partitionKey.getToken(), readPlan);
 
         int size = readPlan.contacts().size();
         this.writeBackTo = new BitSet(size);
@@ -98,18 +96,18 @@ public class RowIteratorMergeListener<E extends Endpoints<E>>
             int i = 0;
             for (Replica replica : readPlan.contacts())
             {
-                if (repairPlan.contacts().endpoints().contains(replica.endpoint()))
+                if (writePlan.contacts().endpoints().contains(replica.endpoint()))
                     writeBackTo.set(i);
                 ++i;
             }
         }
-        // If we are contacting any nodes we didn't read from, we are handling a range movement (the likeliest scenario is a pending replica).
+        // If we are contacting any nodes we didn't read from, we are likely handling a range movement.
         // In this case we need to send all differences to these nodes, as we do not (with present design) know which
         // node they bootstrapped from, and so which data we need to duplicate.
         // In reality, there will be situations where we are simply sending the same number of writes to different nodes
         // and in this case we could probably avoid building a full difference, and only ensure each write makes it to
         // some other node, but it is probably not worth special casing this scenario.
-        this.buildFullDiff = Iterables.any(repairPlan.contacts().endpoints(), e -> !readPlan.contacts().endpoints().contains(e));
+        this.buildFullDiff = Iterables.any(writePlan.contacts().endpoints(), e -> !readPlan.contacts().endpoints().contains(e));
         this.repairs = new PartitionUpdate.Builder[size + (buildFullDiff ? 1 : 0)];
         this.currentRows = new Row.Builder[size];
         this.sourceDeletionTime = new DeletionTime[size];
@@ -185,13 +183,13 @@ public class RowIteratorMergeListener<E extends Endpoints<E>>
         if (writeBackTo.get(i))
         {
             if (repairs[i] == null)
-                repairs[i] = new PartitionUpdate.Builder(command.metadata(), partitionKey, columns, 1);
+                repairs[i] = PartitionUpdate.builder(command.metadata(), partitionKey, columns, 1);
             f.accept(repairs[i]);
         }
         if (buildFullDiff)
         {
             if (repairs[repairs.length - 1] == null)
-                repairs[repairs.length - 1] = new PartitionUpdate.Builder(command.metadata(), partitionKey, columns, 1);
+                repairs[repairs.length - 1] = PartitionUpdate.builder(command.metadata(), partitionKey, columns, 1);
             f.accept(repairs[repairs.length - 1]);
         }
     }
@@ -206,13 +204,13 @@ public class RowIteratorMergeListener<E extends Endpoints<E>>
         }
     }
 
-    public void onMergedRows(Row merged, Row[] versions)
+    public Row onMergedRows(Row merged, Row[] versions)
     {
         // If a row was shadowed post merged, it must be by a partition level or range tombstone, and we handle
         // those case directly in their respective methods (in other words, it would be inefficient to send a row
         // deletion as repair when we know we've already send a partition level or range tombstone that covers it).
         if (merged.isEmpty())
-            return;
+            return merged;
 
         Rows.diff(diffListener, merged, versions);
         for (int i = 0; i < currentRows.length; i++)
@@ -224,6 +222,8 @@ public class RowIteratorMergeListener<E extends Endpoints<E>>
             }
         }
         Arrays.fill(currentRows, null);
+
+        return merged;
     }
 
     private DeletionTime currentDeletion()
@@ -376,12 +376,12 @@ public class RowIteratorMergeListener<E extends Endpoints<E>>
         if (buildFullDiff && repairs[repairs.length - 1] != null)
             fullDiffRepair = repairs[repairs.length - 1].build();
 
-        Map<Replica, Mutation> mutations = Maps.newHashMapWithExpectedSize(repairPlan.contacts().size());
+        Map<Replica, Mutation> mutations = Maps.newHashMapWithExpectedSize(writePlan.contacts().size());
         ObjectIntHashMap<InetAddressAndPort> sourceIds = new ObjectIntHashMap<>(((repairs.length + 1) * 4) / 3);
         for (int i = 0 ; i < readPlan.contacts().size() ; ++i)
             sourceIds.put(readPlan.contacts().get(i).endpoint(), 1 + i);
 
-        for (Replica replica : repairPlan.contacts())
+        for (Replica replica : writePlan.contacts())
         {
             PartitionUpdate update = null;
             int i = -1 + sourceIds.get(replica.endpoint());
@@ -397,6 +397,6 @@ public class RowIteratorMergeListener<E extends Endpoints<E>>
             mutations.put(replica, mutation);
         }
 
-        readRepair.repairPartition(partitionKey, mutations, repairPlan);
+        readRepair.repairPartition(partitionKey, mutations, writePlan);
     }
 }

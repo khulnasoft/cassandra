@@ -31,6 +31,8 @@ import org.apache.cassandra.gms.EndpointState;
 import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.locator.AbstractNetworkTopologySnitch;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.locator.ReplicaCollection;
+import org.apache.cassandra.nodes.Nodes;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -39,6 +41,20 @@ public class DistributedTestSnitch extends AbstractNetworkTopologySnitch
     private static NetworkTopology mapping = null;
     private static final Map<InetAddressAndPort, InetSocketAddress> cache = new ConcurrentHashMap<>();
     private static final Map<InetSocketAddress, InetAddressAndPort> cacheInverse = new ConcurrentHashMap<>();
+    public static volatile InetAddressAndPort sortByProximityAddressOverride = null;
+
+    public <C extends ReplicaCollection<? extends C>> C sortedByProximity(InetAddressAndPort address, C unsortedAddress)
+    {
+        C s;
+        if (sortByProximityAddressOverride != null)
+        {
+            return super.sortedByProximity(sortByProximityAddressOverride, unsortedAddress);
+        }
+        else
+        {
+            return super.sortedByProximity(address, unsortedAddress);
+        }
+    }
 
     public static InetAddressAndPort toCassandraInetAddressAndPort(InetSocketAddress addressAndPort)
     {
@@ -56,7 +72,7 @@ public class DistributedTestSnitch extends AbstractNetworkTopologySnitch
         InetSocketAddress m = cache.get(addressAndPort);
         if (m == null)
         {
-            m = NetworkTopology.addressAndPort(addressAndPort.getAddress(), addressAndPort.getPort());
+            m = NetworkTopology.addressAndPort(addressAndPort.address, addressAndPort.port);
             cache.put(addressAndPort, m);
         }
         return m;
@@ -64,7 +80,7 @@ public class DistributedTestSnitch extends AbstractNetworkTopologySnitch
 
     private Map<InetAddressAndPort, Map<String, String>> savedEndpoints;
     private static final String DEFAULT_DC = "UNKNOWN_DC";
-    private static final String DEFAULT_RACK = "UNKNOWN_RCK"; // TODO must be =< 12 chars to preserve nodetool output required by tests
+    private static final String DEFAULT_RACK = "UNKNOWN_RACK";
 
     public String getRack(InetAddress endpoint)
     {
@@ -101,7 +117,7 @@ public class DistributedTestSnitch extends AbstractNetworkTopologySnitch
         if (epState == null || epState.getApplicationState(state) == null)
         {
             if (savedEndpoints == null)
-                savedEndpoints = SystemKeyspace.loadDcRackInfo();
+                savedEndpoints = Nodes.peers().getDcRackInfo();
             if (savedEndpoints.containsKey(endpoint))
                 return savedEndpoints.get(endpoint).get("data_center");
 

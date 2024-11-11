@@ -19,7 +19,13 @@ package org.apache.cassandra.cql3.statements;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -29,7 +35,13 @@ import com.google.common.collect.ImmutableList;
 import org.apache.cassandra.audit.AuditLogContext;
 import org.apache.cassandra.audit.AuditLogEntryType;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.cql3.*;
+import org.apache.cassandra.cql3.CQLStatement;
+import org.apache.cassandra.cql3.ColumnIdentifier;
+import org.apache.cassandra.cql3.ColumnSpecification;
+import org.apache.cassandra.cql3.PageSize;
+import org.apache.cassandra.cql3.QueryOptions;
+import org.apache.cassandra.cql3.ResultSet;
+import org.apache.cassandra.cql3.SchemaElement;
 import org.apache.cassandra.cql3.functions.FunctionName;
 import org.apache.cassandra.db.KeyspaceNotDefinedException;
 import org.apache.cassandra.db.marshal.ListType;
@@ -41,12 +53,16 @@ import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.exceptions.RequestValidationException;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataOutputBuffer;
-import org.apache.cassandra.schema.*;
+import org.apache.cassandra.schema.IndexMetadata;
+import org.apache.cassandra.schema.KeyspaceMetadata;
+import org.apache.cassandra.schema.Keyspaces;
+import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.schema.SchemaConstants;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.service.pager.PagingState;
-import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
@@ -115,7 +131,7 @@ public abstract class DescribeStatement<T> extends CQLStatement.Raw implements C
     }
 
     @Override
-    public final void validate(ClientState state)
+    public final void validate(QueryState state)
     {
     }
 
@@ -125,7 +141,7 @@ public abstract class DescribeStatement<T> extends CQLStatement.Raw implements C
     }
 
     @Override
-    public final ResultMessage execute(QueryState state, QueryOptions options, Dispatcher.RequestTime requestTime) throws RequestValidationException, RequestExecutionException
+    public final ResultMessage execute(QueryState state, QueryOptions options, long queryStartNanoTime) throws RequestValidationException, RequestExecutionException
     {
         return executeLocally(state, options);
     }
@@ -135,7 +151,11 @@ public abstract class DescribeStatement<T> extends CQLStatement.Raw implements C
     {
         Keyspaces keyspaces = Schema.instance.distributedAndLocalKeyspaces();
         UUID schemaVersion = Schema.instance.getVersion();
-        keyspaces = keyspaces.with(VirtualKeyspaceRegistry.instance.virtualKeyspacesMetadata());
+
+        keyspaces = Keyspaces.builder()
+                             .add(keyspaces)
+                             .add(VirtualKeyspaceRegistry.instance.virtualKeyspacesMetadata())
+                             .build();
 
         PagingState pagingState = options.getPagingState();
 
@@ -154,14 +174,17 @@ public abstract class DescribeStatement<T> extends CQLStatement.Raw implements C
         //
 
         long offset = getOffset(pagingState, schemaVersion);
-        int pageSize = options.getPageSize();
+        PageSize pageSize = options.getPageSize();
+
+        if (pageSize.isDefined() && pageSize.getUnit() != PageSize.PageUnit.ROWS)
+            throw new InvalidRequestException("Paging in bytes is not supported for describe statement. Please specify the page size in rows.");
 
         Stream<? extends T> stream = describe(state.getClientState(), keyspaces);
 
         if (offset > 0L)
             stream = stream.skip(offset);
-        if (pageSize > 0)
-            stream = stream.limit(pageSize);
+        if (pageSize.isDefined())
+            stream = stream.limit(pageSize.getSize());
 
         List<List<ByteBuffer>> rows = stream.map(e -> toRow(e, includeInternalDetails))
                                             .collect(Collectors.toList());
@@ -169,8 +192,10 @@ public abstract class DescribeStatement<T> extends CQLStatement.Raw implements C
         ResultSet.ResultMetadata resultMetadata = new ResultSet.ResultMetadata(metadata(state.getClientState()));
         ResultSet result = new ResultSet(resultMetadata, rows);
 
-        if (pageSize > 0 && rows.size() == pageSize)
-            result.metadata.setHasMorePages(getPagingState(offset + pageSize, schemaVersion));
+        if (pageSize.isDefined() && rows.size() == pageSize.getSize())
+        {
+            result.metadata.setHasMorePages(getPagingState(offset + pageSize.getSize(), schemaVersion));
+        }
 
         return new ResultMessage.Rows(result);
     }
@@ -371,7 +396,7 @@ public abstract class DescribeStatement<T> extends CQLStatement.Raw implements C
                 return ImmutableList.of(bytes(element.elementKeyspaceQuotedIfNeeded()),
                                         bytes(element.elementType().toString()),
                                         bytes(element.elementNameQuotedIfNeeded()),
-                                        bytes(element.toCqlString(true, withInternals, false)));
+                                        bytes(element.toCqlString(withInternals, false)));
             }
         };
     }
@@ -421,7 +446,7 @@ public abstract class DescribeStatement<T> extends CQLStatement.Raw implements C
             return ImmutableList.of(bytes(element.elementKeyspaceQuotedIfNeeded()),
                                     bytes(element.elementType().toString()),
                                     bytes(element.elementNameQuotedIfNeeded()),
-                                    bytes(element.toCqlString(true, withInternals, false)));
+                                    bytes(element.toCqlString(withInternals, false)));
         }
     }
 
@@ -571,7 +596,7 @@ public abstract class DescribeStatement<T> extends CQLStatement.Raw implements C
                     }
 
                     @Override
-                    public String toCqlString(boolean withWarnings, boolean withInternals, boolean ifNotExists)
+                    public String toCqlString(boolean withInternals, boolean ifNotExists)
                     {
                         return index.toCqlString(table, ifNotExists);
                     }

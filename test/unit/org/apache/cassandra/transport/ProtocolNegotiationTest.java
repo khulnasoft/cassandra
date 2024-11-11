@@ -26,8 +26,8 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.Session;
+import com.khulnasoft.driver.core.Cluster;
+import com.khulnasoft.driver.core.Session;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
@@ -36,14 +36,14 @@ import org.apache.cassandra.transport.messages.OptionsMessage;
 import org.apache.cassandra.transport.messages.QueryMessage;
 import org.apache.cassandra.transport.messages.StartupMessage;
 
-import static com.datastax.driver.core.ProtocolVersion.NEWEST_BETA;
-import static com.datastax.driver.core.ProtocolVersion.NEWEST_SUPPORTED;
-import static com.datastax.driver.core.ProtocolVersion.V1;
-import static com.datastax.driver.core.ProtocolVersion.V2;
-import static com.datastax.driver.core.ProtocolVersion.V3;
-import static com.datastax.driver.core.ProtocolVersion.V4;
-import static com.datastax.driver.core.ProtocolVersion.V5;
-import static com.datastax.driver.core.ProtocolVersion.V6;
+import static com.khulnasoft.driver.core.ProtocolVersion.NEWEST_BETA;
+import static com.khulnasoft.driver.core.ProtocolVersion.NEWEST_SUPPORTED;
+import static com.khulnasoft.driver.core.ProtocolVersion.V1;
+import static com.khulnasoft.driver.core.ProtocolVersion.V2;
+import static com.khulnasoft.driver.core.ProtocolVersion.V3;
+import static com.khulnasoft.driver.core.ProtocolVersion.V4;
+import static com.khulnasoft.driver.core.ProtocolVersion.V5;
+import static com.khulnasoft.driver.core.ProtocolVersion.V6;
 import static org.apache.cassandra.transport.messages.StartupMessage.CQL_VERSION;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -156,8 +156,8 @@ public class ProtocolNegotiationTest extends CQLTester
         }
     }
 
-    private void testConnection(com.datastax.driver.core.ProtocolVersion requestedVersion,
-                                com.datastax.driver.core.ProtocolVersion expectedVersion)
+    private void testConnection(com.khulnasoft.driver.core.ProtocolVersion requestedVersion,
+                                com.khulnasoft.driver.core.ProtocolVersion expectedVersion)
     {
         boolean expectError = requestedVersion != null && requestedVersion != expectedVersion;
         Cluster.Builder builder = Cluster.builder()

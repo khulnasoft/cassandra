@@ -24,19 +24,16 @@ import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.dht.ByteOrderedPartitioner;
-import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.service.StorageService;
-
-import static org.apache.cassandra.ServerTestUtils.daemonInitialization;
 
 public class UserTypesTest extends CQLTester
 {
     @BeforeClass
     public static void setUpClass()     // overrides CQLTester.setUpClass()
     {
-        daemonInitialization();
         // Selecting partitioner for a table is not exposed on CREATE TABLE.
         StorageService.instance.setPartitionerUnsafe(ByteOrderedPartitioner.instance);
+
         prepareServer();
     }
 
@@ -66,7 +63,7 @@ public class UserTypesTest extends CQLTester
                              "INSERT INTO %s (k, t) VALUES (0, ?)",
                              userType("a", 1, "b", tuple(1, "1", 1.0, 1)));
 
-        assertInvalidMessage("Invalid user type literal for t: field b is not of type frozen<tuple<int, text, double>>",
+        assertInvalidMessage("Invalid user type literal for t: field b is not of type tuple<int, text, double>",
                              "INSERT INTO %s (k, t) VALUES (0, {a: 1, b: (1, '1', 1.0, 1)})");
     }
 
@@ -106,54 +103,26 @@ public class UserTypesTest extends CQLTester
     }
 
     @Test
-    public void testDescendingOrderingOfUserTypesIsSupported() throws Throwable
-    {
-        String myType = createType("CREATE TYPE %s (x double)");
-        createTable("CREATE TABLE %s (k int, v frozen<" + myType + ">, b boolean static, PRIMARY KEY (k, v)) WITH CLUSTERING ORDER BY (v DESC)");
-
-        execute("INSERT INTO %s(k, v) VALUES (?, {x:?})", 1, -104.99251);
-        execute("UPDATE %s SET b = ? WHERE k = ?", true, 1);
-
-        beforeAndAfterFlush(() ->
-            assertRows(execute("SELECT v.x FROM %s WHERE k = ? AND v = {x:?}", 1, -104.99251),
-                       row(-104.99251)
-            )
-        );
-    }
-
-    @Test
     public void testInvalidUDTStatements() throws Throwable
     {
         String typename = createType("CREATE TYPE %s (a int)");
         String myType = KEYSPACE + '.' + typename;
 
         // non-frozen UDTs in a table PK
-        assertInvalidMessage("Invalid non-frozen user-defined type \"" + myType + "\" for PRIMARY KEY column 'k'",
+        assertInvalidMessage("for column k: non-frozen user types are not supported for PRIMARY KEY columns",
                 "CREATE TABLE " + KEYSPACE + ".wrong (k " + myType + " PRIMARY KEY , v int)");
-        assertInvalidMessage("Invalid non-frozen user-defined type \"" + myType + "\" for PRIMARY KEY column 'k2'",
+        assertInvalidMessage("for column k2: non-frozen user types are not supported for PRIMARY KEY columns",
                 "CREATE TABLE " + KEYSPACE + ".wrong (k1 int, k2 " + myType + ", v int, PRIMARY KEY (k1, k2))");
 
         // non-frozen UDTs in a collection
-        assertInvalidMessage("Non-frozen UDTs are not allowed inside collections: list<" + myType + ">",
+        assertInvalidMessage("for column v: non-frozen user types are only supported at top-level",
                 "CREATE TABLE " + KEYSPACE + ".wrong (k int PRIMARY KEY, v list<" + myType + ">)");
-        assertInvalidMessage("Non-frozen UDTs are not allowed inside collections: set<" + myType + ">",
+        assertInvalidMessage("for column v: non-frozen user types are only supported at top-level",
                 "CREATE TABLE " + KEYSPACE + ".wrong (k int PRIMARY KEY, v set<" + myType + ">)");
-        assertInvalidMessage("Non-frozen UDTs are not allowed inside collections: map<" + myType + ", int>",
+        assertInvalidMessage("for column v: non-frozen user types are only supported at top-level",
                 "CREATE TABLE " + KEYSPACE + ".wrong (k int PRIMARY KEY, v map<" + myType + ", int>)");
-        assertInvalidMessage("Non-frozen UDTs are not allowed inside collections: map<int, " + myType + ">",
+        assertInvalidMessage("for column v: non-frozen user types are only supported at top-level",
                 "CREATE TABLE " + KEYSPACE + ".wrong (k int PRIMARY KEY, v map<int, " + myType + ">)");
-
-        // non-frozen UDT in a collection (as part of a UDT definition)
-        assertInvalidMessage("Non-frozen UDTs are not allowed inside collections: list<" + myType + ">",
-                "CREATE TYPE " + KEYSPACE + ".wrong (a int, b list<" + myType + ">)");
-
-        // non-frozen UDT in a UDT
-        assertInvalidMessage("A user type cannot contain non-frozen UDTs",
-                "CREATE TYPE " + KEYSPACE + ".wrong (a int, b " + myType + ")");
-
-        String ut1 = createType(KEYSPACE, "CREATE TYPE %s (a int)");
-        assertInvalidMessage("A user type cannot contain non-frozen UDTs",
-                "ALTER TYPE " + KEYSPACE + "." + ut1 + " ADD b " + myType);
 
         // referencing a UDT in another keyspace
         assertInvalidMessage("Statement on keyspace " + KEYSPACE + " cannot refer to a user type in keyspace otherkeyspace;" +
@@ -196,13 +165,8 @@ public class UserTypesTest extends CQLTester
         // non-frozen UDT with non-frozen nested collection
         String typename2 = createType("CREATE TYPE %s (bar int, foo list<int>)");
         String myType2 = KEYSPACE + '.' + typename2;
-        assertInvalidMessage("Non-frozen UDTs with nested non-frozen collections are not supported",
+        assertInvalidMessage("for column v: non-frozen collections are only supported at top-level",
                 "CREATE TABLE " + KEYSPACE + ".wrong (k int PRIMARY KEY, v " + myType2 + ")");
-
-        String userType = createType("CREATE TYPE %s (userids SET<UUID>)");
-        createTable("CREATE TABLE %s (id int PRIMARY KEY)");
-        assertInvalidMessage("Non-frozen UDTs with nested non-frozen collections are not supported for column my_type",
-                             "alter TABLE %s add my_type " + userType);
     }
 
     @Test
@@ -531,6 +495,39 @@ public class UserTypesTest extends CQLTester
     }
 
     /**
+     * This is a test for CNDB-7789 that makes sure we reject anything non-frozen nested inside a user type, even if
+     * it's done by an ALTER TYPE.
+     */
+    @Test
+    public void testCreateInvalidNonFrozenNestedUserType() throws Throwable
+    {
+        String inner = createType("CREATE TYPE %s (a int)");
+        String outer1 = createType("CREATE TYPE %s (b int, c " + typeWithKs(inner) + ')');
+
+        // While outer1 can be created, it cannot be used as a column type.
+        assertInvalidMessage("non-frozen user types are only supported at top-level",
+                             "CREATE TABLE " + keyspace() + ".failed (k int PRIMARY KEY, u " + typeWithKs(outer1) + ')');
+
+        // Of course, it's allowed if frozen
+        createTable("CREATE TABLE %s (k int PRIMARY KEY, u frozen<" + typeWithKs(outer1) + ">)");
+
+        // It's also allowed if we created the outer type with the inner one frozen
+        String outer2 = createType("CREATE TYPE %s (b int, c frozen<" + typeWithKs(inner) + ">)");
+        createTable("CREATE TABLE %s (k int PRIMARY KEY, u frozen<" + typeWithKs(outer2) + ">)");
+
+        // Try adding a non-frozen inner UDT with ALTER TYPE after it is used by a table
+        String outer3 = createType("CREATE TYPE %s (b int)");
+        createTable("CREATE TABLE %s (k int PRIMARY KEY, u " + typeWithKs(outer3) + ')');
+
+        assertInvalidMessage("non-frozen user types are only supported at top-level",
+                             "ALTER TYPE " + typeWithKs(outer3) + " ADD c " + typeWithKs(inner));
+
+        // Also try with a collection
+        assertInvalidMessage("non-frozen collections are only supported at top-level",
+                             "ALTER TYPE " + typeWithKs(outer3) + " ADD c list<text>");
+    }
+
+    /**
      * Migrated from cql_tests.py:TestCQL.user_types_test()
      */
     @Test
@@ -552,20 +549,6 @@ public class UserTypesTest extends CQLTester
 
         // TODO: deserialize the value here and check it 's right.
         execute("SELECT addresses FROM %s WHERE id = ? ", userID_1);
-    }
-
-    @Test
-    public void testCreateTypeWithUndesiredFieldType() throws Throwable
-    {
-        String typeName = createTypeName();
-        assertInvalidMessage("A user type cannot contain counters", "CREATE TYPE " + typeWithKs(typeName) + " (f counter)");
-    }
-
-    @Test
-    public void testAlterTypeWithUndesiredFieldType() throws Throwable
-    {
-        String typeName = createType("CREATE TYPE %s (a int)");
-        assertInvalidMessage("A user type cannot contain counters", "ALTER TYPE " + typeWithKs(typeName) + " ADD f counter");
     }
 
     /**
@@ -973,36 +956,5 @@ public class UserTypesTest extends CQLTester
     private String typeWithKs(String type1)
     {
         return keyspace() + '.' + type1;
-    }
-
-    @Test
-    public void testAlteringTypeWithIfNotExits() throws Throwable
-    {
-        String columnType = typeWithKs(createType("CREATE TYPE %s (a int)"));
-
-        createTable("CREATE TABLE %s (k int PRIMARY KEY, y frozen<" + columnType + ">)");
-        execute("ALTER TYPE " + columnType + " ADD IF NOT EXISTS a int");
-
-        execute("INSERT INTO %s (k, y) VALUES(?, ?)", 1, userType("a", 1));
-        assertRows(execute("SELECT * FROM %s"), row(1, userType("a", 1)));
-
-        assertInvalidThrowMessage(String.format("Cannot add field %s to type %s: a field with name %s already exists", "a", columnType, "a"),
-                                  InvalidRequestException.class,
-                                  "ALTER TYPE " + columnType + " ADD a int");
-    }
-
-    @Test
-    public void testAlteringTypeRenameWithIfExists() throws Throwable
-    {
-        String columnType = typeWithKs(createType("CREATE TYPE %s (a int)"));
-        createTable("CREATE TABLE %s (k int PRIMARY KEY, y frozen<" + columnType + ">)");
-        execute("ALTER TYPE " + columnType + " RENAME IF EXISTS a TO z AND b TO Y;");
-
-        execute("INSERT INTO %s (k, y) VALUES(?, ?)", 1, userType("z", 1));
-        assertRows(execute("SELECT * FROM %s"), row(1, userType("z", 1)));
-
-        assertInvalidThrowMessage(String.format("Unkown field %s in user type %s", "a", columnType),
-                                  InvalidRequestException.class,
-                                  "ALTER TYPE " + columnType + " RENAME a TO z;");
     }
 }

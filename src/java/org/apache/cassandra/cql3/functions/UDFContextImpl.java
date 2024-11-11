@@ -22,97 +22,99 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.function.Supplier;
-
-import com.google.common.base.Suppliers;
-
-import org.apache.cassandra.cql3.functions.types.DataType;
-import org.apache.cassandra.cql3.functions.types.TupleType;
-import org.apache.cassandra.cql3.functions.types.TupleValue;
-import org.apache.cassandra.cql3.functions.types.UDTValue;
-import org.apache.cassandra.cql3.functions.types.UserType;
 
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.schema.CQLTypeParser;
 import org.apache.cassandra.schema.KeyspaceMetadata;
-import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.cql3.functions.types.*;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.JavaDriverUtils;
 
 /**
  * Package private implementation of {@link UDFContext}
  */
 public final class UDFContextImpl implements UDFContext
 {
-    private final Map<String, UDFDataType> byName = new HashMap<>();
-    private final List<UDFDataType> argTypes;
-    private final UDFDataType returnType;
-    private final String keyspace;
+    private final KeyspaceMetadata keyspaceMetadata;
+    private final Map<String, TypeCodec<Object>> byName = new HashMap<>();
+    private final TypeCodec<Object>[] argCodecs;
+    private final TypeCodec<Object> returnCodec;
 
-    /*
-        metadata can not be retrieved within the constructor as the keyspace itself may be being
-        constructed and an NPE will result.
-     */
-    private final Supplier<KeyspaceMetadata> metadata;
-
-    UDFContextImpl(List<ColumnIdentifier> argNames,
-                   List<UDFDataType> argTypes,
-                   UDFDataType returnType,
-                   String keyspace)
+    UDFContextImpl(List<ColumnIdentifier> argNames, TypeCodec<Object>[] argCodecs, TypeCodec<Object> returnCodec,
+                   KeyspaceMetadata keyspaceMetadata)
     {
         for (int i = 0; i < argNames.size(); i++)
-            byName.put(argNames.get(i).toString(), argTypes.get(i));
-        this.argTypes = argTypes;
-        this.returnType = returnType;
-        this.keyspace = keyspace;
-        this.metadata = Suppliers.memoize(() -> Schema.instance.getKeyspaceMetadata(keyspace));
+            byName.put(argNames.get(i).toString(), argCodecs[i]);
+        this.argCodecs = argCodecs;
+        this.returnCodec = returnCodec;
+        this.keyspaceMetadata = keyspaceMetadata;
     }
 
     public UDTValue newArgUDTValue(String argName)
     {
-        return newUDTValue(getArgumentTypeByName(argName).toDataType());
+        return newUDTValue(codecFor(argName));
     }
 
     public UDTValue newArgUDTValue(int argNum)
     {
-        return newUDTValue(getArgumentTypeByIndex(argNum).toDataType());
+        return newUDTValue(codecFor(argNum));
     }
 
     public UDTValue newReturnUDTValue()
     {
-        return newUDTValue(returnType.toDataType());
+        return newUDTValue(returnCodec);
     }
 
     public UDTValue newUDTValue(String udtName)
     {
-        Optional<org.apache.cassandra.db.marshal.UserType> udtType = metadata.get().types.get(ByteBufferUtil.bytes(udtName));
-        DataType dataType = JavaDriverUtils.driverType(udtType.orElseThrow(
-                () -> new IllegalArgumentException("No UDT named " + udtName + " in keyspace " + keyspace)
-        ));
+        Optional<org.apache.cassandra.db.marshal.UserType> udtType = keyspaceMetadata.types.get(ByteBufferUtil.bytes(udtName));
+        DataType dataType = UDHelper.driverType(udtType.orElseThrow(
+                () -> new IllegalArgumentException("No UDT named " + udtName + " in keyspace " + keyspaceMetadata.name)
+            ));
         return newUDTValue(dataType);
     }
 
     public TupleValue newArgTupleValue(String argName)
     {
-        return newTupleValue(getArgumentTypeByName(argName).toDataType());
+        return newTupleValue(codecFor(argName));
     }
 
     public TupleValue newArgTupleValue(int argNum)
     {
-        return newTupleValue(getArgumentTypeByIndex(argNum).toDataType());
+        return newTupleValue(codecFor(argNum));
     }
 
     public TupleValue newReturnTupleValue()
     {
-        return newTupleValue(returnType.toDataType());
+        return newTupleValue(returnCodec);
     }
 
     public TupleValue newTupleValue(String cqlDefinition)
     {
-        AbstractType<?> abstractType = CQLTypeParser.parse(keyspace, cqlDefinition, metadata.get().types);
-        DataType dataType = JavaDriverUtils.driverType(abstractType);
+        AbstractType<?> abstractType = CQLTypeParser.parse(keyspaceMetadata.name, cqlDefinition, keyspaceMetadata.types);
+        DataType dataType = UDHelper.driverType(abstractType);
         return newTupleValue(dataType);
+    }
+
+    private TypeCodec<Object> codecFor(int argNum)
+    {
+        if (argNum < 0 || argNum >= argCodecs.length)
+            throw new IllegalArgumentException("Function does not declare an argument with index " + argNum);
+        return argCodecs[argNum];
+    }
+
+    private TypeCodec<Object> codecFor(String argName)
+    {
+        TypeCodec<Object> codec = byName.get(argName);
+        if (codec == null)
+            throw new IllegalArgumentException("Function does not declare an argument named '" + argName + '\'');
+        return codec;
+    }
+
+    private static UDTValue newUDTValue(TypeCodec<Object> codec)
+    {
+        DataType dataType = codec.getCqlType();
+        return newUDTValue(dataType);
     }
 
     private static UDTValue newUDTValue(DataType dataType)
@@ -123,26 +125,17 @@ public final class UDFContextImpl implements UDFContext
         return userType.newValue();
     }
 
+    private static TupleValue newTupleValue(TypeCodec<Object> codec)
+    {
+        DataType dataType = codec.getCqlType();
+        return newTupleValue(dataType);
+    }
+
     private static TupleValue newTupleValue(DataType dataType)
     {
         if (!(dataType instanceof TupleType))
             throw new IllegalStateException("Function argument is not a tuple type but a " + dataType.getName());
         TupleType tupleType = (TupleType) dataType;
         return tupleType.newValue();
-    }
-
-    private UDFDataType getArgumentTypeByIndex(int index)
-    {
-        if (index < 0 || index >= argTypes.size())
-            throw new IllegalArgumentException("Function does not declare an argument with index " + index);
-        return argTypes.get(index);
-    }
-
-    private UDFDataType getArgumentTypeByName(String argName)
-    {
-        UDFDataType arg = byName.get(argName);
-        if (arg == null)
-            throw new IllegalArgumentException("Function does not declare an argument named '" + argName + '\'');
-        return arg;
     }
 }

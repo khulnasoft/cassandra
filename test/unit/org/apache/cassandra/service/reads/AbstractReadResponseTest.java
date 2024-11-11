@@ -31,7 +31,6 @@ import org.junit.BeforeClass;
 import org.junit.Ignore;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.ColumnIdentifier;
@@ -73,7 +72,7 @@ import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.service.QueryInfoTracker;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -101,7 +100,7 @@ public abstract class AbstractReadResponseTest
     public static ColumnMetadata m;
 
     public static DecoratedKey dk;
-    static long nowInSec;
+    static int nowInSec;
 
     static final InetAddressAndPort EP1;
     static final InetAddressAndPort EP2;
@@ -150,7 +149,7 @@ public abstract class AbstractReadResponseTest
                      .addPartitionKeyColumn("k", ByteType.instance)
                      .addRegularColumn("m", MapType.getInstance(IntegerType.instance, IntegerType.instance, true));
 
-        ServerTestUtils.prepareServerNoRegister();
+        SchemaLoader.prepareServer();
         SchemaLoader.createKeyspace(KEYSPACE1, KeyspaceParams.simple(2), builder1, builder2);
         SchemaLoader.createKeyspace(KEYSPACE3, KeyspaceParams.simple(4), builder3);
 
@@ -163,13 +162,11 @@ public abstract class AbstractReadResponseTest
         cfs3 = ks3.getColumnFamilyStore(CF_STANDARD);
         cfm3 = cfs3.metadata();
         m = cfm2.getColumn(new ColumnIdentifier("m", false));
-        ServerTestUtils.markCMS();
     }
 
     @Before
     public void setUp() throws Exception
     {
-        ServerTestUtils.resetCMS();
         dk = Util.dk("key1");
         nowInSec = FBUtilities.nowInSeconds();
     }
@@ -254,7 +251,6 @@ public abstract class AbstractReadResponseTest
                                 : ReadResponse.createRemoteDataResponse(data, repairedDataDigest, hasPendingRepair, command, fromVersion);
         return Message.builder(READ_REQ, response)
                       .from(from)
-                      .withEpoch(ClusterMetadata.current().epoch)
                       .build();
     }
 
@@ -277,16 +273,16 @@ public abstract class AbstractReadResponseTest
         return response(command, from, data, false, MessagingService.current_version, ByteBufferUtil.EMPTY_BYTE_BUFFER, false);
     }
 
-    public RangeTombstone tombstone(Object start, Object end, long markedForDeleteAt, long localDeletionTime)
+    public RangeTombstone tombstone(Object start, Object end, long markedForDeleteAt, int localDeletionTime)
     {
         return tombstone(start, true, end, true, markedForDeleteAt, localDeletionTime);
     }
 
-    public RangeTombstone tombstone(Object start, boolean inclusiveStart, Object end, boolean inclusiveEnd, long markedForDeleteAt, long localDeletionTime)
+    public RangeTombstone tombstone(Object start, boolean inclusiveStart, Object end, boolean inclusiveEnd, long markedForDeleteAt, int localDeletionTime)
     {
         ClusteringBound<?> startBound = rtBound(start, true, inclusiveStart);
         ClusteringBound<?> endBound = rtBound(end, false, inclusiveEnd);
-        return new RangeTombstone(Slice.make(startBound, endBound), DeletionTime.build(markedForDeleteAt, localDeletionTime));
+        return new RangeTombstone(Slice.make(startBound, endBound), new DeletionTime(markedForDeleteAt, localDeletionTime));
     }
 
     public ClusteringBound<?> rtBound(Object value, boolean isStart, boolean inclusive)
@@ -306,19 +302,19 @@ public abstract class AbstractReadResponseTest
         return BufferClusteringBoundary.create(kind, cfm.comparator.make(value).getBufferArray());
     }
 
-    public RangeTombstoneBoundMarker marker(Object value, boolean isStart, boolean inclusive, long markedForDeleteAt, long localDeletionTime)
+    public RangeTombstoneBoundMarker marker(Object value, boolean isStart, boolean inclusive, long markedForDeleteAt, int localDeletionTime)
     {
-        return new RangeTombstoneBoundMarker(rtBound(value, isStart, inclusive), DeletionTime.build(markedForDeleteAt, localDeletionTime));
+        return new RangeTombstoneBoundMarker(rtBound(value, isStart, inclusive), new DeletionTime(markedForDeleteAt, localDeletionTime));
     }
 
-    public RangeTombstoneBoundaryMarker boundary(Object value, boolean inclusiveOnEnd, long markedForDeleteAt1, long localDeletionTime1, long markedForDeleteAt2, long localDeletionTime2)
+    public RangeTombstoneBoundaryMarker boundary(Object value, boolean inclusiveOnEnd, long markedForDeleteAt1, int localDeletionTime1, long markedForDeleteAt2, int localDeletionTime2)
     {
         return new RangeTombstoneBoundaryMarker(rtBoundary(value, inclusiveOnEnd),
-                                                DeletionTime.build(markedForDeleteAt1, localDeletionTime1),
-                                                DeletionTime.build(markedForDeleteAt2, localDeletionTime2));
+                                                new DeletionTime(markedForDeleteAt1, localDeletionTime1),
+                                                new DeletionTime(markedForDeleteAt2, localDeletionTime2));
     }
 
-    public UnfilteredPartitionIterator fullPartitionDelete(TableMetadata table, DecoratedKey dk, long timestamp, long nowInSec)
+    public UnfilteredPartitionIterator fullPartitionDelete(TableMetadata table, DecoratedKey dk, long timestamp, int nowInSec)
     {
         return new SingletonUnfilteredPartitionIterator(PartitionUpdate.fullPartitionDelete(table, dk, timestamp, nowInSec).unfilteredIterator());
     }
@@ -348,5 +344,10 @@ public abstract class AbstractReadResponseTest
             }
         };
         return new SingletonUnfilteredPartitionIterator(rowIter);
+    }
+
+    public QueryInfoTracker.ReadTracker noopReadTracker()
+    {
+        return QueryInfoTracker.ReadTracker.NOOP;
     }
 }

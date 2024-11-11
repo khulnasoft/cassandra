@@ -19,6 +19,14 @@
 package org.apache.cassandra.index.sai.cql.types.multicell;
 
 import org.apache.cassandra.index.sai.cql.types.DataSet;
+import org.apache.cassandra.index.sai.cql.types.QuerySet;
+
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.stream.Collectors;
+
+import static org.apache.cassandra.index.sai.cql.types.IndexingTypeSupport.NUMBER_OF_VALUES;
 
 public class TupleDataSet extends FrozenTupleDataSet
 {

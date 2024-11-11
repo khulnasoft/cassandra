@@ -21,18 +21,18 @@ import java.io.FileNotFoundException;
 import java.net.SocketException;
 import java.nio.file.FileSystemException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableSet;
 
 import org.apache.cassandra.exceptions.UnrecoverableIllegalStateException;
-import org.apache.cassandra.metrics.StorageMetrics;
-import org.apache.cassandra.tracing.Tracing;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,9 +44,6 @@ import org.apache.cassandra.io.FSError;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
-
-import static org.apache.cassandra.config.CassandraRelevantProperties.PRINT_HEAP_HISTOGRAM_ON_OUT_OF_MEMORY_ERROR;
 
 /**
  * Responsible for deciding whether to kill the JVM if it gets in an "unstable" state (think OOM).
@@ -54,28 +51,40 @@ import static org.apache.cassandra.config.CassandraRelevantProperties.PRINT_HEAP
 public final class JVMStabilityInspector
 {
     private static final Logger logger = LoggerFactory.getLogger(JVMStabilityInspector.class);
-    private static Killer killer = new Killer();
+    private static JVMKiller killer = new Killer();
 
     private static Object lock = new Object();
     private static boolean printingHeapHistogram;
+    private static volatile Consumer<Throwable> globalHandler;
+    private static volatile Consumer<Throwable> diskHandler;
+    private static volatile Function<String, Consumer<Throwable>> commitLogHandler;
+    private static final List<Pair<Thread, Runnable>> shutdownHooks = new ArrayList<>(1);
 
     // It is used for unit test
     public static OnKillHook killerHook;
 
+    static
+    {
+        setGlobalErrorHandler(JVMStabilityInspector::defaultGlobalErrorHandler);
+        setDiskErrorHandler(JVMStabilityInspector::inspectDiskError);
+        setCommitLogErrorHandler(JVMStabilityInspector::createDefaultCommitLogErrorHandler);
+    }
+
     private JVMStabilityInspector() {}
 
-    public static void uncaughtException(Thread thread, Throwable t)
+    public static void setGlobalErrorHandler(Consumer<Throwable> errorHandler)
     {
-        try { StorageMetrics.uncaughtExceptions.inc(); } catch (Throwable ignore) { /* might not be initialised */ }
-        logger.error("Exception in thread {}", thread, t);
-        Tracing.trace("Exception in thread {}", thread, t);
-        for (Throwable t2 = t; t2 != null; t2 = t2.getCause())
-        {
-            // make sure error gets logged exactly once.
-            if (t2 != t && (t2 instanceof FSError || t2 instanceof CorruptSSTableException))
-                logger.error("Exception in thread {}", thread, t2);
-        }
-        JVMStabilityInspector.inspectThrowable(t);
+        globalHandler = errorHandler;
+    }
+
+    public static void setDiskErrorHandler(Consumer<Throwable> errorHandler)
+    {
+        diskHandler = errorHandler;
+    }
+
+    public static void setCommitLogErrorHandler(Function<String, Consumer<Throwable>> errorHandler)
+    {
+        commitLogHandler = errorHandler;
     }
 
     /**
@@ -86,12 +95,12 @@ public final class JVMStabilityInspector
      */
     public static void inspectThrowable(Throwable t) throws OutOfMemoryError
     {
-        inspectThrowable(t, JVMStabilityInspector::inspectDiskError);
+        inspectThrowable(t, diskHandler);
     }
 
-    public static void inspectCommitLogThrowable(Throwable t)
+    public static void inspectCommitLogThrowable(String message, Throwable t)
     {
-        inspectThrowable(t, JVMStabilityInspector::inspectCommitLogError);
+        inspectThrowable(t, commitLogHandler.apply(message));
     }
 
     private static void inspectDiskError(Throwable t)
@@ -102,12 +111,34 @@ public final class JVMStabilityInspector
             FileUtils.handleFSError((FSError) t);
     }
 
-    public static void inspectThrowable(Throwable t, Consumer<Throwable> fn) throws OutOfMemoryError
+    public static void inspectThrowable(Throwable t, Consumer<Throwable> additionalHandler) throws OutOfMemoryError
+    {
+        Set<Integer> throwables = new HashSet<>();
+        while (true)
+        {
+            if (!throwables.add(System.identityHashCode(t)))
+            {
+                logger.error("Recursive cause chain", t);
+                throw new IllegalStateException("Recursive cause chain detected", t);
+            }
+            if (t == null)
+                return;
+            additionalHandler.accept(t);
+            globalHandler.accept(t);
+
+            for (Throwable suppressed : t.getSuppressed())
+                inspectThrowable(suppressed, additionalHandler);
+
+            t = t.getCause();
+        }
+    }
+
+    private static void defaultGlobalErrorHandler(Throwable t)
     {
         boolean isUnstable = false;
         if (t instanceof OutOfMemoryError)
         {
-            if (PRINT_HEAP_HISTOGRAM_ON_OUT_OF_MEMORY_ERROR.getBoolean())
+            if (Boolean.getBoolean("cassandra.printHeapHistogramOnOutOfMemoryError"))
             {
                 // We want to avoid printing multiple time the heap histogram if multiple OOM errors happen in a short
                 // time span.
@@ -122,7 +153,7 @@ public final class JVMStabilityInspector
 
             logger.error("OutOfMemory error letting the JVM handle the error:", t);
 
-            StorageService.instance.removeShutdownHook();
+            removeShutdownHooks();
 
             forceHeapSpaceOomMaybe((OutOfMemoryError) t);
 
@@ -135,15 +166,6 @@ public final class JVMStabilityInspector
             isUnstable = true;
         }
 
-        // Anything other than an OOM, we should try and heap dump to capture what's going on if configured to do so
-        HeapUtils.maybeCreateHeapDump();
-
-        if (t instanceof InterruptedException)
-            throw new UncheckedInterruptedException((InterruptedException) t);
-
-        if (t instanceof UncheckedInterruptedException)
-            throw (UncheckedInterruptedException)t;
-
         if (DatabaseDescriptor.getDiskFailurePolicy() == Config.DiskFailurePolicy.die)
             if (t instanceof FSError || t instanceof CorruptSSTableException)
                 isUnstable = true;
@@ -154,63 +176,56 @@ public final class JVMStabilityInspector
                 isUnstable = true;
 
         if (isUnstable)
-        {
-            if (!StorageService.instance.isDaemonSetupCompleted())
-                FileUtils.handleStartupFSError(t);
-            killer.killCurrentJVM(t);
-        }
-
-        try
-        {
-            fn.accept(t);
-        }
-        catch (Exception | Error e)
-        {
-            logger.warn("Unexpected error while handling unexpected error", e);
-        }
-
-        if (t.getCause() != null)
-            inspectThrowable(t.getCause(), fn);
+            killer.killJVM(t);
     }
 
-    private static final Set<String> FORCE_HEAP_OOM_IGNORE_SET = ImmutableSet.of("Java heap space", "GC Overhead limit exceeded");
-
     /**
-     * Intentionally produce a heap space OOM upon seeing a non heap memory OOM.
+     * Intentionally produce a heap space OOM upon seeing a Direct buffer memory OOM.
      * Direct buffer OOM cannot trigger JVM OOM error related options,
      * e.g. OnOutOfMemoryError, HeapDumpOnOutOfMemoryError, etc.
-     * See CASSANDRA-15214 and CASSANDRA-17128 for more details
+     * See CASSANDRA-15214 for more details
      */
     @Exclude // Exclude from just in time compilation.
     private static void forceHeapSpaceOomMaybe(OutOfMemoryError oom)
     {
-        if (FORCE_HEAP_OOM_IGNORE_SET.contains(oom.getMessage()))
-            return;
-        logger.error("Force heap space OutOfMemoryError in the presence of", oom);
-        // Start to produce heap space OOM forcibly.
-        List<long[]> ignored = new ArrayList<>();
-        while (true)
+        // See the oom thrown from java.nio.Bits.reserveMemory.
+        // In jdk 13 and up, the message is "Cannot reserve XX bytes of direct buffer memory (...)"
+        // In jdk 11 and below, the message is "Direct buffer memory"
+        if ((oom.getMessage() != null && oom.getMessage().toLowerCase().contains("direct buffer memory")) ||
+            Arrays.stream(oom.getStackTrace()).anyMatch(x -> x.getClassName().equals("java.nio.Bits")
+                                                             && x.getMethodName().equals("reserveMemory")))
         {
-            // java.util.AbstractCollection.MAX_ARRAY_SIZE is defined as Integer.MAX_VALUE - 8
-            // so Integer.MAX_VALUE / 2 should be a large enough and safe size to request.
-            ignored.add(new long[Integer.MAX_VALUE / 2]);
+            logger.error("Force heap space OutOfMemoryError in the presence of", oom);
+            // Start to produce heap space OOM forcibly.
+            List<long[]> ignored = new ArrayList<>();
+            while (true)
+            {
+                // java.util.AbstractCollection.MAX_ARRAY_SIZE is defined as Integer.MAX_VALUE - 8
+                // so Integer.MAX_VALUE / 2 should be a large enough and safe size to request.
+                ignored.add(new long[Integer.MAX_VALUE / 2]);
+            }
         }
     }
 
+    private static Consumer<Throwable> createDefaultCommitLogErrorHandler(String message)
+    {
+        return JVMStabilityInspector::inspectCommitLogError;
+    }
+    
     private static void inspectCommitLogError(Throwable t)
     {
         if (!StorageService.instance.isDaemonSetupCompleted())
         {
             logger.error("Exiting due to error while processing commit log during initialization.", t);
-            killer.killCurrentJVM(t, true);
+            killer.killJVM(t, true);
         }
         else if (DatabaseDescriptor.getCommitFailurePolicy() == Config.CommitFailurePolicy.die)
-            killer.killCurrentJVM(t);
+            killer.killJVM(t);
     }
 
     public static void killCurrentJVM(Throwable t, boolean quiet)
     {
-        killer.killCurrentJVM(t, quiet);
+        killer.killJVM(t, quiet);
     }
 
     public static void userFunctionTimeout(Throwable t)
@@ -219,10 +234,10 @@ public final class JVMStabilityInspector
         {
             case die:
                 // policy to give 250ms grace time to
-                ScheduledExecutors.nonPeriodicTasks.schedule(() -> killer.killCurrentJVM(t), 250, TimeUnit.MILLISECONDS);
+                ScheduledExecutors.nonPeriodicTasks.schedule(() -> killer.killJVM(t), 250, TimeUnit.MILLISECONDS);
                 break;
             case die_immediate:
-                killer.killCurrentJVM(t);
+                killer.killJVM(t);
                 break;
             case ignore:
                 logger.error(t.getMessage());
@@ -230,31 +245,48 @@ public final class JVMStabilityInspector
         }
     }
 
-    @VisibleForTesting
-    public static Killer replaceKiller(Killer newKiller)
+    public static void registerShutdownHook(Thread hook, Runnable runOnHookRemoved)
     {
-        Killer oldKiller = JVMStabilityInspector.killer;
+        Runtime.getRuntime().addShutdownHook(hook);
+        shutdownHooks.add(Pair.create(hook, runOnHookRemoved));
+    }
+
+    public static void removeShutdownHooks()
+    {
+        Throwable err = null;
+        for (Pair<Thread, Runnable> hook : shutdownHooks)
+        {
+            err = Throwables.perform(err,
+                                     () -> Runtime.getRuntime().removeShutdownHook(hook.left),
+                                     hook.right::run);
+        }
+
+        if (err != null)
+            logger.error("Got error(s) when removing shutdown hook(s): {}", err.getMessage(), err);
+
+        shutdownHooks.clear();
+    }
+
+    @VisibleForTesting
+    public static JVMKiller replaceKiller(JVMKiller newKiller)
+    {
+        JVMKiller oldKiller = JVMStabilityInspector.killer;
         JVMStabilityInspector.killer = newKiller;
         return oldKiller;
     }
 
+    public static JVMKiller killer()
+    {
+        return killer;
+    }
+
     @VisibleForTesting
-    public static class Killer
+    public static class Killer implements JVMKiller
     {
         private final AtomicBoolean killing = new AtomicBoolean();
 
-        /**
-        * Certain situations represent "Die" conditions for the server, and if so, the reason is logged and the current JVM is killed.
-        *
-        * @param t
-        *      The Throwable to log before killing the current JVM
-        */
-        protected void killCurrentJVM(Throwable t)
-        {
-            killCurrentJVM(t, false);
-        }
-
-        protected void killCurrentJVM(Throwable t, boolean quiet)
+        @Override
+        public void killJVM(Throwable t, boolean quiet)
         {
             if (!quiet)
             {
@@ -266,7 +298,7 @@ public final class JVMStabilityInspector
 
             if (doExit && killing.compareAndSet(false, true))
             {
-                StorageService.instance.removeShutdownHook();
+                removeShutdownHooks();
                 System.exit(100);
             }
         }

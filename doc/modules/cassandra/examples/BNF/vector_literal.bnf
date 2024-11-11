@@ -1,1 +1,0 @@
-vector_literal::= '[' [ term (',' term)* ] ']'

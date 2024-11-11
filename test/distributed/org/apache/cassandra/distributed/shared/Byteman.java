@@ -41,19 +41,17 @@ import java.util.stream.Stream;
 import com.google.common.base.StandardSystemProperty;
 import com.google.common.io.ByteStreams;
 import com.google.common.io.Files;
-import org.apache.cassandra.io.util.File;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.io.util.File;
 import org.jboss.byteman.agent.Transformer;
-
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_BYTEMAN_TRANSFORMATIONS_DEBUG;
 
 public final class Byteman
 {
     private static final Logger logger = LoggerFactory.getLogger(Byteman.class);
 
-    private static final boolean DEBUG_TRANSFORMATIONS = TEST_BYTEMAN_TRANSFORMATIONS_DEBUG.getBoolean();
+    private static final boolean DEBUG_TRANSFORMATIONS = Boolean.getBoolean("cassandra.test.byteman.transformations.debug");
     private static final Method METHOD;
     private static final URL BYTEMAN;
 

@@ -20,9 +20,9 @@ package org.apache.cassandra.db.marshal;
 import java.nio.ByteBuffer;
 
 import org.apache.cassandra.cql3.CQL3Type;
-import org.apache.cassandra.cql3.terms.Constants;
+import org.apache.cassandra.cql3.Constants;
 import org.apache.cassandra.cql3.Duration;
-import org.apache.cassandra.cql3.terms.Term;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.serializers.SimpleDateSerializer;
 import org.apache.cassandra.serializers.TypeSerializer;
@@ -38,8 +38,6 @@ import static org.apache.cassandra.cql3.statements.RequestValidations.invalidReq
 public class SimpleDateType extends TemporalType<Integer>
 {
     public static final SimpleDateType instance = new SimpleDateType();
-
-    private static final ByteBuffer MASKED_VALUE = instance.decompose(SimpleDateSerializer.timeInMillisToDay(0));
 
     SimpleDateType() {super(ComparisonType.BYTE_ORDER);} // singleton
 
@@ -117,11 +115,5 @@ public class SimpleDateType extends TemporalType<Integer>
         // Checks that the duration has no data below days.
         if (!duration.hasDayPrecision())
             throw invalidRequest("The duration must have a day precision. Was: %s", duration);
-    }
-
-    @Override
-    public ByteBuffer getMaskedValue()
-    {
-        return MASKED_VALUE;
     }
 }

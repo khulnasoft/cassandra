@@ -31,6 +31,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
+import org.apache.cassandra.concurrent.InfiniteLoopExecutor;
 import org.apache.cassandra.exceptions.UnaccessibleFieldException;
 
 import org.slf4j.Logger;
@@ -39,8 +40,8 @@ import org.slf4j.LoggerFactory;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 
+import org.apache.cassandra.concurrent.NamedThreadFactory;
 import jdk.internal.ref.Cleaner;
-import org.apache.cassandra.concurrent.Shutdownable;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.lifecycle.View;
@@ -50,18 +51,14 @@ import org.apache.cassandra.io.util.SafeMemory;
 import org.apache.cassandra.utils.ExecutorUtils;
 import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.Pair;
-import org.apache.cassandra.utils.Shared;
 import sun.misc.Unsafe;
 import sun.nio.ch.DirectBuffer;
-
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
 
 import static java.util.Collections.emptyList;
 
-import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
-import static org.apache.cassandra.concurrent.InfiniteLoopExecutor.SimulatorSafe.UNSAFE;
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_DEBUG_REF_COUNT;
-import static org.apache.cassandra.utils.Shared.Scope.SIMULATION;
+import static org.apache.cassandra.utils.ExecutorUtils.awaitTermination;
+import static org.apache.cassandra.utils.ExecutorUtils.shutdownNow;
 import static org.apache.cassandra.utils.Throwables.maybeFail;
 import static org.apache.cassandra.utils.Throwables.merge;
 
@@ -99,14 +96,7 @@ import static org.apache.cassandra.utils.Throwables.merge;
 public final class Ref<T> implements RefCounted<T>
 {
     static final Logger logger = LoggerFactory.getLogger(Ref.class);
-    public static final boolean DEBUG_ENABLED = TEST_DEBUG_REF_COUNT.getBoolean();
-    static OnLeak ON_LEAK;
-
-    @Shared(scope = SIMULATION)
-    public interface OnLeak
-    {
-        void onLeak(Object state);
-    }
+    public static final boolean DEBUG_ENABLED = System.getProperty("cassandra.debugrefcount", "false").equalsIgnoreCase("true");
 
     final State state;
     final T referent;
@@ -154,6 +144,11 @@ public final class Ref<T> implements RefCounted<T>
         return referent;
     }
 
+    public boolean refers(T object)
+    {
+        return referent == object;
+    }
+
     public Ref<T> tryRef()
     {
         return state.globalState.ref() ? new Ref<>(referent, state.globalState) : null;
@@ -197,7 +192,7 @@ public final class Ref<T> implements RefCounted<T>
 
         private static final AtomicIntegerFieldUpdater<State> releasedUpdater = AtomicIntegerFieldUpdater.newUpdater(State.class, "released");
 
-        State(final GlobalState globalState, Ref reference, ReferenceQueue<? super Ref> q)
+        public State(final GlobalState globalState, Ref reference, ReferenceQueue<? super Ref> q)
         {
             super(reference, q);
             this.globalState = globalState;
@@ -227,26 +222,12 @@ public final class Ref<T> implements RefCounted<T>
             if (!releasedUpdater.compareAndSet(this, 0, 1))
             {
                 if (!leak)
-                {
-                    String id = this.toString();
-                    logger.error("BAD RELEASE: attempted to release a reference ({}) that has already been released", id);
-                    if (DEBUG_ENABLED)
-                        debug.log(id);
-                    throw new IllegalStateException("Attempted to release a reference that has already been released");
-                }
+                    reportBadRelease();
                 return;
             }
             Throwable fail = globalState.release(this, null);
             if (leak)
-            {
-                String id = this.toString();
-                logger.error("LEAK DETECTED: a reference ({}) to {} was not released before the reference was garbage collected", id, globalState);
-                if (DEBUG_ENABLED)
-                    debug.log(id);
-                OnLeak onLeak = ON_LEAK;
-                if (onLeak != null)
-                    onLeak.onLeak(this);
-            }
+                reportLeak();
             else if (DEBUG_ENABLED)
             {
                 debug.deallocate();
@@ -254,11 +235,24 @@ public final class Ref<T> implements RefCounted<T>
             if (fail != null)
                 logger.error("Error when closing {}", globalState, fail);
         }
+        // These methods have been broken out of the above method to allow
+        // easier counting in unit tests
 
-        @Override
-        public String toString()
+        private void reportBadRelease()
         {
-            return globalState.toString();
+            String id = this.toString();
+            logger.error("BAD RELEASE: attempted to release a reference ({}) that has already been released", id);
+            if (DEBUG_ENABLED)
+                debug.log(id);
+            throw new IllegalStateException("Attempted to release a reference that has already been released");
+        }
+
+        private void reportLeak()
+        {
+            String id = this.toString();
+            logger.error("LEAK DETECTED: a reference ({}) to {} was not released before the reference was garbage collected", id, globalState);
+            if (DEBUG_ENABLED)
+                debug.log(id);
         }
     }
 
@@ -382,8 +376,8 @@ public final class Ref<T> implements RefCounted<T>
     static final Set<Class<?>> concurrentIterables = Collections.newSetFromMap(new IdentityHashMap<>());
     private static final Set<GlobalState> globallyExtant = Collections.newSetFromMap(new ConcurrentHashMap<>());
     static final ReferenceQueue<Object> referenceQueue = new ReferenceQueue<>();
-    private static final Shutdownable EXEC = executorFactory().infiniteLoop("Reference-Reaper", Ref::reapOneReference, UNSAFE);
-    static final ScheduledExecutorService STRONG_LEAK_DETECTOR = !DEBUG_ENABLED ? null : executorFactory().scheduled("Strong-Reference-Leak-Detector");
+    private static final InfiniteLoopExecutor EXEC = new InfiniteLoopExecutor("Reference-Reaper", Ref::reapOneReference).start();
+    static final ScheduledExecutorService STRONG_LEAK_DETECTOR = !DEBUG_ENABLED ? null : Executors.newScheduledThreadPool(1, new NamedThreadFactory("Strong-Reference-Leak-Detector"));
     static
     {
         if (DEBUG_ENABLED)
@@ -756,10 +750,7 @@ public final class Ref<T> implements RefCounted<T>
         {
             final Set<Tidy> candidates = Collections.newSetFromMap(new IdentityHashMap<>());
             for (GlobalState state : globallyExtant)
-            {
-                if (state.tidy != null)
-                    candidates.add(state.tidy);
-            }
+                candidates.add(state.tidy);
             removeExpected(candidates);
             this.candidates.retainAll(candidates);
             if (!this.candidates.isEmpty())
@@ -785,11 +776,6 @@ public final class Ref<T> implements RefCounted<T>
                 }
             }
         }
-    }
-
-    public static void setOnLeak(OnLeak onLeak)
-    {
-        ON_LEAK = onLeak;
     }
 
     @VisibleForTesting

@@ -23,73 +23,92 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
-import java.util.function.Supplier;
 
 import com.google.common.base.Joiner;
 
 import org.apache.cassandra.config.CassandraRelevantProperties;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.convertToString;
-
 public final class WithProperties implements AutoCloseable
 {
-    private final List<Runnable> rollback = new ArrayList<>();
+    private final List<Property> properties = new ArrayList<>();
 
     public WithProperties()
     {
     }
 
-    public WithProperties with(String... kvs)
+    public WithProperties(String... kvs)
+    {
+        with(kvs);
+    }
+
+    public void with(String... kvs)
     {
         assert kvs.length % 2 == 0 : "Input must have an even amount of inputs but given " + kvs.length;
         for (int i = 0; i <= kvs.length - 2; i = i + 2)
+        {
             with(kvs[i], kvs[i + 1]);
-        return this;
+        }
     }
 
-    public WithProperties set(CassandraRelevantProperties prop, String value)
+    public void setProperty(String key, String value)
     {
-        return set(prop, () -> prop.setString(value));
+        with(key, value);
     }
 
-    public WithProperties set(CassandraRelevantProperties prop, String... values)
+    public void set(CassandraRelevantProperties prop, String value)
     {
-        return set(prop, Arrays.asList(values));
+        with(prop.getKey(), value);
     }
 
-    public WithProperties set(CassandraRelevantProperties prop, Collection<String> values)
+    public void set(CassandraRelevantProperties prop, String... values)
     {
-        return set(prop, Joiner.on(",").join(values));
+        set(prop, Arrays.asList(values));
     }
 
-    public WithProperties set(CassandraRelevantProperties prop, boolean value)
+    public void set(CassandraRelevantProperties prop, Collection<String> values)
     {
-        return set(prop, () -> prop.setBoolean(value));
+        set(prop, Joiner.on(",").join(values));
     }
 
-    public WithProperties set(CassandraRelevantProperties prop, long value)
+    public void set(CassandraRelevantProperties prop, boolean value)
     {
-        return set(prop, () -> prop.setLong(value));
+        set(prop, Boolean.toString(value));
     }
 
-    private void with(String key, String value)
+    public void set(CassandraRelevantProperties prop, long value)
     {
-        String previous = System.setProperty(key, value); // checkstyle: suppress nearby 'blockSystemPropertyUsage'
-        rollback.add(previous == null ? () -> System.clearProperty(key) : () -> System.setProperty(key, previous)); // checkstyle: suppress nearby 'blockSystemPropertyUsage'
+        set(prop, Long.toString(value));
     }
 
-    private WithProperties set(CassandraRelevantProperties prop, Supplier<Object> prev)
+    public void with(String key, String value)
     {
-        String previous = convertToString(prev.get());
-        rollback.add(previous == null ? prop::clearValue : () -> prop.setString(previous));
-        return this;
+        String previous = System.setProperty(key, value);
+        properties.add(new Property(key, previous));
     }
+
 
     @Override
     public void close()
     {
-        Collections.reverse(rollback);
-        rollback.forEach(Runnable::run);
-        rollback.clear();
+        Collections.reverse(properties);
+        properties.forEach(s -> {
+            if (s.value == null)
+                System.getProperties().remove(s.key);
+            else
+                System.setProperty(s.key, s.value);
+        });
+        properties.clear();
+    }
+
+    private static final class Property
+    {
+        private final String key;
+        private final String value;
+
+        private Property(String key, String value)
+        {
+            this.key = key;
+            this.value = value;
+        }
     }
 }

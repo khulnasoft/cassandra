@@ -21,40 +21,36 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.cassandra.io.util.File;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.ColumnIdentifier;
+import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.TableId;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.KillerForTests;
+
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 
 public class CommitLogReaderTest extends CQLTester
 {
     @BeforeClass
-    public static void setUpClass()
+    public static void beforeClass()
     {
-        prePrepareServer();
-
         DatabaseDescriptor.setCommitFailurePolicy(Config.CommitFailurePolicy.ignore);
         JVMStabilityInspector.replaceKiller(new KillerForTests(false));
-
-        DatabaseDescriptor.setCommitLogSync(Config.CommitLogSync.batch);
-
-        // Once per-JVM is enough
-        prepareServer();
     }
 
     @Before
@@ -185,7 +181,7 @@ public class CommitLogReaderTest extends CQLTester
                 continue;
             }
 
-            for (Row r : pu)
+            for (Row r : pu.rows())
             {
                 String expected = Integer.toString(i + offset);
                 String seen = new String(r.getCell(cd).buffer().array());
@@ -198,7 +194,7 @@ public class CommitLogReaderTest extends CQLTester
 
     static ArrayList<File> getCommitLogs()
     {
-        File dir = new File(DatabaseDescriptor.getCommitLogLocation());
+        File dir = DatabaseDescriptor.getCommitLogLocation();
         File[] files = dir.tryList();
         ArrayList<File> results = new ArrayList<>();
         for (File f : files)
@@ -247,6 +243,8 @@ public class CommitLogReaderTest extends CQLTester
             }
         }
 
+        public void handleInvalidMutation(TableId id){}
+
         public int seenMutationCount() { return seenMutations.size(); }
     }
 
@@ -271,7 +269,7 @@ public class CommitLogReaderTest extends CQLTester
 
         Keyspace.open(keyspace())
                 .getColumnFamilyStore(currentTable())
-                .forceBlockingFlush(ColumnFamilyStore.FlushReason.UNIT_TESTS);
+                .forceBlockingFlush(UNIT_TESTS);
         return result;
     }
 }

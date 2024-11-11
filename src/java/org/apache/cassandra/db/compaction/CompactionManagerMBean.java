@@ -122,14 +122,6 @@ public interface CompactionManagerMBean
      */
     public int getCoreViewBuildThreads();
 
-    int getMaximumSecondaryIndexExecutorThreads();
-
-    void setMaximumSecondaryIndexExecutorThreads(int number);
-
-    int getCoreSecondaryIndexExecutorThreads();
-
-    void setCoreSecondaryIndexExecutorThreads(int number);
-
     /**
      * Enable / disable STCS in L0
      */

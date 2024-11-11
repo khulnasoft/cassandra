@@ -19,51 +19,47 @@ package org.apache.cassandra.db.compaction;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.file.FileStore;
 import java.util.Collection;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
-
 import org.junit.After;
-import org.junit.Assert;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
-import org.apache.cassandra.Util;
-import org.apache.cassandra.config.Config;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.UntypedResultSet;
+import org.apache.cassandra.config.Config;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.Directories;
-import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.Mutation;
+import org.apache.cassandra.db.RangeTombstone;
 import org.apache.cassandra.db.RowUpdateBuilder;
+import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
 import org.apache.cassandra.db.compaction.writers.MaxSSTableSizeWriter;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
-import org.apache.cassandra.io.sstable.LegacySSTableTest;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.SSTableWriter;
-import org.apache.cassandra.io.util.File;
-import org.apache.cassandra.io.util.PathUtils;
-import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.serializers.MarshalException;
-import org.assertj.core.api.Assertions;
+import org.apache.cassandra.schema.CompactionParams;
+import org.apache.cassandra.service.StorageService;
 
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -75,9 +71,13 @@ public class CompactionsCQLTest extends CQLTester
     public static final int SLEEP_TIME = 5000;
 
     private Config.CorruptedTombstoneStrategy strategy;
-    private static String NEGATIVE_LDTS_INVALID_DELETES_TEST_DIR = "test/data/negative-ldts-invalid-deletions-test/";
-    private static File testSStablesDir = new File(NEGATIVE_LDTS_INVALID_DELETES_TEST_DIR);
 
+    @BeforeClass
+    public static void beforeClass()
+    {
+        CQLTester.setUpClass();
+        StorageService.instance.initServer();
+    }
 
     @Before
     public void before() throws IOException
@@ -97,7 +97,7 @@ public class CompactionsCQLTest extends CQLTester
     public void testTriggerMinorCompactionSTCS() throws Throwable
     {
         createTable("CREATE TABLE %s (id text PRIMARY KEY)  WITH compaction = {'class':'SizeTieredCompactionStrategy', 'min_threshold':2};");
-        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
         execute("insert into %s (id) values ('1')");
         flush();
         execute("insert into %s (id) values ('1')");
@@ -109,10 +109,23 @@ public class CompactionsCQLTest extends CQLTester
     public void testTriggerMinorCompactionLCS() throws Throwable
     {
         createTable("CREATE TABLE %s (id text PRIMARY KEY) WITH compaction = {'class':'LeveledCompactionStrategy', 'sstable_size_in_mb':1, 'fanout_size':5};");
-        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
         execute("insert into %s (id) values ('1')");
         flush();
         execute("insert into %s (id) values ('1')");
+        flush();
+        waitForMinor(KEYSPACE, currentTable(), SLEEP_TIME, true);
+    }
+
+
+    @Test
+    public void testTriggerMinorCompactionDTCS() throws Throwable
+    {
+        createTable("CREATE TABLE %s (id text PRIMARY KEY) WITH compaction = {'class':'DateTieredCompactionStrategy', 'min_threshold':2};");
+        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
+        execute("insert into %s (id) values ('1') using timestamp 1000"); // same timestamp = same window = minor compaction triggered
+        flush();
+        execute("insert into %s (id) values ('1') using timestamp 1000");
         flush();
         waitForMinor(KEYSPACE, currentTable(), SLEEP_TIME, true);
     }
@@ -121,7 +134,7 @@ public class CompactionsCQLTest extends CQLTester
     public void testTriggerMinorCompactionTWCS() throws Throwable
     {
         createTable("CREATE TABLE %s (id text PRIMARY KEY) WITH compaction = {'class':'TimeWindowCompactionStrategy', 'min_threshold':2};");
-        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
         execute("insert into %s (id) values ('1')");
         flush();
         execute("insert into %s (id) values ('1')");
@@ -134,7 +147,7 @@ public class CompactionsCQLTest extends CQLTester
     public void testTriggerNoMinorCompactionSTCSDisabled() throws Throwable
     {
         createTable("CREATE TABLE %s (id text PRIMARY KEY)  WITH compaction = {'class':'SizeTieredCompactionStrategy', 'min_threshold':2, 'enabled':false};");
-        assertFalse(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertFalse(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
         execute("insert into %s (id) values ('1')");
         flush();
         execute("insert into %s (id) values ('1')");
@@ -146,14 +159,13 @@ public class CompactionsCQLTest extends CQLTester
     public void testTriggerMinorCompactionSTCSNodetoolEnabled() throws Throwable
     {
         createTable("CREATE TABLE %s (id text PRIMARY KEY)  WITH compaction = {'class':'SizeTieredCompactionStrategy', 'min_threshold':2, 'enabled':false};");
-        assertFalse(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertFalse(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
         getCurrentColumnFamilyStore().enableAutoCompaction();
-        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
 
         // Alter keyspace replication settings to force compaction strategy reload and check strategy is still enabled
         execute("alter keyspace "+keyspace()+" with replication = { 'class' : 'SimpleStrategy', 'replication_factor' : 3 }");
-        getCurrentColumnFamilyStore().getCompactionStrategyManager().maybeReloadDiskBoundaries();
-        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
 
         execute("insert into %s (id) values ('1')");
         flush();
@@ -166,9 +178,9 @@ public class CompactionsCQLTest extends CQLTester
     public void testTriggerNoMinorCompactionSTCSNodetoolDisabled() throws Throwable
     {
         createTable("CREATE TABLE %s (id text PRIMARY KEY)  WITH compaction = {'class':'SizeTieredCompactionStrategy', 'min_threshold':2, 'enabled':true};");
-        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
         getCurrentColumnFamilyStore().disableAutoCompaction();
-        assertFalse(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertFalse(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
         execute("insert into %s (id) values ('1')");
         flush();
         execute("insert into %s (id) values ('1')");
@@ -180,9 +192,9 @@ public class CompactionsCQLTest extends CQLTester
     public void testTriggerNoMinorCompactionSTCSAlterTable() throws Throwable
     {
         createTable("CREATE TABLE %s (id text PRIMARY KEY)  WITH compaction = {'class':'SizeTieredCompactionStrategy', 'min_threshold':2, 'enabled':true};");
-        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
         execute("ALTER TABLE %s WITH compaction = {'class': 'SizeTieredCompactionStrategy', 'enabled': false}");
-        assertFalse(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertFalse(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
         execute("insert into %s (id) values ('1')");
         flush();
         execute("insert into %s (id) values ('1')");
@@ -194,9 +206,9 @@ public class CompactionsCQLTest extends CQLTester
     public void testTriggerMinorCompactionSTCSAlterTable() throws Throwable
     {
         createTable("CREATE TABLE %s (id text PRIMARY KEY)  WITH compaction = {'class':'SizeTieredCompactionStrategy', 'min_threshold':2, 'enabled':false};");
-        assertFalse(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertFalse(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
         execute("ALTER TABLE %s WITH compaction = {'class': 'SizeTieredCompactionStrategy', 'min_threshold': 2, 'enabled': true}");
-        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
         execute("insert into %s (id) values ('1')");
         flush();
         execute("insert into %s (id) values ('1')");
@@ -205,7 +217,7 @@ public class CompactionsCQLTest extends CQLTester
     }
 
     @Test
-    public void testSetLocalCompactionStrategy() throws Throwable
+    public void testSetLocalCompactionStrategySTCS() throws Throwable
     {
         createTable("CREATE TABLE %s (id text PRIMARY KEY)");
         testSetLocalCompactionStrategy(SizeTieredCompactionStrategy.class);
@@ -217,27 +229,27 @@ public class CompactionsCQLTest extends CQLTester
         testSetLocalCompactionStrategy(UnifiedCompactionStrategy.class);
     }
 
-    private void testSetLocalCompactionStrategy(Class<? extends AbstractCompactionStrategy> strategy) throws Throwable
+    private void testSetLocalCompactionStrategy(Class<? extends CompactionStrategy> strategy) throws Throwable
     {
         createTable(String.format("CREATE TABLE %%s (id text PRIMARY KEY) with compaction = {'class': '%s'}", strategy.getSimpleName()));
         Map<String, String> localOptions = new HashMap<>();
-        localOptions.put("class", "SizeTieredCompactionStrategy");
+        localOptions.put("class", "DateTieredCompactionStrategy");
         getCurrentColumnFamilyStore().setCompactionParameters(localOptions);
-        assertTrue(verifyStrategies(getCurrentColumnFamilyStore().getCompactionStrategyManager(), SizeTieredCompactionStrategy.class));
+        assertTrue(verifyStrategies(getCurrentColumnFamilyStore().getCompactionStrategyContainer(), DateTieredCompactionStrategy.class));
         // Invalidate disk boundaries to ensure that boundary invalidation will not cause the old strategy to be reloaded
-        getCurrentColumnFamilyStore().invalidateLocalRanges();
+        getCurrentColumnFamilyStore().invalidateLocalRangesAndDiskBoundaries();
         // altering something non-compaction related
         execute("ALTER TABLE %s WITH gc_grace_seconds = 1000");
         // should keep the local compaction strat
-        assertTrue(verifyStrategies(getCurrentColumnFamilyStore().getCompactionStrategyManager(), SizeTieredCompactionStrategy.class));
+        assertTrue(verifyStrategies(getCurrentColumnFamilyStore().getCompactionStrategyContainer(), DateTieredCompactionStrategy.class));
         // Alter keyspace replication settings to force compaction strategy reload
         execute("alter keyspace "+keyspace()+" with replication = { 'class' : 'SimpleStrategy', 'replication_factor' : 3 }");
         // should keep the local compaction strat
-        assertTrue(verifyStrategies(getCurrentColumnFamilyStore().getCompactionStrategyManager(), SizeTieredCompactionStrategy.class));
+        assertTrue(verifyStrategies(getCurrentColumnFamilyStore().getCompactionStrategyContainer(), DateTieredCompactionStrategy.class));
         // altering a compaction option
-        execute("ALTER TABLE %s WITH compaction = {'class':'SizeTieredCompactionStrategy', 'min_threshold': 3}");
+        execute("ALTER TABLE %s WITH compaction = {'class':'SizeTieredCompactionStrategy', 'min_threshold':3}");
         // will use the new option
-        assertTrue(verifyStrategies(getCurrentColumnFamilyStore().getCompactionStrategyManager(), SizeTieredCompactionStrategy.class));
+        assertTrue(verifyStrategies(getCurrentColumnFamilyStore().getCompactionStrategyContainer(), SizeTieredCompactionStrategy.class));
     }
 
     @Test
@@ -245,30 +257,33 @@ public class CompactionsCQLTest extends CQLTester
     {
         createTable("CREATE TABLE %s (id text PRIMARY KEY)");
         Map<String, String> localOptions = new HashMap<>();
-        localOptions.put("class", "SizeTieredCompactionStrategy");
+        localOptions.put("class", "DateTieredCompactionStrategy");
         localOptions.put("enabled", "false");
         getCurrentColumnFamilyStore().setCompactionParameters(localOptions);
-        assertFalse(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertFalse(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
         localOptions.clear();
-        localOptions.put("class", "SizeTieredCompactionStrategy");
+        localOptions.put("class", "DateTieredCompactionStrategy");
         // localOptions.put("enabled", "true"); - this is default!
         getCurrentColumnFamilyStore().setCompactionParameters(localOptions);
-        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
     }
+
 
     @Test
     public void testSetLocalCompactionStrategyEnable() throws Throwable
     {
         createTable("CREATE TABLE %s (id text PRIMARY KEY)");
         Map<String, String> localOptions = new HashMap<>();
-        localOptions.put("class", "LeveledCompactionStrategy");
+        localOptions.put("class", "DateTieredCompactionStrategy");
 
         getCurrentColumnFamilyStore().disableAutoCompaction();
-        assertFalse(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertFalse(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
 
         getCurrentColumnFamilyStore().setCompactionParameters(localOptions);
-        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyManager().isEnabled());
+        assertTrue(getCurrentColumnFamilyStore().getCompactionStrategyContainer().isEnabled());
     }
+
+
 
     @Test(expected = IllegalArgumentException.class)
     public void testBadLocalCompactionStrategyOptions()
@@ -298,82 +313,43 @@ public class CompactionsCQLTest extends CQLTester
         // set the corruptedTombstoneStrategy to exception since these tests require it - if someone changed the default
         // in test/conf/cassandra.yaml they would start failing
         DatabaseDescriptor.setCorruptedTombstoneStrategy(Config.CorruptedTombstoneStrategy.exception);
-        String cfsName = "invalid_range_tombstone_compaction";
-        prepareTable(cfsName);
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(cfsName);
-
-//        // To generate the sstables with corrupted data, run this commented code in some pre-c14227 branch that allows for negative ldts
-//        // write a range tombstone with negative local deletion time (LDTs are not set by user and should not be negative):
-//        RangeTombstone rt = new RangeTombstone(Slice.ALL, DeletionTime.build(System.currentTimeMillis(), -1));
-//        RowUpdateBuilder rub = new RowUpdateBuilder(cfs.metadata(), System.currentTimeMillis() * 1000, 22).clustering(33).addRangeTombstone(rt);
-//        rub.build().apply();
-//        flush();
-
-        // Copy sstables back and reload them
-        loadTestSStables(cfs, testSStablesDir);
-
-        compactAndValidate(cfs);
-        readAndValidate(true, cfs);
-        readAndValidate(false, cfs);
+        prepare();
+        // write a range tombstone with negative local deletion time (LDTs are not set by user and should not be negative):
+        RangeTombstone rt = new RangeTombstone(Slice.ALL, new DeletionTime(System.currentTimeMillis(), -1));
+        RowUpdateBuilder rub = new RowUpdateBuilder(getCurrentColumnFamilyStore().metadata(), System.currentTimeMillis() * 1000, 22).clustering(33).addRangeTombstone(rt);
+        rub.build().apply();
+        flush();
+        compactAndValidate();
+        readAndValidate(true);
+        readAndValidate(false);
     }
 
     @Test
     public void testCompactionInvalidTombstone() throws Throwable
     {
-        // Set-up
         DatabaseDescriptor.setCorruptedTombstoneStrategy(Config.CorruptedTombstoneStrategy.exception);
-        String cfsName = "invalid_tombstones";
-        prepareTable(cfsName);
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(cfsName);
-
-//        // To generate the sstables with corrupted data, run this commented code in some pre-c14227 branch that allows for negative ldts
-//        // write a standard tombstone with negative local deletion time (LDTs are not set by user and should not be negative):
-//        RowUpdateBuilder rub = new RowUpdateBuilder(cfs.metadata(), -1, System.currentTimeMillis() * 1000, 22).clustering(33).delete("b");
-//        rub.build().apply();
-//        flush();
-
-//        // Store sstables for later use
-//        StorageService.instance.forceKeyspaceFlush(cfs.keyspace.getName(), ColumnFamilyStore.FlushReason.UNIT_TESTS);
-//        File ksDir = new File("test/data/negative-ldts-invalid-deletions-test/");
-//        ksDir.tryCreateDirectories();
-//        LegacySSTableTest.copySstablesFromTestData(cfs.name, ksDir, cfs.keyspace.getName());
-
-        // Copy sstables back and reload them
-        loadTestSStables(cfs, testSStablesDir);
-
-        // Verify
-        compactAndValidate(cfs);
-        readAndValidate(true, cfs);
-        readAndValidate(false, cfs);
+        prepare();
+        // write a standard tombstone with negative local deletion time (LDTs are not set by user and should not be negative):
+        RowUpdateBuilder rub = new RowUpdateBuilder(getCurrentColumnFamilyStore().metadata(), -1, System.currentTimeMillis() * 1000, 22).clustering(33).delete("b");
+        rub.build().apply();
+        flush();
+        compactAndValidate();
+        readAndValidate(true);
+        readAndValidate(false);
     }
 
     @Test
     public void testCompactionInvalidPartitionDeletion() throws Throwable
     {
         DatabaseDescriptor.setCorruptedTombstoneStrategy(Config.CorruptedTombstoneStrategy.exception);
-        String cfsName = "invalid_partition_deletion";
-        prepareTable(cfsName);
+        prepare();
         // write a partition deletion with negative local deletion time (LDTs are not set by user and should not be negative)::
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(cfsName);
-
-//        // To generate the sstables with corrupted data, run this commented code in some pre-c14227 branch that allows for negative ldts
-//        PartitionUpdate pu = PartitionUpdate.simpleBuilder(cfs.metadata(), 22).nowInSec(-1).delete().build();
-//        new Mutation(pu).apply();
-//        flush();
-//
-//        // Store sstables for later use
-//        StorageService.instance.forceKeyspaceFlush(cfs.keyspace.getName(), ColumnFamilyStore.FlushReason.UNIT_TESTS);
-//        File ksDir = new File("test/data/negative-ldts-invalid-deletions-test/");
-//        ksDir.tryCreateDirectories();
-//        LegacySSTableTest.copySstablesFromTestData(cfs.name, ksDir, cfs.keyspace.getName());
-
-        // Copy sstables back and reload them
-        loadTestSStables(cfs, testSStablesDir);
-
-        // Verify
-        compactAndValidate(cfs);
-        readAndValidate(true, cfs);
-        readAndValidate(false, cfs);
+        PartitionUpdate pu = PartitionUpdate.simpleBuilder(getCurrentColumnFamilyStore().metadata(), 22).nowInSec(-1).delete().build();
+        new Mutation(pu).apply();
+        flush();
+        compactAndValidate();
+        readAndValidate(true);
+        readAndValidate(false);
     }
 
     @Test
@@ -389,13 +365,6 @@ public class CompactionsCQLTest extends CQLTester
         readAndValidate(false);
     }
 
-    private void prepareTable(String table) throws Throwable
-    {
-        schemaChange(String.format("CREATE TABLE %s.%s (id int, id2 int, b text, primary key (id, id2))", KEYSPACE, table));
-        for (int i = 0; i < 2; i++)
-            execute(String.format("INSERT INTO %s.%s (id, id2, b) VALUES (?, ?, ?)", KEYSPACE, table), i, i, String.valueOf(i));
-    }
-
     private void prepare() throws Throwable
     {
         createTable("CREATE TABLE %s (id int, id2 int, b text, primary key (id, id2))");
@@ -408,14 +377,14 @@ public class CompactionsCQLTest extends CQLTester
     {
         // write enough data to make sure we use an IndexedReader when doing a read, and make sure it fails when reading a corrupt row deletion
         DatabaseDescriptor.setCorruptedTombstoneStrategy(Config.CorruptedTombstoneStrategy.exception);
-        int maxSizePre = DatabaseDescriptor.getColumnIndexSizeInKiB();
-        DatabaseDescriptor.setColumnIndexSizeInKiB(1024);
+        int maxSizePre = DatabaseDescriptor.getColumnIndexSizeInKB();
+        DatabaseDescriptor.setColumnIndexSizeInKB(1024);
         prepareWide();
         RowUpdateBuilder.deleteRowAt(getCurrentColumnFamilyStore().metadata(), System.currentTimeMillis() * 1000, -1, 22, 33).apply();
         flush();
         readAndValidate(true);
         readAndValidate(false);
-        DatabaseDescriptor.setColumnIndexSizeInKiB(maxSizePre);
+        DatabaseDescriptor.setColumnIndexSizeInKB(maxSizePre);
     }
 
     @Test
@@ -423,19 +392,15 @@ public class CompactionsCQLTest extends CQLTester
     {
         // write enough data to make sure we use an IndexedReader when doing a read, and make sure it fails when reading a corrupt standard tombstone
         DatabaseDescriptor.setCorruptedTombstoneStrategy(Config.CorruptedTombstoneStrategy.exception);
-        int maxSizePre = DatabaseDescriptor.getColumnIndexSizeInKiB();
-        DatabaseDescriptor.setColumnIndexSizeInKiB(1024);
+        int maxSizePre = DatabaseDescriptor.getColumnIndexSizeInKB();
+        DatabaseDescriptor.setColumnIndexSizeInKB(1024);
         prepareWide();
-
-        Assertions.assertThatThrownBy(() -> {
-            new RowUpdateBuilder(getCurrentColumnFamilyStore().metadata(),
-                                 -1,
-                                 System.currentTimeMillis() * 1000,
-                                 22).clustering(33).delete("b");
-        }).isInstanceOf(IllegalArgumentException.class)
-          .hasMessageContaining("out of range");
-
-        DatabaseDescriptor.setColumnIndexSizeInKiB(maxSizePre);
+        RowUpdateBuilder rub = new RowUpdateBuilder(getCurrentColumnFamilyStore().metadata(), -1, System.currentTimeMillis() * 1000, 22).clustering(33).delete("b");
+        rub.build().apply();
+        flush();
+        readAndValidate(true);
+        readAndValidate(false);
+        DatabaseDescriptor.setColumnIndexSizeInKB(maxSizePre);
     }
 
     @Test
@@ -443,32 +408,16 @@ public class CompactionsCQLTest extends CQLTester
     {
         // write enough data to make sure we use an IndexedReader when doing a read, and make sure it fails when reading a corrupt range tombstone
         DatabaseDescriptor.setCorruptedTombstoneStrategy(Config.CorruptedTombstoneStrategy.exception);
-        final int maxSizePreKiB = DatabaseDescriptor.getColumnIndexSizeInKiB();
-        DatabaseDescriptor.setColumnIndexSizeInKiB(1024);
-
-        String cfsName = "invalid_range_tombstone_reader";
-        prepareWide(cfsName);
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(cfsName);
-
-//      // To generate the sstables with corrupted data, run this commented code in some pre-c14227 branch that allows for negative ldts
-//      prepareWide(cfsName);
-//      RangeTombstone rt = new RangeTombstone(Slice.ALL, DeletionTime.build(System.currentTimeMillis(), -1));
-//      RowUpdateBuilder rub = new RowUpdateBuilder(cfs.metadata(), System.currentTimeMillis() * 1000, 22).clustering(33).addRangeTombstone(rt);
-//      rub.build().apply();
-//      flush();
-//
-//      // Store sstables for later use
-//      StorageService.instance.forceKeyspaceFlush(cfs.keyspace.getName(), ColumnFamilyStore.FlushReason.UNIT_TESTS);
-//      File ksDir = new File("test/data/negative-ldts-invalid-deletions-test/");
-//      ksDir.tryCreateDirectories();
-//      LegacySSTableTest.copySstablesFromTestData(cfs.name, ksDir, cfs.keyspace.getName());
-
-        // Copy sstables back and reload them
-        loadTestSStables(cfs, testSStablesDir);
-
-        readAndValidate(true, cfs);
-        readAndValidate(false, cfs);
-        DatabaseDescriptor.setColumnIndexSizeInKiB(maxSizePreKiB);
+        final int maxSizePreKB = DatabaseDescriptor.getColumnIndexSizeInKB();
+        DatabaseDescriptor.setColumnIndexSizeInKB(1024);
+        prepareWide();
+        RangeTombstone rt = new RangeTombstone(Slice.ALL, new DeletionTime(System.currentTimeMillis(), -1));
+        RowUpdateBuilder rub = new RowUpdateBuilder(getCurrentColumnFamilyStore().metadata(), System.currentTimeMillis() * 1000, 22).clustering(33).addRangeTombstone(rt);
+        rub.build().apply();
+        flush();
+        readAndValidate(true);
+        readAndValidate(false);
+        DatabaseDescriptor.setColumnIndexSizeInKB(maxSizePreKB);
     }
 
 
@@ -487,14 +436,17 @@ public class CompactionsCQLTest extends CQLTester
             {
                 execute("insert into %s (id, id2, t) values (?, ?, ?)", i, j, value);
             }
-            Util.flush(cfs);
+            cfs.forceBlockingFlush(UNIT_TESTS);
         }
         assertEquals(50, cfs.getLiveSSTables().size());
-        LeveledCompactionStrategy lcs = (LeveledCompactionStrategy) cfs.getCompactionStrategyManager().getUnrepairedUnsafe().first();
-        AbstractCompactionTask act = lcs.getNextBackgroundTask(0);
+        LeveledCompactionStrategy lcs = (LeveledCompactionStrategy) ((CompactionStrategyManager) cfs.getCompactionStrategyContainer())
+                                                                    .getUnrepairedUnsafe().first();
+        Collection<AbstractCompactionTask> tasks = lcs.getNextBackgroundTasks(0);
+        assertEquals(1, tasks.size());
+        AbstractCompactionTask act = tasks.iterator().next();
         // we should be compacting all 50 sstables:
         assertEquals(50, act.transaction.originals().size());
-        act.execute(ActiveCompactionsTracker.NOOP);
+        act.execute();
     }
 
     @Test
@@ -504,7 +456,7 @@ public class CompactionsCQLTest extends CQLTester
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
         execute("insert into %s (id, id2, t) values (?, ?, ?)", 1,1,"L1");
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         cfs.forceMajorCompaction();
         SSTableReader l1sstable = cfs.getLiveSSTables().iterator().next();
         assertEquals(1, l1sstable.getSSTableLevel());
@@ -518,20 +470,85 @@ public class CompactionsCQLTest extends CQLTester
             {
                 execute("insert into %s (id, id2, t) values (?, ?, ?)", i, j, value);
             }
-            Util.flush(cfs);
+            cfs.forceBlockingFlush(UNIT_TESTS);
         }
         assertEquals(51, cfs.getLiveSSTables().size());
 
         // mark the L1 sstable as compacting to make sure we trigger STCS in L0:
         LifecycleTransaction txn = cfs.getTracker().tryModify(l1sstable, OperationType.COMPACTION);
-        LeveledCompactionStrategy lcs = (LeveledCompactionStrategy) cfs.getCompactionStrategyManager().getUnrepairedUnsafe().first();
-        AbstractCompactionTask act = lcs.getNextBackgroundTask(0);
+        LeveledCompactionStrategy lcs = (LeveledCompactionStrategy) ((CompactionStrategyManager) cfs.getCompactionStrategyContainer())
+                                                                    .getUnrepairedUnsafe()
+                                                                    .first();
+        Collection<AbstractCompactionTask> tasks = lcs.getNextBackgroundTasks(0);
+        assertEquals(1, tasks.size());
+        AbstractCompactionTask act = tasks.iterator().next();
         // note that max_threshold is 60 (more than the amount of L0 sstables), but MAX_COMPACTING_L0 is 32, which means we will trigger STCS with at most max_threshold sstables
         assertEquals(50, act.transaction.originals().size());
         assertEquals(0, ((LeveledCompactionTask)act).getLevel());
         assertTrue(act.transaction.originals().stream().allMatch(s -> s.getSSTableLevel() == 0));
         txn.abort(); // unmark the l1 sstable compacting
-        act.execute(ActiveCompactionsTracker.NOOP);
+        act.execute();
+    }
+
+    @Test
+    public void testABAReloadUCS()
+    {
+        testABAReload(UnifiedCompactionStrategy.class);
+    }
+
+    @Test
+    public void testABAReloadSTCS()
+    {
+        testABAReload(SizeTieredCompactionStrategy.class);
+    }
+
+    @Test
+    public void testABAReloadLCS()
+    {
+        testABAReload(LeveledCompactionStrategy.class);
+    }
+
+    private void testABAReload(Class<? extends CompactionStrategy> strategyClass)
+    {
+        createTable(String.format("CREATE TABLE %%s (id text PRIMARY KEY) WITH compaction = {'class':'%s'};", strategyClass.getSimpleName()));
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        assertEquals(strategyClass, cfs.getCompactionStrategyContainer().getCompactionParams().klass());
+        alterTable("ALTER TABLE %s WITH compaction = {'class': 'DateTieredCompactionStrategy'}");
+        assertEquals(DateTieredCompactionStrategy.class, cfs.getCompactionStrategyContainer().getCompactionParams().klass());
+        alterTable(String.format("ALTER TABLE %%s WITH compaction = {'class': '%s'}", strategyClass.getSimpleName()));
+        assertEquals(strategyClass, cfs.getCompactionStrategyContainer().getCompactionParams().klass());
+    }
+
+    @Test
+    public void testWithSecondaryIndexUCS() throws Throwable
+    {
+        testWithSecondaryIndex(UnifiedCompactionStrategy.class);
+    }
+
+    @Test
+    public void testWithSecondaryIndexSTCS() throws Throwable
+    {
+        testWithSecondaryIndex(SizeTieredCompactionStrategy.class);
+    }
+
+    @Test
+    public void testWithSecondaryIndexLCS() throws Throwable
+    {
+        testWithSecondaryIndex(LeveledCompactionStrategy.class);
+    }
+
+    public void testWithSecondaryIndex(Class<? extends CompactionStrategy> strategyClass) throws Throwable
+    {
+        createTable(String.format("CREATE TABLE %%s (pk int, c int, s int static, v int, PRIMARY KEY(pk, c)) WITH compaction = {'class':'%s'};", strategyClass.getSimpleName()));
+        createIndex("CREATE INDEX ON %s (v)");
+
+        execute("INSERT INTO %s (pk, c, s, v) VALUES (?, ?, ?, ?)", 1, 1, 9, 1);
+        execute("INSERT INTO %s (pk, c, s, v) VALUES (?, ?, ?, ?)", 1, 2, 9, 2);
+        execute("INSERT INTO %s (pk, c, s, v) VALUES (?, ?, ?, ?)", 3, 1, 9, 1);
+        execute("INSERT INTO %s (pk, c, s, v) VALUES (?, ?, ?, ?)", 4, 1, 9, 1);
+        flush();
+
+        compact();
     }
 
     @Test
@@ -545,22 +562,25 @@ public class CompactionsCQLTest extends CQLTester
             r.nextBytes(b);
             execute("insert into %s (id, x) values (?, ?)", i, ByteBuffer.wrap(b));
         }
-        getCurrentColumnFamilyStore().forceBlockingFlush(ColumnFamilyStore.FlushReason.UNIT_TESTS);
+        getCurrentColumnFamilyStore().forceBlockingFlush(UNIT_TESTS);
         getCurrentColumnFamilyStore().disableAutoCompaction();
         for (int i = 0; i < 1000; i++)
         {
             r.nextBytes(b);
             execute("insert into %s (id, x) values (?, ?)", i, ByteBuffer.wrap(b));
         }
-        getCurrentColumnFamilyStore().forceBlockingFlush(ColumnFamilyStore.FlushReason.UNIT_TESTS);
+        getCurrentColumnFamilyStore().forceBlockingFlush(UNIT_TESTS);
 
-        LeveledCompactionStrategy lcs = (LeveledCompactionStrategy) getCurrentColumnFamilyStore().getCompactionStrategyManager().getUnrepairedUnsafe().first();
+        LeveledCompactionStrategy lcs = (LeveledCompactionStrategy) ((CompactionStrategyManager) getCurrentColumnFamilyStore().getCompactionStrategyContainer())
+                                                                    .getUnrepairedUnsafe()
+                                                                    .first();
         LeveledCompactionTask lcsTask;
         while (true)
         {
-            lcsTask = (LeveledCompactionTask) lcs.getNextBackgroundTask(0);
-            if (lcsTask != null)
+            Collection<AbstractCompactionTask> tasks = lcs.getNextBackgroundTasks(0);
+            if (tasks.size() > 0)
             {
+                lcsTask = (LeveledCompactionTask) tasks.iterator().next();
                 lcsTask.execute(CompactionManager.instance.active);
                 break;
             }
@@ -570,7 +590,7 @@ public class CompactionsCQLTest extends CQLTester
         for (SSTableReader sstable : getCurrentColumnFamilyStore().getLiveSSTables())
         {
             lcs.removeSSTable(sstable);
-            sstable.mutateLevelAndReload(2);
+            sstable.mutateSSTableLevelAndReload(2);
             lcs.addSSTable(sstable);
         }
 
@@ -579,14 +599,14 @@ public class CompactionsCQLTest extends CQLTester
             r.nextBytes(b);
             execute("insert into %s (id, x) values (?, ?)", i, ByteBuffer.wrap(b));
         }
-        getCurrentColumnFamilyStore().forceBlockingFlush(ColumnFamilyStore.FlushReason.UNIT_TESTS);
+        getCurrentColumnFamilyStore().forceBlockingFlush(UNIT_TESTS);
         // now we have a bunch of sstables in L2 and one in L0 - bump the L0 one to L1:
         for (SSTableReader sstable : getCurrentColumnFamilyStore().getLiveSSTables())
         {
             if (sstable.getSSTableLevel() == 0)
             {
                 lcs.removeSSTable(sstable);
-                sstable.mutateLevelAndReload(1);
+                sstable.mutateSSTableLevelAndReload(1);
                 lcs.addSSTable(sstable);
             }
         }
@@ -595,7 +615,9 @@ public class CompactionsCQLTest extends CQLTester
         // sstables have been removed.
         try
         {
-            AbstractCompactionTask task = new NotifyingCompactionTask((LeveledCompactionTask) lcs.getNextBackgroundTask(0));
+            Collection<AbstractCompactionTask> tasks = lcs.getNextBackgroundTasks(0);
+            assertEquals(1, tasks.size());
+            AbstractCompactionTask task = new NotifyingCompactionTask(lcs, (LeveledCompactionTask) tasks.iterator().next());
             task.execute(CompactionManager.instance.active);
             fail("task should throw exception");
         }
@@ -604,42 +626,34 @@ public class CompactionsCQLTest extends CQLTester
             // ignored
         }
 
-        lcsTask = (LeveledCompactionTask) lcs.getNextBackgroundTask(0);
-        try
-        {
-            assertNotNull(lcsTask);
-        }
-        finally
-        {
-            if (lcsTask != null)
-                lcsTask.transaction.abort();
-        }
+        Collection<AbstractCompactionTask> tasks = lcs.getNextBackgroundTasks(0);
+        assertEquals(1, tasks.size());
+        lcsTask = (LeveledCompactionTask) tasks.iterator().next();
+        lcsTask.transaction.abort();
     }
 
     private static class NotifyingCompactionTask extends LeveledCompactionTask
     {
-        public NotifyingCompactionTask(LeveledCompactionTask task)
+        public NotifyingCompactionTask(LeveledCompactionStrategy lcs, LeveledCompactionTask task)
         {
-            super(task.cfs, task.transaction, task.getLevel(), task.gcBefore, task.getLevel(), false);
+            super(lcs, task.transaction, task.getLevel(), task.gcBefore, task.getLevel(), false);
         }
 
         @Override
-        public CompactionAwareWriter getCompactionAwareWriter(ColumnFamilyStore cfs,
+        public CompactionAwareWriter getCompactionAwareWriter(CompactionRealm realm,
                                                               Directories directories,
                                                               LifecycleTransaction txn,
                                                               Set<SSTableReader> nonExpiredSSTables)
         {
-            return new MaxSSTableSizeWriter(cfs, directories, txn, nonExpiredSSTables, 1 << 20, 1)
+            return new MaxSSTableSizeWriter(realm, directories, txn, nonExpiredSSTables, 1 << 20, 1)
             {
                 int switchCount = 0;
-
-                @Override
-                public SSTableWriter sstableWriter(Directories.DataDirectory directory, DecoratedKey nextKey)
+                public void switchCompactionWriter(Directories.DataDirectory directory, DecoratedKey nextKey)
                 {
                     switchCount++;
                     if (switchCount > 5)
                         throw new RuntimeException("Throw after a few sstables have had their starts moved");
-                    return super.sstableWriter(directory, nextKey);
+                    super.switchCompactionWriter(directory, nextKey);
                 }
             };
         }
@@ -652,24 +666,12 @@ public class CompactionsCQLTest extends CQLTester
             execute("INSERT INTO %s (id, id2, b) VALUES (?, ?, ?)", 22, i, StringUtils.repeat("ABCDEFG", 10));
     }
 
-    private void prepareWide(String table) throws Throwable
-    {
-        schemaChange(String.format("CREATE TABLE %s.%s (id int, id2 int, b text, primary key (id, id2))", KEYSPACE, table));
-        for (int i = 0; i < 100; i++)
-            execute(String.format("INSERT INTO %s.%s (id, id2, b) VALUES (?, ?, ?)", KEYSPACE, table), 22, i, StringUtils.repeat("ABCDEFG", 10));
-    }
-
     private void compactAndValidate()
-    {
-        compactAndValidate(getCurrentColumnFamilyStore());
-    }
-
-    private void compactAndValidate(ColumnFamilyStore cfs)
     {
         boolean gotException = false;
         try
         {
-            cfs.forceMajorCompaction();
+            getCurrentColumnFamilyStore().forceMajorCompaction();
         }
         catch(Throwable t)
         {
@@ -679,27 +681,21 @@ public class CompactionsCQLTest extends CQLTester
                 cause = cause.getCause();
             assertNotNull(cause);
             MarshalException me = (MarshalException) cause;
-            assertTrue(me.getMessage().contains(cfs.metadata.keyspace+"."+cfs.metadata.name));
+            assertTrue(me.getMessage().contains(getCurrentColumnFamilyStore().metadata.keyspace+"."+getCurrentColumnFamilyStore().metadata.name));
             assertTrue(me.getMessage().contains("Key 22"));
         }
         assertTrue(gotException);
-        assertSuspectAndReset(cfs.getLiveSSTables());
+        assertSuspectAndReset(getCurrentColumnFamilyStore().getLiveSSTables());
     }
 
     private void readAndValidate(boolean asc) throws Throwable
     {
-        readAndValidate(asc, getCurrentColumnFamilyStore());
-    }
-
-    private void readAndValidate(boolean asc, ColumnFamilyStore cfs) throws Throwable
-    {
-        String kscf = cfs.getKeyspaceName() + "." + cfs.name;
-        executeFormattedQuery("select * from " + kscf + " where id = 0 order by id2 "+(asc ? "ASC" : "DESC"));
+        execute("select * from %s where id = 0 order by id2 "+(asc ? "ASC" : "DESC"));
 
         boolean gotException = false;
         try
         {
-            for (UntypedResultSet.Row r : executeFormattedQuery("select * from " + kscf)) {}
+            for (UntypedResultSet.Row r : execute("select * from %s")) {}
         }
         catch (Throwable t)
         {
@@ -712,12 +708,12 @@ public class CompactionsCQLTest extends CQLTester
             MarshalException me = (MarshalException) cause;
             assertTrue(me.getMessage().contains("Key 22"));
         }
-        assertSuspectAndReset(cfs.getLiveSSTables());
+        assertSuspectAndReset(getCurrentColumnFamilyStore().getLiveSSTables());
         assertTrue(gotException);
         gotException = false;
         try
         {
-            executeFormattedQuery("select * from " + kscf + " where id = 22 order by id2 "+(asc ? "ASC" : "DESC"));
+            execute("select * from %s where id = 22 order by id2 "+(asc ? "ASC" : "DESC"));
         }
         catch (Throwable t)
         {
@@ -731,7 +727,7 @@ public class CompactionsCQLTest extends CQLTester
             assertTrue(me.getMessage().contains("Key 22"));
         }
         assertTrue(gotException);
-        assertSuspectAndReset(cfs.getLiveSSTables());
+        assertSuspectAndReset(getCurrentColumnFamilyStore().getLiveSSTables());
     }
 
     public void testPerCFSNeverPurgeTombstonesHelper(boolean deletedCell) throws Throwable
@@ -826,16 +822,15 @@ public class CompactionsCQLTest extends CQLTester
          localOptions.put("provide_overlapping_tombstones","row");
 
          getCurrentColumnFamilyStore().setCompactionParameters(localOptions);
-         assertEquals(CompactionParams.TombstoneOption.ROW, getCurrentColumnFamilyStore().getCompactionStrategyManager().getCompactionParams().tombstoneOption());
+         assertEquals(CompactionParams.TombstoneOption.ROW, getCurrentColumnFamilyStore().getCompactionParams().tombstoneOption());
      }
 
-
-    public boolean verifyStrategies(CompactionStrategyManager manager, Class<? extends AbstractCompactionStrategy> expected)
+    public boolean verifyStrategies(CompactionStrategyContainer strategyContainer, Class<? extends AbstractCompactionStrategy> expected)
     {
         boolean found = false;
-        for (List<AbstractCompactionStrategy> strategies : manager.getStrategies())
+        for (CompactionStrategy strategy : strategyContainer.getStrategies())
         {
-            if (!strategies.stream().allMatch((strategy) -> strategy.getClass().equals(expected)))
+            if (!strategy.getClass().equals(expected))
                 return false;
             found = true;
         }
@@ -863,79 +858,13 @@ public class CompactionsCQLTest extends CQLTester
     }
 
     @Test
-    public void testNoDiskspace() throws Throwable
+    public void testPeriodicCompactionsCall()
     {
-        createTable("create table %s (id int primary key, i int) with compaction={'class':'SizeTieredCompactionStrategy'}");
-        getCurrentColumnFamilyStore().disableAutoCompaction();
-        for (int i = 0; i < 10; i++)
-        {
-            execute("insert into %s (id, i) values (?,?)", i, i);
-            getCurrentColumnFamilyStore().forceBlockingFlush(ColumnFamilyStore.FlushReason.UNIT_TESTS);
-        }
-        CompactionInfo.Holder holder = holder(OperationType.COMPACTION);
-        CompactionManager.instance.active.beginCompaction(holder);
-        try
-        {
-            getCurrentColumnFamilyStore().forceMajorCompaction();
-            fail("Exception expected");
-        }
-        catch (Exception ignored)
-        {
-            // expected
-        }
-        finally
-        {
-            CompactionManager.instance.active.finishCompaction(holder);
-        }
-        // don't block compactions if there is a huge validation
-        holder = holder(OperationType.VALIDATION);
-        CompactionManager.instance.active.beginCompaction(holder);
-        try
-        {
-            getCurrentColumnFamilyStore().forceMajorCompaction();
-        }
-        finally
-        {
-            CompactionManager.instance.active.finishCompaction(holder);
-        }
-    }
+        createTable("CREATE TABLE %s (pk int PRIMARY KEY) WITH compaction = {'class': 'TestCompactionClass'}");
+        TestCompactionClass cs = (TestCompactionClass) getCurrentColumnFamilyStore().getCompactionStrategyContainer().getStrategies().get(0);
+        int prCount = cs.periodicReportsCalled;
+        CompactionManager.periodicReports();
+        assertTrue(cs.periodicReportsCalled > prCount);
 
-    private CompactionInfo.Holder holder(OperationType opType)
-    {
-        CompactionInfo.Holder holder = new CompactionInfo.Holder()
-        {
-            public CompactionInfo getCompactionInfo()
-            {
-                long availableSpace = 0;
-                for (File f : getCurrentColumnFamilyStore().getDirectories().getCFDirectories())
-                    availableSpace += PathUtils.tryGetSpace(f.toPath(), FileStore::getUsableSpace);
-
-                return new CompactionInfo(getCurrentColumnFamilyStore().metadata(),
-                                          opType,
-                                          +0,
-                                          +availableSpace * 2,
-                                          nextTimeUUID(),
-                                          getCurrentColumnFamilyStore().getLiveSSTables());
-            }
-
-            public boolean isGlobal()
-            {
-                return false;
-            }
-        };
-        return holder;
-    }
-
-    private void loadTestSStables(ColumnFamilyStore cfs, File ksDir) throws IOException
-    {
-        Keyspace.open(cfs.getKeyspaceName()).getColumnFamilyStore(cfs.name).truncateBlocking();
-        for (File cfDir : cfs.getDirectories().getCFDirectories())
-        {
-            File tableDir = new File(ksDir, cfs.name);
-            Assert.assertTrue("The table directory " + tableDir + " was not found", tableDir.isDirectory());
-            for (File file : tableDir.tryList())
-                LegacySSTableTest.copyFile(cfDir, file);
-        }
-        cfs.loadNewSSTables();
     }
 }

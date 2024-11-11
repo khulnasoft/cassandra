@@ -20,31 +20,37 @@ package org.apache.cassandra.utils.concurrent;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Set;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import com.google.common.util.concurrent.Uninterruptibles;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
-import org.apache.cassandra.concurrent.ExecutorPlus;
+import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
 import org.apache.cassandra.utils.Throwables;
 import org.awaitility.Awaitility;
 import org.awaitility.core.ConditionFactory;
 
-import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
-import static org.apache.cassandra.utils.FBUtilities.now;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.junit.Assert.fail;
 
 public class LoadingMapTest
 {
     private LoadingMap<Integer, String> map;
-    private final ExecutorPlus executor = executorFactory().pooled("TEST", 10);
+    private final DebuggableThreadPoolExecutor executor = DebuggableThreadPoolExecutor.createWithFixedPoolSize("TEST", 10);
     private final CyclicBarrier b1 = new CyclicBarrier(2);
     private final CyclicBarrier b2 = new CyclicBarrier(2);
 
@@ -59,10 +65,10 @@ public class LoadingMapTest
     @After
     public void afterTest() throws TimeoutException
     {
-        Instant deadline = now().plus(Duration.ofSeconds(5));
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(5));
         while (executor.getPendingTaskCount() > 0 || executor.getActiveTaskCount() > 0)
         {
-            if (now().isAfter(deadline))
+            if (Instant.now().isAfter(deadline))
                 throw new TimeoutException();
 
             Uninterruptibles.sleepUninterruptibly(100, TimeUnit.MILLISECONDS);
@@ -74,6 +80,107 @@ public class LoadingMapTest
     }
 
     @Test
+    public void compute()
+    {
+        assertThat(map.compute(1, (k, v) -> {
+            assertThat(k).isEqualTo(1);
+            assertThat(v).isNull();
+            return "one";
+        })).isEqualTo("one");
+        assertThat(map.get(1)).isEqualTo("one");
+
+        assertThat(map.compute(1, (k, v) -> {
+            assertThat(k).isEqualTo(1);
+            assertThat(v).isEqualTo("one");
+            return "1";
+        })).isEqualTo("1");
+        assertThat(map.get(1)).isEqualTo("1");
+
+        assertThat(map.compute(1, (k, v) -> {
+            assertThat(k).isEqualTo(1);
+            assertThat(v).isEqualTo("1");
+            return null;
+        })).isNull();
+        assertThat(map.get(1)).isNull();
+
+        assertThat(map.compute(1, (k, v) -> {
+            assertThat(k).isEqualTo(1);
+            assertThat(v).isNull();
+            return null;
+        })).isNull();
+        assertThat(map.get(1)).isNull();
+    }
+
+    @Test
+    public void computeIfAbsentOrIfMissing()
+    {
+        assertThat(map.computeIfPresent(1, (k, v) -> {
+            fail();
+            return "one";
+        })).isNull();
+        assertThat(map.get(1)).isNull();
+
+        assertThat(map.computeIfAbsent(1, k -> {
+            assertThat(k).isEqualTo(1);
+            return "one";
+        })).isEqualTo("one");
+        assertThat(map.get(1)).isEqualTo("one");
+
+        assertThat(map.computeIfAbsent(1, k -> {
+            fail();
+            return "1";
+        })).isEqualTo("one");
+        assertThat(map.get(1)).isEqualTo("one");
+
+        assertThat(map.computeIfPresent(1, (k, v) -> {
+            assertThat(k).isEqualTo(1);
+            assertThat(v).isEqualTo("one");
+            return "1";
+        })).isEqualTo("1");
+        assertThat(map.get(1)).isEqualTo("1");
+
+        assertThat(map.computeIfPresent(1, (k, v) -> {
+            assertThat(k).isEqualTo(1);
+            assertThat(v).isEqualTo("1");
+            return null;
+        })).isNull();
+        assertThat(map.get(1)).isNull();
+
+        assertThat(map.computeIfPresent(1, (k, v) -> {
+            fail();
+            return "one";
+        })).isNull();
+        assertThat(map.get(1)).isNull();
+    }
+
+    @Test
+    public void values() throws Exception
+    {
+        CyclicBarrier b3 = new CyclicBarrier(2);
+        map.computeIfAbsent(1, ignored -> "one");
+        map.computeIfAbsent(2, ignored -> "two");
+        map.computeIfAbsent(3, ignored -> "three");
+        executor.submit(() -> map.compute(2, (k, v) -> {
+            Throwables.maybeFail(b1::await);
+            return "2";
+        }));
+        executor.submit(() -> map.compute(3, (k, v) -> {
+            Throwables.maybeFail(b3::await);
+            Throwables.maybeFail(b2::await);
+            return null;
+        }));
+
+        Stream<String> s = map.valuesStream(); // we should not need to wait for the stream
+        b3.await(); // we need to make sure collect doesn't grab the value for key 3 before the update starts
+        Future<Set<String>> f = executor.submit(() -> s.collect(Collectors.toSet()));
+        assertThat(f).isNotDone();
+        b1.await();
+        assertThat(f).isNotDone();
+        b2.await();
+        await().untilAsserted(() -> assertThat(f.get()).containsExactlyInAnyOrder("one", "2"));
+    }
+
+    @Test
     public void loadForDifferentKeysShouldNotBlockEachOther() throws Exception
     {
         f1 = submitLoad(1, "one", b1, null);
@@ -82,10 +189,8 @@ public class LoadingMapTest
         f2 = submitLoad(2, "two", b2, null);
         await().untilAsserted(() -> assertThat(b2.getNumberWaiting()).isGreaterThan(0)); // wait until we enter loading function
 
-        assertThat(map.get(1)).isNotNull();
-        assertThat(map.get(2)).isNotNull();
-        assertThat(map.getIfReady(1)).isNull();
-        assertThat(map.getIfReady(2)).isNull();
+        assertThat(map.getUnsafe(1)).isNotNull().isNotDone();
+        assertThat(map.getUnsafe(2)).isNotNull().isNotDone();
         assertThat(f1).isNotDone();
         assertThat(f2).isNotDone();
 
@@ -99,22 +204,22 @@ public class LoadingMapTest
         b1.await();
         assertFuture(f1, "one");
 
-        assertThat(map.getIfReady(1)).isEqualTo("one");
-        assertThat(map.getIfReady(2)).isEqualTo("two");
+        assertThat(map.get(1)).isEqualTo("one");
+        assertThat(map.get(2)).isEqualTo("two");
     }
 
     @Test
     public void loadInsideLoadShouldNotCauseDeadlock()
     {
-        String v = map.blockingLoadIfAbsent(1, () -> {
-            assertThat(map.blockingLoadIfAbsent(2, () -> "two")).isEqualTo("two");
+        String v = map.compute(1, (ignoredKey, ignoredExisting) -> {
+            assertThat(map.compute(2, (_ignoredKey, _ignoredExisting) -> "two")).isEqualTo("two");
             return "one";
         });
 
         assertThat(v).isEqualTo("one");
 
-        assertThat(map.getIfReady(1)).isEqualTo("one");
-        assertThat(map.getIfReady(2)).isEqualTo("two");
+        assertThat(map.get(1)).isEqualTo("one");
+        assertThat(map.get(2)).isEqualTo("two");
     }
 
     @Test
@@ -128,10 +233,8 @@ public class LoadingMapTest
         f2 = submitUnload(2, "two", b2, null);
         await().untilAsserted(() -> assertThat(b2.getNumberWaiting()).isGreaterThan(0)); // wait until we enter unloading function
 
-        assertThat(map.get(1)).isNotNull();
-        assertThat(map.get(2)).isNotNull();
-        assertThat(map.getIfReady(1)).isNull();
-        assertThat(map.getIfReady(2)).isNull();
+        assertThat(map.getUnsafe(1)).isNotNull().isNotDone();
+        assertThat(map.getUnsafe(2)).isNotNull().isNotDone();
         assertThat(f1).isNotDone();
         assertThat(f2).isNotDone();
 
@@ -145,32 +248,39 @@ public class LoadingMapTest
         b1.await();
         assertFuture(f1, "one");
 
-        assertThat(map.get(1)).isNull();
-        assertThat(map.get(2)).isNull();
+        assertThat(map.getUnsafe(1)).isNull();
+        assertThat(map.getUnsafe(2)).isNull();
     }
 
     @Test
-    public void unloadInsideUnloadShouldNotCauseDeadlock() throws LoadingMap.UnloadExecutionException
+    public void unloadInsideUnloadShouldNotCauseDeadlock()
     {
         initMap();
+        AtomicReference<String> removed1 = new AtomicReference<>();
+        AtomicReference<String> removed2 = new AtomicReference<>();
 
-        String v = map.blockingUnloadIfPresent(1, v1 -> {
-            assertThat(map.getIfReady(1)).isNull();
+        assertThat(map.compute(1, (ignoredKey1, v1) -> {
+            if (v1 == null)
+                return null;
 
-            try
-            {
-                assertThat(map.blockingUnloadIfPresent(2, v2 -> assertThat(map.getIfReady(2)).isNull())).isEqualTo("two");
-            }
-            catch (LoadingMap.UnloadExecutionException e)
-            {
-                throw Throwables.unchecked(e);
-            }
-        });
+            assertThat(map.getUnsafe(1)).isNotDone();
+            assertThat(map.compute(2, (ignoredKey2, v2) -> {
+                if (v2 == null)
+                    return null;
 
-        assertThat(v).isEqualTo("one");
+                assertThat(map.getUnsafe(2)).isNotDone();
+                removed2.set(v2);
+                return null;
+            })).isNull();
+            assertThat(removed2.get()).isEqualTo("two");
+            removed1.set(v1);
+            return null;
+        })).isNull();
 
-        assertThat(map.get(1)).isNull();
-        assertThat(map.get(2)).isNull();
+        assertThat(removed1.get()).isEqualTo("one");
+
+        assertThat(map.getUnsafe(1)).isNull();
+        assertThat(map.getUnsafe(2)).isNull();
     }
 
     @Test
@@ -188,7 +298,7 @@ public class LoadingMapTest
         b1.await();
 
         assertFutures("one", "one");
-        assertThat(map.getIfReady(1)).isEqualTo("one");
+        assertThat(map.get(1)).isEqualTo("one");
         assertThat(b2.getNumberWaiting()).isZero();
     }
 
@@ -200,13 +310,12 @@ public class LoadingMapTest
         await().untilAsserted(() -> assertThat(b1.getNumberWaiting()).isGreaterThan(0)); // wait until we enter unloading function
 
         f2 = submitUnload(1, "one", b2, null);
-
-        assertFuture(f2, null); // f2 should return immediately
+        assertThat(f2).isNotDone();
 
         b1.await(); // let f1 continue
         assertFuture(f1, "one");
 
-        assertThat(map.getIfReady(1)).isNull();
+        assertThat(map.get(1)).isNull();
         assertThat(b2.getNumberWaiting()).isZero();
     }
 
@@ -227,7 +336,7 @@ public class LoadingMapTest
         b1.await();
 
         assertFutures("one", "two");
-        assertThat(map.getIfReady(1)).isEqualTo("two");
+        assertThat(map.get(1)).isEqualTo("two");
     }
 
     @Test
@@ -245,7 +354,7 @@ public class LoadingMapTest
         b1.await();
 
         assertFutures("one", "one");
-        assertThat(map.getIfReady(1)).isNull();
+        assertThat(map.get(1)).isNull();
     }
 
     @Test
@@ -269,9 +378,9 @@ public class LoadingMapTest
     @Test
     public void nullLoad()
     {
-        f1 = submitLoad(1, null, null, null);
-        f1.awaitThrowUncheckedOnInterrupt(5, TimeUnit.SECONDS);
-        assertThat(f1.cause()).isInstanceOf(NullPointerException.class);
+        f1 = submitLoad2(1, null, null, null);
+        assertThatExceptionOfType(ExecutionException.class).isThrownBy(() -> f1.get(5, TimeUnit.SECONDS))
+                                                           .withCauseInstanceOf(NullPointerException.class);
 
         assertThat(map.get(1)).isNull();
         assertThat(map.get(2)).isNull();
@@ -283,12 +392,12 @@ public class LoadingMapTest
         f1 = submitLoad(1, null, null, () -> {
             throw new RuntimeException("abc");
         });
-        f1.awaitThrowUncheckedOnInterrupt(5, TimeUnit.SECONDS);
-        assertThat(f1.cause()).isInstanceOf(RuntimeException.class);
-        assertThat(f1.cause()).hasMessage("abc");
+        assertThatExceptionOfType(ExecutionException.class).isThrownBy(() -> f1.get(5, TimeUnit.SECONDS))
+                                                           .withCauseInstanceOf(RuntimeException.class)
+                                                           .withMessageContaining("abc");
 
-        assertThat(map.get(1)).isNull();
-        assertThat(map.get(2)).isNull();
+        assertThat(map.getUnsafe(1)).isNull();
+        assertThat(map.getUnsafe(2)).isNull();
     }
 
     @Test
@@ -299,13 +408,31 @@ public class LoadingMapTest
         f1 = submitUnload(1, "one", null, () -> {
             throw new RuntimeException("abc");
         });
-        f1.awaitThrowUncheckedOnInterrupt(5, TimeUnit.SECONDS);
-        assertThat(f1.cause()).isInstanceOf(LoadingMap.UnloadExecutionException.class);
-        LoadingMap.UnloadExecutionException ex = (LoadingMap.UnloadExecutionException) f1.cause();
 
-        assertThat(ex).hasRootCauseInstanceOf(RuntimeException.class);
-        assertThat(ex).hasRootCauseMessage("abc");
-        assertThat((String) ex.value()).isEqualTo("one");
+        assertThatExceptionOfType(ExecutionException.class).isThrownBy(() -> f1.get(5, TimeUnit.SECONDS))
+                                                           .withCauseInstanceOf(RuntimeException.class)
+                                                           .withMessageContaining("abc");
+
+        assertThat(map.get(1)).isEqualTo("one");
+        assertThat(map.get(2)).isEqualTo("two");
+    }
+
+    @Test
+    public void failedUnload2()
+    {
+        initMap();
+
+        f1 = submitUnload2(1, "one", null, () -> {
+            throw new RuntimeException("abc");
+        });
+        assertThatExceptionOfType(ExecutionException.class).isThrownBy(() -> f1.get(5, TimeUnit.SECONDS))
+                                                           .withCauseInstanceOf(LoadingMap.UnloadExecutionException.class)
+                                                           .withRootCauseInstanceOf(RuntimeException.class)
+                                                           .withMessageContaining("abc")
+                                                           .matches(ex -> {
+
+                                                               return ((LoadingMap.UnloadExecutionException) ex.getCause()).value().equals("one");
+                                                           });
 
         assertThat(map.get(1)).isNull();
     }
@@ -326,7 +453,9 @@ public class LoadingMapTest
                     {
                         barrier.await();
                         Uninterruptibles.sleepUninterruptibly(ThreadLocalRandom.current().nextInt(50), TimeUnit.MILLISECONDS);
-                        map.blockingLoadIfAbsent(1, () -> {
+                        map.compute(1, (ignoredKey, existing) -> {
+                            if (existing != null)
+                                return existing;
                             int s = state.get();
                             Uninterruptibles.sleepUninterruptibly(ThreadLocalRandom.current().nextInt(50, 100), TimeUnit.MILLISECONDS);
                             if (!state.compareAndSet(s, s + 1))
@@ -354,13 +483,16 @@ public class LoadingMapTest
                     {
                         barrier.await();
                         Uninterruptibles.sleepUninterruptibly(ThreadLocalRandom.current().nextInt(50), TimeUnit.MILLISECONDS);
-                        map.blockingUnloadIfPresent(1, v -> {
+                        map.compute(1, (ignoredKey, v) -> {
+                            if (v == null)
+                                return null;
                             int s = state.incrementAndGet();
                             Uninterruptibles.sleepUninterruptibly(ThreadLocalRandom.current().nextInt(50, 100), TimeUnit.MILLISECONDS);
                             if (!state.compareAndSet(s, s + 1))
                                 failures.incrementAndGet();
                             if (ThreadLocalRandom.current().nextInt(100) < 10)
                                 throw new RuntimeException();
+                            return null;
                         });
                     }
                     catch (InterruptedException e)
@@ -387,9 +519,19 @@ public class LoadingMapTest
 
     private void assertFuture(Future<String> f, String v)
     {
-        assertThat(f.awaitThrowUncheckedOnInterrupt(5, TimeUnit.SECONDS)).isTrue();
-        f.rethrowIfFailed();
-        assertThat(f.getNow()).isEqualTo(v);
+        try
+        {
+            assertThat(f.get(5, TimeUnit.SECONDS)).isEqualTo(v);
+        }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+            throw Throwables.unchecked(e);
+        }
+        catch (ExecutionException | TimeoutException e)
+        {
+            throw Throwables.unchecked(e);
+        }
     }
 
     private void assertFutures(String v1, String v2)
@@ -399,6 +541,23 @@ public class LoadingMapTest
     }
 
     private Future<String> submitLoad(int key, String value, CyclicBarrier b, Throwables.DiscreteAction<?> extraAction)
+    {
+        return executor.submit(() -> map.compute(key, (ignoredKey, existing) -> {
+            if (existing != null)
+                return existing;
+
+            Throwable t = null;
+            if (extraAction != null)
+                t = Throwables.perform(t, extraAction);
+            if (b != null)
+                t = Throwables.perform(t, b::await);
+            if (t != null)
+                throw Throwables.unchecked(t);
+            return value;
+        }));
+    }
+
+    private Future<String> submitLoad2(int key, String value, CyclicBarrier b, Throwables.DiscreteAction<?> extraAction)
     {
         return executor.submit(() -> map.blockingLoadIfAbsent(key, () -> {
             Throwable a = null;
@@ -414,6 +573,28 @@ public class LoadingMapTest
 
     private Future<String> submitUnload(int key, String expectedValue, CyclicBarrier b, Throwables.DiscreteAction<?> extraAction)
     {
+        return executor.submit(() -> {
+            AtomicReference<String> removedValue = new AtomicReference<>();
+            map.compute(key, (ignoredKey, v) -> {
+                if (v == null)
+                    return null;
+                removedValue.set(v);
+                assertThat(v).isEqualTo(expectedValue);
+                Throwable t = null;
+                if (extraAction != null)
+                    t = Throwables.perform(t, extraAction);
+                if (b != null)
+                    t = Throwables.perform(t, b::await);
+                if (t != null)
+                    throw Throwables.unchecked(t);
+                return null;
+            });
+            return removedValue.get();
+        });
+    }
+
+    private Future<String> submitUnload2(int key, String expectedValue, CyclicBarrier b, Throwables.DiscreteAction<?> extraAction)
+    {
         return executor.submit(() -> map.blockingUnloadIfPresent(key, v -> {
             assertThat(v).isEqualTo(expectedValue);
             Throwable a = null;
@@ -428,11 +609,11 @@ public class LoadingMapTest
 
     private void initMap()
     {
-        map.blockingLoadIfAbsent(1, () -> "one");
-        map.blockingLoadIfAbsent(2, () -> "two");
+        map.compute(1, (ignoredKey, ignoredValue) -> "one");
+        map.compute(2, (ignoredKey, ignoredValue) -> "two");
 
-        assertThat(map.getIfReady(1)).isEqualTo("one");
-        assertThat(map.getIfReady(2)).isEqualTo("two");
+        assertThat(map.get(1)).isEqualTo("one");
+        assertThat(map.get(2)).isEqualTo("two");
     }
 
     private ConditionFactory await()

@@ -73,7 +73,7 @@ public final class ColumnConditions extends AbstractConditions
     public Collection<ColumnMetadata> getColumns()
     {
         return Stream.concat(columnConditions.stream(), staticConditions.stream())
-                     .map(e -> e.columnsExpression.firstColumn())
+                     .map(e -> e.column)
                      .collect(Collectors.toList());
     }
 
@@ -139,7 +139,7 @@ public final class ColumnConditions extends AbstractConditions
         public Builder add(ColumnCondition condition)
         {
             List<ColumnCondition> conds;
-            if (condition.columnsExpression.firstColumn().isStatic())
+            if (condition.column.isStatic())
             {
                 if (staticConditions.isEmpty())
                     staticConditions = new ArrayList<>();

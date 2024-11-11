@@ -44,7 +44,7 @@ public class ClientNotificiationsTest extends CQLTester
     @Before
     public void setup()
     {
-        requireNetwork(builder -> builder.withEventNotifier(notifier), builder -> {});
+        requireNetwork(builder -> builder.withEventNotifier(notifier));
     }
 
     @Parameterized.Parameter(0)

@@ -24,28 +24,34 @@ import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.Date;
-import java.util.HashSet;
 import java.util.Random;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.function.IntFunction;
 import java.util.function.Predicate;
 
-import com.google.common.collect.Range;
 import org.apache.commons.lang3.ArrayUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.esri.core.geometry.MultiPath;
+import com.esri.core.geometry.Polyline;
+import com.esri.core.geometry.ogc.OGCLineString;
+import com.esri.core.geometry.ogc.OGCPolygon;
+import org.apache.cassandra.db.marshal.datetime.DateRange;
+import org.apache.cassandra.db.marshal.geometry.LineString;
+import org.apache.cassandra.db.marshal.geometry.OgcGeometry;
+import org.apache.cassandra.db.marshal.geometry.Point;
+import org.apache.cassandra.db.marshal.geometry.Polygon;
 import org.quicktheories.core.Gen;
 import org.quicktheories.core.RandomnessSource;
+import org.quicktheories.generators.Generate;
 import org.quicktheories.generators.SourceDSL;
 import org.quicktheories.impl.Constraint;
-import org.quicktheories.impl.JavaRandom;
-
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_BLOB_SHARED_SEED;
 
 public final class Generators
 {
@@ -190,6 +196,8 @@ public final class Generators
     public static final Gen<InetAddress> INET_ADDRESS_GEN = INET_4_ADDRESS_GEN.mix(INET_6_ADDRESS_GEN);
     public static final Gen<InetAddress> INET_ADDRESS_UNRESOLVED_GEN = INET_4_ADDRESS_UNRESOLVED_GEN.mix(INET_6_ADDRESS_UNRESOLVED_GEN);
 
+    public static final Gen<DateRange.DateRangeBound.Precision> PRECISION_GEN = SourceDSL.arbitrary().enumValues(DateRange.DateRangeBound.Precision.class);
+
     /**
      * Implements a valid utf-8 generator.
      *
@@ -204,6 +212,10 @@ public final class Generators
     public static final Gen<Long> TIMESTAMP_NANOS;
     public static final Gen<Long> SMALL_TIME_SPAN_NANOS; // generate nanos in [0, 10] seconds
     public static final Gen<Long> TINY_TIME_SPAN_NANOS; // generate nanos in [0, 1) seconds
+    public static final Gen<DateRange> DATE_RANGE_GEN;
+    public static final Gen<Point> POINT_GEN;
+    public static final Gen<LineString> LINE_STRING_GEN;
+    public static final Gen<Polygon> POLYGON_GEN;
 
     static
     {
@@ -225,6 +237,10 @@ public final class Generators
         TIMESTAMP_NANOS = TIMESTAMP_GEN.map(t -> TimeUnit.MILLISECONDS.toNanos(t.getTime()) + t.getNanos());
         SMALL_TIME_SPAN_NANOS = rnd -> rnd.next(smallTimeSpanNanosConstraint);
         TINY_TIME_SPAN_NANOS = rnd -> rnd.next(nanosInSecondConstraint);
+        DATE_RANGE_GEN = new DateRangeGen();
+        POINT_GEN = SourceDSL.doubles().between(-100, 100).zip(SourceDSL.doubles().between(-100, 100), Point::new);
+        LINE_STRING_GEN = new LineStringGen();
+        POLYGON_GEN = new PolygonGen();
     }
 
     private Generators()
@@ -323,16 +339,6 @@ public final class Generators
 
     public static Gen<ByteBuffer> bytes(int min, int max)
     {
-        return bytes(min, max, SourceDSL.arbitrary().constant(BBCases.HEAP));
-    }
-
-    public static Gen<ByteBuffer> bytesAnyType(int min, int max)
-    {
-        return bytes(min, max, SourceDSL.arbitrary().enumValues(BBCases.class));
-    }
-
-    private static Gen<ByteBuffer> bytes(int min, int max, Gen<BBCases> cases)
-    {
         if (min < 0)
             throw new IllegalArgumentException("Asked for negative bytes; given " + min);
         if (max > MAX_BLOB_LENGTH)
@@ -347,31 +353,11 @@ public final class Generators
             // to add more randomness, also shift offset in the array so the same size doesn't yield the same bytes
             int offset = (int) rnd.next(Constraint.between(0, MAX_BLOB_LENGTH - size));
 
-            return handleCases(cases, rnd, offset, size);
+            return ByteBuffer.wrap(LazySharedBlob.SHARED_BYTES, offset, size);
         };
-    };
-
-    private enum BBCases { HEAP, READ_ONLY_HEAP, DIRECT, READ_ONLY_DIRECT }
-
-    private static ByteBuffer handleCases(Gen<BBCases> cases, RandomnessSource rnd, int offset, int size) {
-        switch (cases.generate(rnd))
-        {
-            case HEAP: return ByteBuffer.wrap(LazySharedBlob.SHARED_BYTES, offset, size);
-            case READ_ONLY_HEAP: return ByteBuffer.wrap(LazySharedBlob.SHARED_BYTES, offset, size).asReadOnlyBuffer();
-            case DIRECT: return directBufferFromSharedBlob(offset, size);
-            case READ_ONLY_DIRECT: return directBufferFromSharedBlob(offset, size).asReadOnlyBuffer();
-            default: throw new AssertionError("can't wait for jdk 17!");
-        }
     }
 
-    private static ByteBuffer directBufferFromSharedBlob(int offset, int size) {
-        ByteBuffer bb = ByteBuffer.allocateDirect(size);
-        bb.put(LazySharedBlob.SHARED_BYTES, offset, size);
-        bb.flip();
-        return bb;
-    }
-
-     /**
+    /**
      * Implements a valid utf-8 generator.
      *
      * Implementation note, currently relies on getBytes to strip out non-valid utf-8 chars, so is slow
@@ -426,28 +412,6 @@ public final class Generators
         };
     }
 
-    public static <T> Gen<T> unique(Gen<T> gen)
-    {
-        Set<T> dedup = new HashSet<>();
-        return filter(gen, dedup::add);
-    }
-
-    public static <T> Gen<T> cached(Gen<T> gen)
-    {
-        Object cacheMissed = new Object();
-        return new Gen<T>()
-        {
-            private Object value = cacheMissed;
-            @Override
-            public T generate(RandomnessSource randomnessSource)
-            {
-                if (value == cacheMissed)
-                    value = gen.generate(randomnessSource);
-                return (T) value;
-            }
-        };
-    }
-
     private static boolean isDash(char c)
     {
         switch (c)
@@ -460,13 +424,125 @@ public final class Generators
         }
     }
 
+    public static class DateRangeGen implements Gen<DateRange>
+    {
+        private final Gen<Boolean> lowerUnboundedGen;
+        private final Gen<Date> lowerGen;
+        private final Gen<DateRange.DateRangeBound.Precision> lowerBoundPrecisionGen;
+        private final Gen<Boolean> upperUnboundedGen;
+        private final Gen<Long> durationGen;
+        private final Gen<DateRange.DateRangeBound.Precision> upperBoundPrecisionGen;
+
+        public DateRangeGen(Gen<Boolean> lowerUnboundedGen,
+                            Gen<Date> lowerGen,
+                            Gen<DateRange.DateRangeBound.Precision> lowerBoundPrecisionGen,
+                            Gen<Boolean> upperUnboundedGen,
+                            Gen<Long> durationGen,
+                            Gen<DateRange.DateRangeBound.Precision> upperBoundPrecisionGen)
+        {
+            this.lowerUnboundedGen = lowerUnboundedGen;
+            this.lowerGen = lowerGen;
+            this.lowerBoundPrecisionGen = lowerBoundPrecisionGen;
+            this.upperUnboundedGen = upperUnboundedGen;
+            this.durationGen = durationGen;
+            this.upperBoundPrecisionGen = upperBoundPrecisionGen;
+        }
+
+        public DateRangeGen()
+        {
+            lowerUnboundedGen = SourceDSL.booleans().all();
+            lowerGen = DATE_GEN;
+            lowerBoundPrecisionGen = PRECISION_GEN;
+            upperUnboundedGen = SourceDSL.booleans().all();
+            durationGen = Generate.longRange(0, TimeUnit.DAYS.toMillis(1000));
+            upperBoundPrecisionGen = PRECISION_GEN;
+        }
+
+        @Override
+        public DateRange generate(RandomnessSource randomnessSource)
+        {
+            DateRange.DateRangeBuilder builder = DateRange.DateRangeBuilder.dateRange();
+
+            Long lowerBoundMillis = lowerGen.map(Date::getTime).generate(randomnessSource);
+            if (lowerUnboundedGen.generate(randomnessSource))
+                builder.withUnboundedLowerBound();
+            else
+                builder.withLowerBound(Instant.ofEpochMilli(lowerBoundMillis), lowerBoundPrecisionGen.generate(randomnessSource));
+
+            if (upperUnboundedGen.generate(randomnessSource))
+                builder.withUnboundedUpperBound();
+            else
+                builder.withUpperBound(Instant.ofEpochMilli(lowerBoundMillis + durationGen.generate(randomnessSource)), upperBoundPrecisionGen.generate(randomnessSource));
+
+            return builder.build();
+        }
+    }
+
+    private static void generatePath(MultiPath path, Gen<Integer> numPointsGen, Gen<Double> radiusGen, Gen<Point> centerPointGen, RandomnessSource randomnessSource)
+    {
+        int numPoints = numPointsGen.generate(randomnessSource);
+        Point centerPoint = centerPointGen.generate(randomnessSource);
+        double radius = radiusGen.generate(randomnessSource);
+
+        IntFunction<com.esri.core.geometry.Point> pointSupplier = i -> {
+            double x = Math.cos(i * 2 * Math.PI / numPoints) * radius + centerPoint.getOgcPoint().X();
+            double y = Math.sin(i * 2 * Math.PI / numPoints) * radius + centerPoint.getOgcPoint().Y();
+            return new com.esri.core.geometry.Point(x, y);
+        };
+
+        com.esri.core.geometry.Point point = pointSupplier.apply(0);
+        path.startPath(point);
+
+        for (int i = numPoints - 1; i > 0; i--) // must be clockwise
+        {
+            point = pointSupplier.apply(i);
+            path.lineTo(point);
+        }
+    }
+
+    public static final class LineStringGen implements Gen<LineString>
+    {
+        @Override
+        public LineString generate(RandomnessSource randomnessSource)
+        {
+            Polyline polyLine = new Polyline();
+            generatePath(polyLine, SourceDSL.integers().between(3, 5), SourceDSL.doubles().between(10, 100), POINT_GEN, randomnessSource);
+            try
+            {
+                return new LineString(new OGCLineString(polyLine, 0, OgcGeometry.SPATIAL_REFERENCE_4326));
+            }
+            catch (Exception e)
+            {
+                throw new RuntimeException("Failed to create a polyline: " + polyLine, e);
+            }
+        }
+    }
+
+    public static final class PolygonGen implements Gen<Polygon>
+    {
+        @Override
+        public Polygon generate(RandomnessSource randomnessSource)
+        {
+            com.esri.core.geometry.Polygon polygon = new com.esri.core.geometry.Polygon();
+            generatePath(polygon, SourceDSL.integers().between(3, 5), SourceDSL.doubles().between(10, 100), POINT_GEN, randomnessSource);
+            try
+            {
+                return new Polygon(new OGCPolygon(polygon, OgcGeometry.SPATIAL_REFERENCE_4326));
+            }
+            catch (Exception e)
+            {
+                throw new RuntimeException("Failed to create a polygon: " + polygon, e);
+            }
+        }
+    }
+
     private static final class LazySharedBlob
     {
         private static final byte[] SHARED_BYTES;
 
         static
         {
-            long blobSeed = TEST_BLOB_SHARED_SEED.getLong(System.currentTimeMillis());
+            long blobSeed = Long.parseLong(System.getProperty("cassandra.test.blob.shared.seed", Long.toString(System.currentTimeMillis())));
             logger.info("Shared blob Gen used seed {}", blobSeed);
 
             Random random = new Random(blobSeed);
@@ -526,20 +602,5 @@ public final class Generators
             }
             throw new IllegalStateException("Gave up trying to find values matching assumptions after " + maxAttempts + " attempts");
         }
-    }
-
-    public static Gen<Range<Integer>> forwardRanges(int min, int max)
-    {
-        return SourceDSL.integers().between(min, max)
-                        .flatMap(start -> SourceDSL.integers().between(start, max)
-                                                   .map(end -> Range.closed(start, end)));
-    }
-
-    public static <T> accord.utils.Gen<T> toGen(org.quicktheories.core.Gen<T> qt)
-    {
-        return rs -> {
-            JavaRandom r = new JavaRandom(rs.asJdkRandom());
-            return qt.generate(r);
-        };
     }
 }

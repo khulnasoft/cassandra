@@ -21,27 +21,28 @@ import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 
-import org.apache.cassandra.cql3.terms.Constants;
+import org.apache.cassandra.cql3.Constants;
+import org.apache.cassandra.cql3.Json;
 
 import org.apache.cassandra.cql3.CQL3Type;
-import org.apache.cassandra.cql3.terms.Term;
-import org.apache.cassandra.cql3.functions.ArgumentDeserializer;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.serializers.TypeSerializer;
 import org.apache.cassandra.serializers.UTF8Serializer;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.JsonUtils;
 
-public class UTF8Type extends StringType
+public class UTF8Type extends AbstractType<String>
 {
     public static final UTF8Type instance = new UTF8Type();
 
-    private static final ArgumentDeserializer ARGUMENT_DESERIALIZER = new DefaultArgumentDeserializer(instance);
-
-    private static final ByteBuffer MASKED_VALUE = instance.decompose("****");
-
     UTF8Type() {super(ComparisonType.BYTE_ORDER);} // singleton
+
+    @Override
+    public boolean allowsEmpty()
+    {
+        return true;
+    }
 
     public ByteBuffer fromString(String source)
     {
@@ -67,7 +68,7 @@ public class UTF8Type extends StringType
     {
         try
         {
-            return '"' + JsonUtils.quoteAsJsonString(ByteBufferUtil.string(buffer, StandardCharsets.UTF_8)) + '"';
+            return '"' + Json.quoteAsJsonString(ByteBufferUtil.string(buffer, StandardCharsets.UTF_8)) + '"';
         }
         catch (CharacterCodingException exc)
         {
@@ -83,27 +84,13 @@ public class UTF8Type extends StringType
         return this == previous || previous == AsciiType.instance;
     }
 
-    @Override
     public CQL3Type asCQL3Type()
     {
         return CQL3Type.Native.TEXT;
     }
 
-    @Override
     public TypeSerializer<String> getSerializer()
     {
         return UTF8Serializer.instance;
-    }
-
-    @Override
-    public ArgumentDeserializer getArgumentDeserializer()
-    {
-        return ARGUMENT_DESERIALIZER;
-    }
-
-    @Override
-    public ByteBuffer getMaskedValue()
-    {
-        return MASKED_VALUE;
     }
 }

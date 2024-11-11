@@ -15,9 +15,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.service.disk.usage;
 
+
+import java.net.InetAddress;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
@@ -36,8 +37,8 @@ import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.NoSpamLogger;
 
 /**
- * Starts {@link DiskUsageMonitor} to monitor local disk usage state and broadcast new state via Gossip.
- * At the same time, it caches cluster's disk usage state received via Gossip.
+ * Start {@link DiskUsageMonitor} to monitor local disk usage state and broadcast new state via Gossip.
+ * At the same time, cache cluster disk usage state received via Gossip.
  */
 public class DiskUsageBroadcaster implements IEndpointStateChangeSubscriber
 {
@@ -54,12 +55,11 @@ public class DiskUsageBroadcaster implements IEndpointStateChangeSubscriber
     public DiskUsageBroadcaster(DiskUsageMonitor monitor)
     {
         this.monitor = monitor;
-        // TODO: switch to TCM?
         Gossiper.instance.register(this);
     }
 
     /**
-     * @return {@code true} if any node in the cluster is STUFFED OR FULL
+     * @return true if any node in the cluster is STUFFED OR FULL
      */
     public boolean hasStuffedOrFullNode()
     {
@@ -67,37 +67,32 @@ public class DiskUsageBroadcaster implements IEndpointStateChangeSubscriber
     }
 
     /**
-     * @return {@code true} if given node's disk usage is FULL
+     * @return true if given node's disk usage is FULL
      */
     public boolean isFull(InetAddressAndPort endpoint)
     {
-        return state(endpoint).isFull();
+        return usageInfo.getOrDefault(endpoint, DiskUsageState.NOT_AVAILABLE).isFull();
     }
 
     /**
-     * @return {@code true} if given node's disk usage is STUFFED
+     * @return true if given node's disk usage is STUFFED
      */
     public boolean isStuffed(InetAddressAndPort endpoint)
     {
-        return state(endpoint).isStuffed();
-    }
-
-    @VisibleForTesting
-    public DiskUsageState state(InetAddressAndPort endpoint)
-    {
-        return usageInfo.getOrDefault(endpoint, DiskUsageState.NOT_AVAILABLE);
+        return usageInfo.getOrDefault(endpoint, DiskUsageState.NOT_AVAILABLE).isStuffed();
     }
 
     public void startBroadcasting()
     {
         monitor.start(newState -> {
-            logger.trace("Disseminating disk usage info: {}", newState);
-            Gossiper.instance.addLocalApplicationState(ApplicationState.DISK_USAGE,
-                                                       StorageService.instance.valueFactory.diskUsage(newState.name()));
+
+            if (logger.isTraceEnabled())
+                logger.trace("Disseminating disk usage info: {}", newState);
+
+            Gossiper.instance.addLocalApplicationState(ApplicationState.DISK_USAGE, StorageService.instance.valueFactory.diskUsage(newState.name()));
         });
     }
 
-    @Override
     public void onChange(InetAddressAndPort endpoint, ApplicationState state, VersionedValue value)
     {
         if (state != ApplicationState.DISK_USAGE)
@@ -110,57 +105,37 @@ public class DiskUsageBroadcaster implements IEndpointStateChangeSubscriber
         }
         catch (IllegalArgumentException e)
         {
-            noSpamLogger.warn(String.format("Found unknown DiskUsageState: %s. Using default state %s instead.",
-                                            value.value, usageState));
+            noSpamLogger.warn(String.format("Found unknown DiskUsageState: %s. Using default state %s instead.", value.value, usageState.toString()));
         }
         usageInfo.put(endpoint, usageState);
 
-        hasStuffedOrFullNode = usageState.isStuffedOrFull() || computeHasStuffedOrFullNode();
+        hasStuffedOrFullNode = usageState.isStuffedOrFull() || usageInfo.values().stream().anyMatch(DiskUsageState::isStuffedOrFull);
     }
 
-    private boolean computeHasStuffedOrFullNode()
-    {
-        for (DiskUsageState replicaState : usageInfo.values())
-        {
-            if (replicaState.isStuffedOrFull())
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    @Override
     public void onJoin(InetAddressAndPort endpoint, EndpointState epState)
     {
         updateDiskUsage(endpoint, epState);
     }
 
-    @Override
     public void beforeChange(InetAddressAndPort endpoint, EndpointState currentState, ApplicationState newStateKey, VersionedValue newValue)
     {
-        // nothing to do here
     }
 
-    @Override
     public void onAlive(InetAddressAndPort endpoint, EndpointState state)
     {
         updateDiskUsage(endpoint, state);
     }
 
-    @Override
     public void onDead(InetAddressAndPort endpoint, EndpointState state)
     {
-        // do nothing, as we don't care about dead nodes
+        // do nothing, as we don't care about dead node
     }
 
-    @Override
     public void onRestart(InetAddressAndPort endpoint, EndpointState state)
     {
         updateDiskUsage(endpoint, state);
     }
 
-    @Override
     public void onRemove(InetAddressAndPort endpoint)
     {
         usageInfo.remove(endpoint);

@@ -23,7 +23,6 @@ import java.util.Set;
 
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.commitlog.CommitLogPosition;
-import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.tracing.Tracing;
@@ -39,7 +38,8 @@ public class CassandraKeyspaceWriteHandler implements KeyspaceWriteHandler
     }
 
     @Override
-    public WriteContext beginWrite(Mutation mutation, boolean makeDurable) throws RequestExecutionException
+    @SuppressWarnings("resource") // group is closed when CassandraWriteContext is closed
+    public WriteContext beginWrite(Mutation mutation, WriteOptions writeOptions) throws RequestExecutionException
     {
         OpOrder.Group group = null;
         try
@@ -48,7 +48,7 @@ public class CassandraKeyspaceWriteHandler implements KeyspaceWriteHandler
 
             // write the mutation to the commitlog and memtables
             CommitLogPosition position = null;
-            if (makeDurable)
+            if (writeOptions.shouldWriteCommitLog(mutation.getKeyspaceName()))
             {
                 position = addToCommitLog(mutation);
             }
@@ -66,12 +66,13 @@ public class CassandraKeyspaceWriteHandler implements KeyspaceWriteHandler
 
     private CommitLogPosition addToCommitLog(Mutation mutation)
     {
+        CommitLogPosition position;
         // Usually one of these will be true, so first check if that's the case.
         boolean allSkipCommitlog = true;
         boolean noneSkipCommitlog = true;
-        for (PartitionUpdate update : mutation.getPartitionUpdates())
+        for (TableId id : mutation.getTableIds())
         {
-            if (update.metadata().params.memtable.factory().writesShouldSkipCommitLog())
+            if (keyspace.getColumnFamilyStore(id).writesShouldSkipCommitLog())
                 noneSkipCommitlog = false;
             else
                 allSkipCommitlog = false;
@@ -84,10 +85,10 @@ public class CassandraKeyspaceWriteHandler implements KeyspaceWriteHandler
             else
             {
                 Set<TableId> ids = new HashSet<>();
-                for (PartitionUpdate update : mutation.getPartitionUpdates())
+                for (TableId id : mutation.getTableIds())
                 {
-                    if (update.metadata().params.memtable.factory().writesShouldSkipCommitLog())
-                        ids.add(update.metadata().id);
+                    if (keyspace.getColumnFamilyStore(id).writesShouldSkipCommitLog())
+                        ids.add(id);
                 }
                 mutation = mutation.without(ids);
             }
@@ -96,9 +97,11 @@ public class CassandraKeyspaceWriteHandler implements KeyspaceWriteHandler
         // or memoize the mutation.getTableIds()->ids map (needs invalidation on schema version change).
 
         Tracing.trace("Appending to commitlog");
-        return CommitLog.instance.add(mutation);
+        position = CommitLog.instance.add(mutation);
+        return position;
     }
 
+    @SuppressWarnings("resource") // group is closed when CassandraWriteContext is closed
     private WriteContext createEmptyContext()
     {
         OpOrder.Group group = null;

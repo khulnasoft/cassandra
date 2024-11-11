@@ -22,27 +22,22 @@ package org.apache.cassandra.stress.settings;
 
 
 import java.io.Serializable;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
-import com.datastax.driver.core.AuthProvider;
-import com.datastax.driver.core.PlainTextAuthProvider;
-import com.datastax.driver.core.ProtocolOptions;
-import com.datastax.driver.core.ProtocolVersion;
+import com.khulnasoft.driver.core.AuthProvider;
+import com.khulnasoft.driver.core.PlainTextAuthProvider;
+import com.khulnasoft.driver.core.ProtocolOptions;
+import com.khulnasoft.driver.core.ProtocolVersion;
 import org.apache.cassandra.stress.util.ResultLogger;
-
-import static java.lang.String.format;
-import static org.apache.cassandra.stress.settings.SettingsCredentials.CQL_PASSWORD_PROPERTY_KEY;
-import static org.apache.cassandra.stress.settings.SettingsCredentials.CQL_USERNAME_PROPERTY_KEY;
-import static org.apache.cassandra.utils.LocalizeString.toUpperCaseLocalized;
 
 public class SettingsMode implements Serializable
 {
 
     public final ConnectionAPI api;
     public final ConnectionStyle style;
+    public final CqlVersion cqlVersion;
     public final ProtocolVersion protocolVersion;
 
     public final String username;
@@ -56,33 +51,20 @@ public class SettingsMode implements Serializable
     private final String compression;
 
 
-    public SettingsMode(GroupedOptions options, SettingsCredentials credentials)
+    public SettingsMode(GroupedOptions options)
     {
-        Cql3Options opts = (Cql3Options) options;
-
-        if (opts.simplenative.setByUser())
+        if (options instanceof Cql3Options)
         {
-            protocolVersion = ProtocolVersion.NEWEST_SUPPORTED;
-            api = ConnectionAPI.SIMPLE_NATIVE;
-            style = opts.usePrepared.setByUser() ? ConnectionStyle.CQL_PREPARED : ConnectionStyle.CQL;
-            compression = ProtocolOptions.Compression.NONE.name();
-            username = null;
-            password = null;
-            authProvider = null;
-            authProviderClassname = null;
-            maxPendingPerConnection = null;
-            connectionsPerHost = null;
-        }
-        else
-        {
+            cqlVersion = CqlVersion.CQL3;
+            Cql3Options opts = (Cql3Options) options;
             protocolVersion = "NEWEST_SUPPORTED".equals(opts.protocolVersion.value())
                     ? ProtocolVersion.NEWEST_SUPPORTED
                     : ProtocolVersion.fromInt(Integer.parseInt(opts.protocolVersion.value()));
             api = ConnectionAPI.JAVA_DRIVER_NATIVE;
-            style = opts.useUnPrepared.setByUser() ? ConnectionStyle.CQL : ConnectionStyle.CQL_PREPARED;
-            compression = ProtocolOptions.Compression.valueOf(toUpperCaseLocalized(opts.useCompression.value())).name();
-            username = opts.user.setByUser() ? opts.user.value() : credentials.cqlUsername;
-            password = opts.password.setByUser() ? opts.password.value() : credentials.cqlPassword;
+            style = opts.useUnPrepared.setByUser() ? ConnectionStyle.CQL :  ConnectionStyle.CQL_PREPARED;
+            compression = ProtocolOptions.Compression.valueOf(opts.useCompression.value().toUpperCase()).name();
+            username = opts.user.value();
+            password = opts.password.value();
             maxPendingPerConnection = opts.maxPendingPerConnection.value().isEmpty() ? null : Integer.valueOf(opts.maxPendingPerConnection.value());
             connectionsPerHost = opts.connectionsPerHost.value().isEmpty() ? null : Integer.valueOf(opts.connectionsPerHost.value());
             authProviderClassname = opts.authProvider.value();
@@ -96,9 +78,9 @@ public class SettingsMode implements Serializable
                     // check we can instantiate it
                     if (PlainTextAuthProvider.class.equals(clazz))
                     {
-                        authProvider = (AuthProvider) clazz.getConstructor(String.class, String.class).newInstance(username, password);
-                    }
-                    else
+                        authProvider = (AuthProvider) clazz.getConstructor(String.class, String.class)
+                            .newInstance(username, password);
+                    } else
                     {
                         authProvider = (AuthProvider) clazz.newInstance();
                     }
@@ -113,6 +95,23 @@ public class SettingsMode implements Serializable
                 authProvider = null;
             }
         }
+        else if (options instanceof Cql3SimpleNativeOptions)
+        {
+            cqlVersion = CqlVersion.CQL3;
+            Cql3SimpleNativeOptions opts = (Cql3SimpleNativeOptions) options;
+            protocolVersion = ProtocolVersion.NEWEST_SUPPORTED;
+            api = ConnectionAPI.SIMPLE_NATIVE;
+            style = opts.usePrepared.setByUser() ? ConnectionStyle.CQL_PREPARED : ConnectionStyle.CQL;
+            compression = ProtocolOptions.Compression.NONE.name();
+            username = null;
+            password = null;
+            authProvider = null;
+            authProviderClassname = null;
+            maxPendingPerConnection = null;
+            connectionsPerHost = null;
+        }
+        else
+            throw new IllegalStateException();
     }
 
     public ProtocolOptions.Compression compression()
@@ -120,82 +119,95 @@ public class SettingsMode implements Serializable
         return ProtocolOptions.Compression.valueOf(compression);
     }
 
-    private static class Cql3Options extends GroupedOptions
+    // Option Declarations
+
+    private static final class Cql3NativeOptions extends Cql3Options
     {
+        final OptionSimple mode = new OptionSimple("native", "", null, "", true);
+        OptionSimple mode()
+        {
+            return mode;
+        }
+    }
+
+    private static abstract class Cql3Options extends GroupedOptions
+    {
+        final OptionSimple api = new OptionSimple("cql3", "", null, "", true);
         final OptionSimple protocolVersion = new OptionSimple("protocolVersion=", "[2-5]+", "NEWEST_SUPPORTED", "CQL Protocol Version", false);
-        final OptionSimple usePrepared = new OptionSimple("prepared", "", null, "Use prepared statements", false);
-        final OptionSimple useUnPrepared = new OptionSimple("unprepared", "", null, "Use unprepared statements", false);
+        final OptionSimple useUnPrepared = new OptionSimple("unprepared", "", null, "force use of unprepared statements", false);
         final OptionSimple useCompression = new OptionSimple("compression=", "none|lz4|snappy", "none", "", false);
         final OptionSimple port = new OptionSimple("port=", "[0-9]+", "9046", "", false);
-        final OptionSimple user = new OptionSimple("user=", ".+", null,
-                                                   format("CQL user, when specified, it will override the value in credentials file for key '%s'", CQL_USERNAME_PROPERTY_KEY),
-                                                   false);
-        final OptionSimple password = new OptionSimple("password=", ".+", null,
-                                                       format("CQL password, when specified, it will override the value in credentials file for key '%s'", CQL_PASSWORD_PROPERTY_KEY),
-                                                       false);
-        final OptionSimple authProvider = new OptionSimple("auth-provider=", ".*", null, "Fully qualified implementation of com.datastax.driver.core.AuthProvider", false);
+        final OptionSimple user = new OptionSimple("user=", ".+", null, "username", false);
+        final OptionSimple password = new OptionSimple("password=", ".+", null, "password", false);
+        final OptionSimple authProvider = new OptionSimple("auth-provider=", ".*", null, "Fully qualified implementation of com.khulnasoft.driver.core.AuthProvider", false);
         final OptionSimple maxPendingPerConnection = new OptionSimple("maxPending=", "[0-9]+", "128", "Maximum pending requests per connection", false);
         final OptionSimple connectionsPerHost = new OptionSimple("connectionsPerHost=", "[0-9]+", "8", "Number of connections per host", false);
-        final OptionSimple simplenative = new OptionSimple("simplenative", "", null, "", false);
+
+        abstract OptionSimple mode();
+        @Override
+        public List<? extends Option> options()
+        {
+            return Arrays.asList(mode(), useUnPrepared, api, useCompression, port, user, password, authProvider,
+                                 maxPendingPerConnection, connectionsPerHost, protocolVersion);
+        }
+    }
+
+    private static final class Cql3SimpleNativeOptions extends GroupedOptions
+    {
+        final OptionSimple api = new OptionSimple("cql3", "", null, "", true);
+        final OptionSimple useSimpleNative = new OptionSimple("simplenative", "", null, "", true);
+        final OptionSimple usePrepared = new OptionSimple("prepared", "", null, "", false);
+        final OptionSimple port = new OptionSimple("port=", "[0-9]+", "9046", "", false);
 
         @Override
         public List<? extends Option> options()
         {
-            return Arrays.asList(user, password, port, authProvider,maxPendingPerConnection,
-                                 useCompression, connectionsPerHost, usePrepared, useUnPrepared,
-                                 protocolVersion, simplenative);
+            return Arrays.asList(useSimpleNative, usePrepared, api, port);
         }
     }
+
     // CLI Utility Methods
     public void printSettings(ResultLogger out)
     {
         out.printf("  API: %s%n", api);
         out.printf("  Connection Style: %s%n", style);
+        out.printf("  CQL Version: %s%n", cqlVersion);
         out.printf("  Protocol Version: %s%n", protocolVersion);
         out.printf("  Username: %s%n", username);
-        out.printf("  Password: %s%n", (password == null ? password : "*suppressed*"));
+        out.printf("  Password: %s%n", (password==null?password:"*suppressed*"));
         out.printf("  Auth Provide Class: %s%n", authProviderClassname);
         out.printf("  Max Pending Per Connection: %d%n", maxPendingPerConnection);
         out.printf("  Connections Per Host: %d%n", connectionsPerHost);
         out.printf("  Compression: %s%n", compression);
+
     }
 
-    public static SettingsMode get(Map<String, String[]> clArgs, SettingsCredentials credentials)
+
+    public static SettingsMode get(Map<String, String[]> clArgs)
     {
         String[] params = clArgs.remove("-mode");
-        List<String> paramList = new ArrayList<>();
         if (params == null)
         {
-            Cql3Options opts = new Cql3Options();
+            Cql3NativeOptions opts = new Cql3NativeOptions();
+            opts.accept("cql3");
+            opts.accept("native");
             opts.accept("prepared");
-            return new SettingsMode(opts, credentials);
+            return new SettingsMode(opts);
         }
-        for (String item : params)
+
+        GroupedOptions options = GroupedOptions.select(params, new Cql3NativeOptions(), new Cql3SimpleNativeOptions());
+        if (options == null)
         {
-            // Warn on obsolete arguments, to be removed in future release
-            if (item.equals("cql3") || item.equals("native"))
-            {
-                System.err.println("Warning: ignoring deprecated parameter: " + item);
-            }
-            else
-            {
-                paramList.add(item);
-            }
+            printHelp();
+            System.out.println("Invalid -mode options provided, see output for valid options");
+            System.exit(1);
         }
-        if (paramList.contains("prepared") && paramList.contains("unprepared"))
-        {
-            System.err.println("Warning: can't specify both prepared and unprepared, using prepared");
-            paramList.remove("unprepared");
-        }
-        String[] updated = paramList.toArray(new String[paramList.size()]);
-        GroupedOptions options = new Cql3Options();
-        GroupedOptions.select(updated, options);
-        return new SettingsMode(options, credentials);
+        return new SettingsMode(options);
     }
 
     public static void printHelp()
     {
-        GroupedOptions.printOptions(System.out, "-mode", new Cql3Options());
+        GroupedOptions.printOptions(System.out, "-mode", new Cql3NativeOptions(), new Cql3SimpleNativeOptions());
     }
 
     public static Runnable helpPrinter()

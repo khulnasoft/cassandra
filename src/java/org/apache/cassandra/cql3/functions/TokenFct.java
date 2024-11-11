@@ -18,14 +18,13 @@
 package org.apache.cassandra.cql3.functions;
 
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 import java.util.List;
 
 import org.apache.cassandra.cql3.AssignmentTestable;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.db.CBuilder;
+import org.apache.cassandra.db.ClusteringBuilder;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.transport.ProtocolVersion;
@@ -40,14 +39,6 @@ public class TokenFct extends NativeScalarFunction
         this.metadata = metadata;
     }
 
-    @Override
-    public Arguments newArguments(ProtocolVersion version)
-    {
-        ArgumentDeserializer[] deserializers = new ArgumentDeserializer[argTypes.size()];
-        Arrays.fill(deserializers, ArgumentDeserializer.NOOP_DESERIALIZER);
-        return new FunctionArguments(version, deserializers);
-    }
-
     private static AbstractType<?>[] getKeyTypes(TableMetadata metadata)
     {
         AbstractType<?>[] types = new AbstractType[metadata.partitionKeyColumns().size()];
@@ -57,12 +48,12 @@ public class TokenFct extends NativeScalarFunction
         return types;
     }
 
-    public ByteBuffer execute(Arguments arguments) throws InvalidRequestException
+    public ByteBuffer execute(ProtocolVersion protocolVersion, List<ByteBuffer> parameters) throws InvalidRequestException
     {
-        CBuilder builder = CBuilder.create(metadata.partitionKeyAsClusteringComparator());
-        for (int i = 0; i < arguments.size(); i++)
+        ClusteringBuilder builder = ClusteringBuilder.create(metadata.partitionKeyAsClusteringComparator());
+        for (int i = 0; i < parameters.size(); i++)
         {
-            ByteBuffer bb = arguments.get(i);
+            ByteBuffer bb = parameters.get(i);
             if (bb == null)
                 return null;
             builder.add(bb);
@@ -77,26 +68,28 @@ public class TokenFct extends NativeScalarFunction
             @Override
             public NativeFunction getOrCreateFunction(List<? extends AssignmentTestable> args,
                                                       AbstractType<?> receiverType,
-                                                      String receiverKeyspace,
-                                                      String receiverTable)
+                                                      String receiverKs,
+                                                      String receiverCf)
             {
-                if (receiverKeyspace == null)
+                if (receiverKs == null)
                     throw new InvalidRequestException("No receiver keyspace has been specified for function " + name);
 
-                if (receiverTable == null)
+                if (receiverCf == null)
                     throw new InvalidRequestException("No receiver table has been specified for function " + name);
 
-                TableMetadata metadata = Schema.instance.getTableMetadata(receiverKeyspace, receiverTable);
+                TableMetadata metadata = Schema.instance.getTableMetadata(receiverKs, receiverCf);
                 if (metadata == null)
                     throw new InvalidRequestException(String.format("The receiver table %s.%s specified by call to " +
                                                                     "function %s hasn't been found",
-                                                                    receiverKeyspace, receiverTable, name));
+                                                                    receiverKs, receiverCf, name));
 
                 return new TokenFct(metadata);
             }
 
             @Override
-            protected NativeFunction doGetOrCreateFunction(List<AbstractType<?>> argTypes, AbstractType<?> receiverType)
+            protected NativeFunction doGetOrCreateFunction(List<? extends AssignmentTestable> args,
+                                                           List<AbstractType<?>> argTypes,
+                                                           AbstractType<?> receiverType)
             {
                 throw new AssertionError("Should be unreachable");
             }

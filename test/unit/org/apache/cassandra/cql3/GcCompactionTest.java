@@ -49,13 +49,13 @@ public class GcCompactionTest extends CQLTester
     // Test needs synchronous table drop to avoid flushes causing flaky failures
 
     @Override
-    protected String createTable(String query)
+    public String createTable(String query)
     {
         return super.createTable(KEYSPACE_PER_TEST, query);
     }
 
     @Override
-    protected UntypedResultSet execute(String query, Object... values)
+    public UntypedResultSet execute(String query, Object... values)
     {
         return executeFormattedQuery(formatQuery(KEYSPACE_PER_TEST, query), values);
     }
@@ -204,7 +204,7 @@ public class GcCompactionTest extends CQLTester
                   "  PRIMARY KEY ((key), column)" +
                   ") WITH compaction = { 'class' : 'LeveledCompactionStrategy' };");
 
-      assertEquals("LeveledCompactionStrategy", getCurrentColumnFamilyStore().getCompactionStrategyManager().getName());
+      assertEquals("LeveledCompactionStrategy", getCurrentColumnFamilyStore().getCompactionStrategyContainer().getName());
 
       for (int i = 0; i < KEY_COUNT; ++i)
           for (int j = 0; j < CLUSTERING_COUNT; ++j)
@@ -507,14 +507,14 @@ public class GcCompactionTest extends CQLTester
 
     int countTombstoneMarkers(SSTableReader reader)
     {
-        long nowInSec = FBUtilities.nowInSeconds();
+        int nowInSec = FBUtilities.nowInSeconds();
         return count(reader, x -> x.isRangeTombstoneMarker() || x.isRow() && ((Row) x).hasDeletion(nowInSec) ? 1 : 0, x -> x.partitionLevelDeletion().isLive() ? 0 : 1);
     }
 
     int countRows(SSTableReader reader)
     {
         boolean enforceStrictLiveness = reader.metadata().enforceStrictLiveness();
-        long nowInSec = FBUtilities.nowInSeconds();
+        int nowInSec = FBUtilities.nowInSeconds();
         return count(reader, x -> x.isRow() && ((Row) x).hasLiveData(nowInSec, enforceStrictLiveness) ? 1 : 0, x -> 0);
     }
 

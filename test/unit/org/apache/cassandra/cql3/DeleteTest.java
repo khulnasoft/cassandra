@@ -21,10 +21,10 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
-import com.datastax.driver.core.ConsistencyLevel;
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.ResultSetFuture;
-import com.datastax.driver.core.Session;
+import com.khulnasoft.driver.core.ConsistencyLevel;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.ResultSetFuture;
+import com.khulnasoft.driver.core.Session;
 
 public class DeleteTest extends CQLTester
 {

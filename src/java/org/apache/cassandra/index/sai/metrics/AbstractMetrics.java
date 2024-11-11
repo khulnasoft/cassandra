@@ -17,13 +17,13 @@
  */
 package org.apache.cassandra.index.sai.metrics;
 
-import com.codahale.metrics.MetricRegistry;
-import org.apache.cassandra.index.sai.utils.IndexIdentifier;
+import java.util.ArrayList;
+import java.util.List;
+
 import org.apache.cassandra.metrics.CassandraMetricsRegistry;
 import org.apache.cassandra.metrics.DefaultNameFactory;
 
 import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
-import static org.apache.cassandra.metrics.CassandraMetricsRegistry.resolveShortMetricName;
 
 public abstract class AbstractMetrics
 {
@@ -33,11 +33,7 @@ public abstract class AbstractMetrics
     protected final String table;
     private final String index;
     private final String scope;
-
-    AbstractMetrics(IndexIdentifier indexIdentifier, String scope)
-    {
-        this(indexIdentifier.keyspaceName, indexIdentifier.tableName, indexIdentifier.indexName, scope);
-    }
+    protected final List<CassandraMetricsRegistry.MetricName> tracked = new ArrayList<>();
 
     AbstractMetrics(String keyspace, String table, String scope)
     {
@@ -46,7 +42,7 @@ public abstract class AbstractMetrics
 
     AbstractMetrics(String keyspace, String table, String index, String scope)
     {
-        assert keyspace != null && table != null : "SAI metrics must include keyspace and table";
+        assert keyspace != null && table != null : "SAI metrics must include table metadata";
         this.keyspace = keyspace;
         this.table = table;
         this.index = index;
@@ -55,8 +51,8 @@ public abstract class AbstractMetrics
 
     public void release()
     {
-        Metrics.removeIfMatch(fullName -> resolveShortMetricName(fullName,  DefaultNameFactory.GROUP_NAME, TYPE, null),
-                              this::createMetricName, m -> {});
+        tracked.forEach(Metrics::remove);
+        tracked.clear();
     }
 
     protected CassandraMetricsRegistry.MetricName createMetricName(String name)
@@ -66,12 +62,17 @@ public abstract class AbstractMetrics
 
     protected CassandraMetricsRegistry.MetricName createMetricName(String name, String scope)
     {
-        assert name.indexOf('.') == -1 : String.format("Metric name '%s' should not contain '.'", name);
-        return new CassandraMetricsRegistry.MetricName(DefaultNameFactory.GROUP_NAME,
-                                                       TYPE,
-                                                       name,
-                                                       MetricRegistry.name(keyspace, table, index, scope),
-                                                       createMBeanName(name, scope));
+        String metricScope = keyspace + "." + table;
+        if (index != null)
+        {
+            metricScope += "." + index;
+        }
+        metricScope += "." + scope + "." + name;
+
+        CassandraMetricsRegistry.MetricName metricName = new CassandraMetricsRegistry.MetricName(DefaultNameFactory.GROUP_NAME,
+                                                                                                 TYPE, name, metricScope, createMBeanName(name, scope));
+        tracked.add(metricName);
+        return metricName;
     }
 
     private String createMBeanName(String name, String scope)

@@ -20,13 +20,14 @@ package org.apache.cassandra.transport;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.LockSupport;
-import java.util.function.BooleanSupplier;
-import java.util.function.Predicate;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -54,11 +55,12 @@ import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaChangeListener;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.service.*;
+import org.apache.cassandra.service.CassandraDaemon;
+import org.apache.cassandra.service.IEndpointLifecycleSubscriber;
+import org.apache.cassandra.service.NativeTransportService;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.transport.messages.EventMessage;
 import org.apache.cassandra.utils.FBUtilities;
-
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 
 public class Server implements CassandraDaemon.Server
 {
@@ -70,7 +72,7 @@ public class Server implements CassandraDaemon.Server
     private static final Logger logger = LoggerFactory.getLogger(Server.class);
     private static final boolean useEpoll = NativeTransportService.useEpoll();
 
-    private final ConnectionTracker connectionTracker;
+    private final ConnectionTracker connectionTracker = new ConnectionTracker();
 
     private final Connection.Factory connectionFactory = new Connection.Factory()
     {
@@ -85,7 +87,7 @@ public class Server implements CassandraDaemon.Server
     private final AtomicBoolean isRunning = new AtomicBoolean(false);
     private final PipelineConfigurator pipelineConfigurator;
     private final EventLoopGroup workerGroup;
-    private final Dispatcher dispatcher;
+
     private Server (Builder builder)
     {
         this.socket = builder.getSocket();
@@ -102,16 +104,14 @@ public class Server implements CassandraDaemon.Server
                 workerGroup = new NioEventLoopGroup();
         }
 
-        dispatcher = new Dispatcher(DatabaseDescriptor.useNativeTransportLegacyFlusher());
         pipelineConfigurator = builder.pipelineConfigurator != null
                                ? builder.pipelineConfigurator
                                : new PipelineConfigurator(useEpoll,
                                                           DatabaseDescriptor.getRpcKeepAlive(),
-                                                          builder.tlsEncryptionPolicy,
-                                                          dispatcher);
+                                                          DatabaseDescriptor.useNativeTransportLegacyFlusher(),
+                                                          builder.tlsEncryptionPolicy);
 
         EventNotifier notifier = builder.eventNotifier != null ? builder.eventNotifier : new EventNotifier();
-        connectionTracker = new ConnectionTracker(isRunning::get);
         notifier.registerConnectionTracker(connectionTracker);
         StorageService.instance.register(notifier);
         Schema.instance.registerListener(notifier);
@@ -119,13 +119,8 @@ public class Server implements CassandraDaemon.Server
 
     public void stop()
     {
-        stop(false);
-    }
-
-    public void stop(boolean force)
-    {
-         if (isRunning.compareAndSet(true, false))
-             close(force);
+        if (isRunning.compareAndSet(true, false))
+            close();
     }
 
     public boolean isRunning()
@@ -158,14 +153,6 @@ public class Server implements CassandraDaemon.Server
         return connectionTracker.countConnectedClientsByUser();
     }
 
-    /**
-     * @return A count of the number of clients matching the given predicate.
-     */
-    public int countConnectedClients(Predicate<ServerConnection> predicate)
-    {
-        return connectionTracker.countConnectedClients(predicate);
-    }
-
     public List<ConnectedClient> getConnectedClients()
     {
         List<ConnectedClient> result = new ArrayList<>();
@@ -189,22 +176,8 @@ public class Server implements CassandraDaemon.Server
         connectionTracker.protocolVersionTracker.clear();
     }
 
-    private void close(boolean force)
+    private void close()
     {
-        if (!force)
-        {
-            long deadline = nanoTime() + DatabaseDescriptor.getNativeTransportTimeout(TimeUnit.NANOSECONDS);
-            while (!dispatcher.isDone())
-            {
-                if (nanoTime() > deadline)
-                {
-                    logger.warn("Some connections took longer than the native transport timeout to complete");
-                    break;
-                }
-                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(100));
-            }
-        }
-
         // Close opened connections
         connectionTracker.closeAll();
 
@@ -292,13 +265,11 @@ public class Server implements CassandraDaemon.Server
         public final ChannelGroup allChannels = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
         private final EnumMap<Event.Type, ChannelGroup> groups = new EnumMap<>(Event.Type.class);
         private final ProtocolVersionTracker protocolVersionTracker = new ProtocolVersionTracker();
-        private final BooleanSupplier isRunning;
 
-        public ConnectionTracker(BooleanSupplier isRunning)
+        public ConnectionTracker()
         {
             for (Event.Type type : Event.Type.values())
                 groups.put(type, new DefaultChannelGroup(type.toString(), GlobalEventExecutor.INSTANCE));
-            this.isRunning = isRunning;
         }
 
         public void addConnection(Channel ch, Connection connection)
@@ -307,11 +278,6 @@ public class Server implements CassandraDaemon.Server
 
             if (ch.remoteAddress() instanceof InetSocketAddress)
                 protocolVersionTracker.addConnection(((InetSocketAddress) ch.remoteAddress()).getAddress(), connection.getVersion());
-        }
-
-        public boolean isRunning()
-        {
-            return isRunning.getAsBoolean();
         }
 
         public void register(Event.Type type, Channel ch)
@@ -335,7 +301,7 @@ public class Server implements CassandraDaemon.Server
 
         void closeAll()
         {
-            allChannels.flush().close().awaitUninterruptibly();
+            allChannels.close().awaitUninterruptibly();
         }
 
         int countConnectedClients()
@@ -346,24 +312,6 @@ public class Server implements CassandraDaemon.Server
                - When server is stopped: the size is 0
             */
             return allChannels.size() != 0 ? allChannels.size() - 1 : 0;
-        }
-
-        int countConnectedClients(Predicate<ServerConnection> predicate)
-        {
-            int count = 0;
-            for (Channel c : allChannels)
-            {
-                Connection connection = c.attr(Connection.attributeKey).get();
-                if (connection instanceof ServerConnection)
-                {
-                    ServerConnection conn = (ServerConnection) connection;
-                    if (predicate.test(conn))
-                    {
-                        count++;
-                    }
-                }
-            }
-            return count;
         }
 
         Map<String, Integer> countConnectedClientsByUser()
@@ -435,18 +383,18 @@ public class Server implements CassandraDaemon.Server
             this.connectionTracker = connectionTracker;
         }
 
-        private InetAddressAndPort getNativeAddress(InetAddressAndPort endpoint)
+        protected InetAddressAndPort getNativeAddress(InetAddressAndPort endpoint)
         {
             try
             {
-                return InetAddressAndPort.getByName(StorageService.instance.getNativeaddress(endpoint, true));
+                return InetAddressAndPort.getByName(StorageService.instance.getNativeAddress(endpoint, true));
             }
             catch (UnknownHostException e)
             {
                 // That should not happen, so log an error, but return the
                 // endpoint address since there's a good change this is right
                 logger.error("Problem retrieving RPC address for {}", endpoint, e);
-                return InetAddressAndPort.getByAddressOverrideDefaults(endpoint.getAddress(), DatabaseDescriptor.getNativeTransportPort());
+                return InetAddressAndPort.getByAddressOverrideDefaults(endpoint.address, DatabaseDescriptor.getNativeTransportPort());
             }
         }
 

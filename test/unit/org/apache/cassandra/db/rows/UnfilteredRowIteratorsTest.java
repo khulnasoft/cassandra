@@ -21,10 +21,12 @@ package org.apache.cassandra.db.rows;
 import java.util.Arrays;
 import java.util.Iterator;
 
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.junit.Assert;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.BufferDecoratedKey;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
@@ -51,12 +53,16 @@ public class UnfilteredRowIteratorsTest
                                 .addClusteringColumn("ck", Int32Type.instance)
                                 .addRegularColumn("v1", Int32Type.instance)
                                 .addRegularColumn("v2", Int32Type.instance)
-                                .offline()
                                 .build();
         v1Metadata = metadata.regularAndStaticColumns().columns(false).getSimple(0);
         v2Metadata = metadata.regularAndStaticColumns().columns(false).getSimple(1);
     }
 
+    @BeforeClass
+    public static void setupClass()
+    {
+        DatabaseDescriptor.daemonInitialization();
+    }
 
     @Test
     public void concatTest()

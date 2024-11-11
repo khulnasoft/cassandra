@@ -42,8 +42,7 @@ import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaTestUtil;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.transport.Dispatcher;
+import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.utils.FBUtilities;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -66,6 +65,7 @@ import org.openjdk.jmh.runner.options.OptionsBuilder;
 
 import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
 
+
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
 @Warmup(iterations = 5, time = 1, timeUnit = TimeUnit.SECONDS)
@@ -87,8 +87,8 @@ public class BatchStatementBench
     static String keyspace = "keyspace1";
     String table = "tbl";
 
-    long nowInSec = FBUtilities.nowInSeconds();
-    Dispatcher.RequestTime queryStartTime = Dispatcher.RequestTime.forImmediateExecution();
+    int nowInSec = FBUtilities.nowInSeconds();
+    long queryStartTime = System.nanoTime();
     BatchStatement bs;
     BatchQueryOptions bqo;
 
@@ -116,16 +116,16 @@ public class BatchStatementBench
         {
             modifications.add((ModificationStatement) prepared.statement);
             parameters.add(Lists.newArrayList(bytes(uniquePartition ? i : 1), bytes(i), bytes(i)));
-            queryOrIdList.add(prepared.rawCQLStatement);
+            queryOrIdList.add(prepared.statement.getRawCQLStatement());
         }
-        bs = new BatchStatement(BatchStatement.Type.UNLOGGED, VariableSpecifications.empty(), modifications, Attributes.none());
+        bs = new BatchStatement(null, BatchStatement.Type.UNLOGGED, VariableSpecifications.empty(), modifications, Attributes.none());
         bqo = BatchQueryOptions.withPerStatementVariables(QueryOptions.DEFAULT, parameters, queryOrIdList);
     }
 
     @Benchmark
     public void bench()
     {
-        bs.getMutations(ClientState.forInternalCalls(), bqo, false, nowInSec, nowInSec, queryStartTime);
+        bs.getMutations(QueryState.forInternalCalls(), bqo, false, nowInSec, nowInSec, queryStartTime);
     }
 
 

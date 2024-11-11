@@ -21,11 +21,14 @@ package org.apache.cassandra.locator;
 import org.apache.cassandra.locator.ReplicaCollection.Builder.Conflict;
 import org.apache.cassandra.utils.FBUtilities;
 
+import java.util.AbstractList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+
+import com.google.common.collect.Lists;
 
 /**
  * A collection of Endpoints for a given ring position.  This will typically reside in a ReplicaLayout,
@@ -53,14 +56,20 @@ public abstract class Endpoints<E extends Endpoints<E>> extends AbstractReplicaC
         return byEndpoint().keySet();
     }
 
-    public InetAddressAndPort endpoint(int i)
-    {
-        return get(i).endpoint();
-    }
-
     public List<InetAddressAndPort> endpointList()
     {
-        return asList(Replica::endpoint);
+        return new AbstractList<InetAddressAndPort>()
+        {
+            public InetAddressAndPort get(int index)
+            {
+                return list.get(index).endpoint();
+            }
+
+            public int size()
+            {
+                return list.size;
+            }
+        };
     }
 
     public Map<InetAddressAndPort, Replica> byEndpoint()
@@ -80,11 +89,6 @@ public abstract class Endpoints<E extends Endpoints<E>> extends AbstractReplicaC
                         replica);
     }
 
-    public boolean contains(InetAddressAndPort endpoint)
-    {
-        return endpoint != null && byEndpoint().containsKey(endpoint);
-    }
-
     public E withoutSelf()
     {
         InetAddressAndPort self = FBUtilities.getBroadcastAddressAndPort();
@@ -95,11 +99,6 @@ public abstract class Endpoints<E extends Endpoints<E>> extends AbstractReplicaC
     {
         InetAddressAndPort self = FBUtilities.getBroadcastAddressAndPort();
         return byEndpoint().get(self);
-    }
-
-    public boolean containsSelf()
-    {
-        return selfIfPresent() != null;
     }
 
     /**

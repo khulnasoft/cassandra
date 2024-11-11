@@ -37,10 +37,6 @@ import com.google.common.collect.Sets;
 import org.apache.cassandra.db.marshal.TimeUUIDType;
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
 
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUIDAsBytes;
-
 
 public class UUIDTest
 {
@@ -48,22 +44,22 @@ public class UUIDTest
     public void verifyType1()
     {
 
-        UUID uuid = nextTimeUUID().asUUID();
+        UUID uuid = UUIDGen.getTimeUUID();
         assert uuid.version() == 1;
     }
 
     @Test
     public void verifyOrdering1()
     {
-        UUID one = nextTimeUUID().asUUID();
-        UUID two = nextTimeUUID().asUUID();
+        UUID one = UUIDGen.getTimeUUID();
+        UUID two = UUIDGen.getTimeUUID();
         assert one.timestamp() < two.timestamp();
     }
 
     @Test
     public void testDecomposeAndRaw()
     {
-        UUID a = nextTimeUUID().asUUID();
+        UUID a = UUIDGen.getTimeUUID();
         byte[] decomposed = UUIDGen.decompose(a);
         UUID b = UUIDGen.getUUID(ByteBuffer.wrap(decomposed));
         assert a.equals(b);
@@ -72,7 +68,7 @@ public class UUIDTest
     @Test
     public void testToFromByteBuffer()
     {
-        UUID a = nextTimeUUID().asUUID();
+        UUID a = UUIDGen.getTimeUUID();
         ByteBuffer bb = UUIDGen.toByteBuffer(a);
         UUID b = UUIDGen.getUUID(bb);
         assert a.equals(b);
@@ -82,8 +78,8 @@ public class UUIDTest
     public void testTimeUUIDType()
     {
         TimeUUIDType comp = TimeUUIDType.instance;
-        ByteBuffer first = ByteBuffer.wrap(nextTimeUUIDAsBytes());
-        ByteBuffer second = ByteBuffer.wrap(nextTimeUUIDAsBytes());
+        ByteBuffer first = ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes());
+        ByteBuffer second = ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes());
         assert comp.compare(first, second) < 0;
         assert comp.compare(second, first) > 0;
         ByteBuffer sameAsFirst = ByteBuffer.wrap(UUIDGen.decompose(UUIDGen.getUUID(first)));
@@ -94,8 +90,8 @@ public class UUIDTest
     public void testUUIDTimestamp()
     {
         long now = System.currentTimeMillis();
-        TimeUUID uuid = nextTimeUUID();
-        long tstamp = uuid.unix(MILLISECONDS);
+        UUID uuid = UUIDGen.getTimeUUID();
+        long tstamp = UUIDGen.getAdjustedTimestamp(uuid);
 
         // I'll be damn is the uuid timestamp is more than 10ms after now
         assert now <= tstamp && now >= tstamp - 10 : "now = " + now + ", timestamp = " + tstamp;
@@ -122,7 +118,7 @@ public class UUIDTest
 
                 for (long i = 0; i < iterations; i++)
                 {
-                    UUID uuid = nextTimeUUID().asUUID();
+                    UUID uuid = UUIDGen.getTimeUUID();
                     newTimestamp = uuid.timestamp();
 
                     if (lastTimestamp >= newTimestamp)

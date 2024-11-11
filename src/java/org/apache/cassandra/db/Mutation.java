@@ -18,10 +18,16 @@
 package org.apache.cassandra.db;
 
 import java.io.IOException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Supplier;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableCollection;
@@ -44,18 +50,21 @@ import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.sensors.RequestSensors;
+import org.apache.cassandra.sensors.RequestTracker;
 import org.apache.cassandra.service.AbstractWriteResponseHandler;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.concurrent.Future;
 
+import static org.apache.cassandra.net.MessagingService.VERSION_30;
+import static org.apache.cassandra.net.MessagingService.VERSION_3014;
 import static org.apache.cassandra.net.MessagingService.VERSION_40;
-import static org.apache.cassandra.net.MessagingService.VERSION_50;
-import static org.apache.cassandra.net.MessagingService.VERSION_51;
-import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
+import static org.apache.cassandra.net.MessagingService.VERSION_41;
+import static org.apache.cassandra.net.MessagingService.VERSION_SG_10;
+import static org.apache.cassandra.utils.MonotonicClock.approxTime;
 
-public class Mutation implements IMutation, Supplier<Mutation>
+public class Mutation implements IMutation
 {
-    public static final MutationSerializer serializer = new MutationSerializer();
+    public static final MutationSerializer serializer = new MutationSerializer(PartitionUpdate.serializer);
 
     // todo this is redundant
     // when we remove it, also restore SerializationsTest.testMutationRead to not regenerate new Mutations each test
@@ -71,6 +80,7 @@ public class Mutation implements IMutation, Supplier<Mutation>
     final AtomicLong viewLockAcquireStart = new AtomicLong(0);
 
     private final boolean cdcEnabled;
+    private final RequestTracker requestTracker;
 
     private static final int SERIALIZATION_VERSION_COUNT = MessagingService.Version.values().length;
     // Contains serialized representations of this mutation.
@@ -98,6 +108,7 @@ public class Mutation implements IMutation, Supplier<Mutation>
         this.modifications = modifications;
         this.cdcEnabled = cdcEnabled;
         this.approxCreatedAtNanos = approxCreatedAtNanos;
+        this.requestTracker = RequestTracker.instance;
     }
 
     private static boolean cdcEnabled(Iterable<PartitionUpdate> modifications)
@@ -135,6 +146,11 @@ public class Mutation implements IMutation, Supplier<Mutation>
         return keyspaceName;
     }
 
+    public Keyspace getKeyspace()
+    {
+        return Keyspace.open(keyspaceName);
+    }
+
     public Collection<TableId> getTableIds()
     {
         return modifications.keySet();
@@ -148,18 +164,6 @@ public class Mutation implements IMutation, Supplier<Mutation>
     public ImmutableCollection<PartitionUpdate> getPartitionUpdates()
     {
         return modifications.values();
-    }
-
-    @Override
-    public Supplier<Mutation> hintOnFailure()
-    {
-        return this;
-    }
-
-    @Override
-    public Mutation get()
-    {
-        return this;
     }
 
     public void validateSize(int version, int overhead)
@@ -228,31 +232,29 @@ public class Mutation implements IMutation, Supplier<Mutation>
             if (updates.isEmpty())
                 continue;
 
-            modifications.put(table, updates.size() == 1 ? updates.get(0) : PartitionUpdate.merge(updates));
+            modifications.put(table, PartitionUpdate.merge(updates));
             updates.clear();
         }
         return new Mutation(ks, key, modifications.build(), approxTime.now());
     }
 
-    public Future<?> applyFuture()
+    public CompletableFuture<?> applyFuture(WriteOptions writeOptions)
     {
         Keyspace ks = Keyspace.open(keyspaceName);
-        return ks.applyFuture(this, Keyspace.open(keyspaceName).getMetadata().params.durableWrites, true);
+        return ks.applyFuture(this, writeOptions, true).thenRun(() -> {
+            RequestSensors sensors = requestTracker.get();
+            if (sensors != null)
+                sensors.syncAllSensors();
+        });
     }
 
-    private void apply(Keyspace keyspace, boolean durableWrites, boolean isDroppable)
+    public void apply(WriteOptions writeOptions)
     {
-        keyspace.apply(this, durableWrites, true, isDroppable);
-    }
+        Keyspace.open(keyspaceName).apply(this, writeOptions);
 
-    public void apply(boolean durableWrites, boolean isDroppable)
-    {
-        apply(Keyspace.open(keyspaceName), durableWrites, isDroppable);
-    }
-
-    public void apply(boolean durableWrites)
-    {
-        apply(durableWrites, true);
+        RequestSensors sensors = requestTracker.get();
+        if (sensors != null)
+            sensors.syncAllSensors();
     }
 
     /*
@@ -261,13 +263,12 @@ public class Mutation implements IMutation, Supplier<Mutation>
      */
     public void apply()
     {
-        Keyspace keyspace = Keyspace.open(keyspaceName);
-        apply(keyspace, keyspace.getMetadata().params.durableWrites, true);
+        apply(WriteOptions.DEFAULT);
     }
 
     public void applyUnsafe()
     {
-        apply(false);
+        apply(WriteOptions.DEFAULT_WITHOUT_COMMITLOG);
     }
 
     public long getTimeout(TimeUnit unit)
@@ -316,26 +317,36 @@ public class Mutation implements IMutation, Supplier<Mutation>
         return buff.append("])").toString();
     }
 
+    private int serializedSize30;
+    private int serializedSize3014;
     private int serializedSize40;
-    private int serializedSize50;
-    private int serializedSize51;
+    private int serializedSize41;
+    private int serializedSizeSG10;
 
     public int serializedSize(int version)
     {
         switch (version)
         {
+            case VERSION_30:
+                if (serializedSize30 == 0)
+                    serializedSize30 = (int) serializer.serializedSize(this, VERSION_30);
+                return serializedSize30;
+            case VERSION_3014:
+                if (serializedSize3014 == 0)
+                    serializedSize3014 = (int) serializer.serializedSize(this, VERSION_3014);
+                return serializedSize3014;
             case VERSION_40:
                 if (serializedSize40 == 0)
                     serializedSize40 = (int) serializer.serializedSize(this, VERSION_40);
                 return serializedSize40;
-            case VERSION_50:
-                if (serializedSize50 == 0)
-                    serializedSize50 = (int) serializer.serializedSize(this, VERSION_50);
-                return serializedSize50;
-            case VERSION_51:
-                if (serializedSize51 == 0)
-                    serializedSize51 = (int) serializer.serializedSize(this, VERSION_51);
-                return serializedSize51;
+            case VERSION_41:
+                if (serializedSize41 == 0)
+                    serializedSize41 = (int) serializer.serializedSize(this, VERSION_41);
+                return serializedSize41;
+            case VERSION_SG_10:
+                if (serializedSizeSG10 == 0)
+                    serializedSizeSG10 = (int) serializer.serializedSize(this, VERSION_SG_10);
+                return serializedSizeSG10;
             default:
                 throw new IllegalStateException("Unknown serialization version: " + version);
         }
@@ -409,6 +420,13 @@ public class Mutation implements IMutation, Supplier<Mutation>
 
     public static class MutationSerializer implements IVersionedSerializer<Mutation>
     {
+        private final PartitionUpdate.PartitionUpdateSerializer partitionUpdateSerializer;
+
+        public MutationSerializer(PartitionUpdate.PartitionUpdateSerializer partitionUpdateSerializer)
+        {
+            this.partitionUpdateSerializer = partitionUpdateSerializer;
+        }
+
         public void serialize(Mutation mutation, DataOutputPlus out, int version) throws IOException
         {
             serialization(mutation, version).serialize(PartitionUpdate.serializer, mutation, out, version);
@@ -475,7 +493,7 @@ public class Mutation implements IMutation, Supplier<Mutation>
 
             /* serialize the modifications in the mutation */
             int size = modifications.size();
-            out.writeUnsignedVInt32(size);
+            out.writeUnsignedVInt(size);
 
             assert size > 0;
             for (PartitionUpdate partitionUpdate : modifications.values())
@@ -492,10 +510,10 @@ public class Mutation implements IMutation, Supplier<Mutation>
             {
                 teeIn = new TeeDataInputPlus(in, dob, CACHEABLE_MUTATION_SIZE_LIMIT);
 
-                int size = teeIn.readUnsignedVInt32();
+                int size = (int) teeIn.readUnsignedVInt();
                 assert size > 0;
 
-                PartitionUpdate update = PartitionUpdate.serializer.deserialize(teeIn, version, flag);
+                PartitionUpdate update = partitionUpdateSerializer.deserialize(teeIn, version, flag);
                 if (size == 1)
                 {
                     m = new Mutation(update);
@@ -508,7 +526,7 @@ public class Mutation implements IMutation, Supplier<Mutation>
                     modifications.put(update.metadata().id, update);
                     for (int i = 1; i < size; ++i)
                     {
-                        update = PartitionUpdate.serializer.deserialize(teeIn, version, flag);
+                        update = partitionUpdateSerializer.deserialize(teeIn, version, flag);
                         modifications.put(update.metadata().id, update);
                     }
                     m = new Mutation(update.metadata().keyspace, dk, modifications.build(), approxTime.now());

@@ -35,7 +35,6 @@ import java.util.zip.CRC32;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Objects;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.ParameterizedClass;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.FSReadError;
@@ -43,7 +42,7 @@ import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileInputStreamPlus;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.security.EncryptionContext;
-import org.apache.cassandra.utils.JsonUtils;
+import org.json.simple.JSONValue;
 
 import static org.apache.cassandra.utils.FBUtilities.updateChecksumInt;
 
@@ -52,25 +51,30 @@ public class CommitLogDescriptor
     private static final String SEPARATOR = "-";
     private static final String FILENAME_PREFIX = "CommitLog" + SEPARATOR;
     private static final String FILENAME_EXTENSION = ".log";
-    private static final String INDEX_FILENAME_SUFFIX = "_cdc.idx";
     // match both legacy and new version of commitlogs Ex: CommitLog-12345.log and CommitLog-4-12345.log.
     private static final Pattern COMMIT_LOG_FILE_PATTERN = Pattern.compile(FILENAME_PREFIX + "((\\d+)(" + SEPARATOR + "\\d+)?)" + FILENAME_EXTENSION);
 
     static final String COMPRESSION_PARAMETERS_KEY = "compressionParameters";
     static final String COMPRESSION_CLASS_KEY = "compressionClass";
 
+    /**
+     * the versions below ARE NOT the same thing as MessagingService versions
+     * see {@link #getMessagingVersion()}
+     */
     // We don't support anything pre-3.0
-    public static final int VERSION_30 = 6;
-    public static final int VERSION_40 = 7;
-    public static final int VERSION_50 = 8;
-    public static final int VERSION_51 = 9;
+    private static final int VERSION_30 = 6;
+    private static final int VERSION_40 = 7;
+    // For compatibility with CNDB
+    private static final int VERSION_DSE_68 = 680;
+    // Stargazer 1.0 messaging
+    private static final int VERSION_SG_10 = 100;
 
     /**
      * Increment this number if there is a changes in the commit log disc layout or MessagingVersion changes.
      * Note: make sure to handle {@link #getMessagingVersion()}
      */
     @VisibleForTesting
-    public static final int current_version = DatabaseDescriptor.getStorageCompatibilityMode().isBefore(5) ? VERSION_40 : VERSION_51;
+    public static final int current_version = VERSION_SG_10;
 
     final int version;
     public final long id;
@@ -130,7 +134,7 @@ public class CommitLogDescriptor
         if (encryptionContext != null)
             params.putAll(encryptionContext.toHeaderParameters());
         params.putAll(additionalHeaders);
-        return JsonUtils.writeAsJsonString(params);
+        return JSONValue.toJSONString(params);
     }
 
     public static CommitLogDescriptor fromHeader(File file, EncryptionContext encryptionContext)
@@ -171,7 +175,7 @@ public class CommitLogDescriptor
 
         if (crc == (int) checkcrc.getValue())
         {
-            Map<?, ?> map = (Map<?, ?>) JsonUtils.decodeJson(parametersBytes);
+            Map<?, ?> map = (Map<?, ?>) JSONValue.parse(new String(parametersBytes, StandardCharsets.UTF_8));
             return new CommitLogDescriptor(version, id, parseCompression(map), EncryptionContext.createFromMap(map, encryptionContext));
         }
         return null;
@@ -193,27 +197,15 @@ public class CommitLogDescriptor
 
     public static CommitLogDescriptor fromFileName(String name)
     {
-        Matcher matcher = extactFromFileName(name);
-        long id = Long.parseLong(matcher.group(3).split(SEPARATOR)[1]);
-        return new CommitLogDescriptor(Integer.parseInt(matcher.group(2)), id, null, new EncryptionContext());
-    }
-
-    public static long idFromFileName(String name)
-    {
-        Matcher matcher = extactFromFileName(name);
-        return Long.parseLong(matcher.group(3).split(SEPARATOR)[1]);
-    }
-
-    private static Matcher extactFromFileName(String name)
-    {
-        Matcher matcher = COMMIT_LOG_FILE_PATTERN.matcher(name);
-        if (!matcher.matches())
+        Matcher matcher;
+        if (!(matcher = COMMIT_LOG_FILE_PATTERN.matcher(name)).matches())
             throw new RuntimeException("Cannot parse the version of the file: " + name);
 
         if (matcher.group(3) == null)
             throw new UnsupportedOperationException("Commitlog segment is too old to open; upgrade to 1.2.5+ first");
 
-        return matcher;
+        long id = Long.parseLong(matcher.group(3).split(SEPARATOR)[1]);
+        return new CommitLogDescriptor(Integer.parseInt(matcher.group(2)), id, null, new EncryptionContext());
     }
 
     public int getMessagingVersion()
@@ -224,10 +216,10 @@ public class CommitLogDescriptor
                 return MessagingService.VERSION_30;
             case VERSION_40:
                 return MessagingService.VERSION_40;
-            case VERSION_50:
-                return MessagingService.VERSION_50;
-            case VERSION_51:
-                return MessagingService.VERSION_51;
+            case VERSION_DSE_68:
+                return MessagingService.VERSION_DSE_68;
+            case VERSION_SG_10:
+                return MessagingService.VERSION_SG_10;
             default:
                 throw new IllegalStateException("Unknown commitlog version " + version);
         }
@@ -240,21 +232,7 @@ public class CommitLogDescriptor
 
     public String cdcIndexFileName()
     {
-        return FILENAME_PREFIX + version + SEPARATOR + id + INDEX_FILENAME_SUFFIX;
-    }
-
-    /**
-     * Infer the corresponding cdc index file using its cdc commitlog file
-     * @param cdcCommitLogSegment
-     * @return cdc index file or null if the cdc index file cannot be inferred.
-     */
-    public static File inferCdcIndexFile(File cdcCommitLogSegment)
-    {
-        if (!isValid(cdcCommitLogSegment.name()))
-            return null;
-        String cdcFileName = cdcCommitLogSegment.name();
-        String indexFileName = cdcFileName.substring(0, cdcFileName.length() - FILENAME_EXTENSION.length()) + INDEX_FILENAME_SUFFIX;
-        return new File(DatabaseDescriptor.getCDCLogLocation(), indexFileName);
+        return FILENAME_PREFIX + version + SEPARATOR + id + "_cdc.idx";
     }
 
     /**

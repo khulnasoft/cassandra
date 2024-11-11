@@ -20,7 +20,6 @@ package org.apache.cassandra.cql3.validation.entities;
 
 import java.util.Arrays;
 import java.util.List;
-import java.util.Objects;
 
 import org.junit.Test;
 
@@ -37,7 +36,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 /**
- * Tests for CQL's {@code WRITETIME}, {@code MAXWRITETIME} and {@code TTL} selection functions.
+ * Tests for CQL's {@code WRITETIME} and {@code TTL} selection functions.
  */
 public class WritetimeOrTTLTest extends CQLTester
 {
@@ -50,7 +49,7 @@ public class WritetimeOrTTLTest extends CQLTester
     private static final Integer NO_TTL = null;
 
     @Test
-    public void testSimple() throws Throwable
+    public void testSimple()
     {
         createTable("CREATE TABLE %s (pk int, ck int, v int,  PRIMARY KEY(pk, ck))");
 
@@ -77,7 +76,7 @@ public class WritetimeOrTTLTest extends CQLTester
     }
 
     @Test
-    public void testList() throws Throwable
+    public void testList()
     {
         createTable("CREATE TABLE %s (k int PRIMARY KEY, l list<int>)");
 
@@ -119,7 +118,7 @@ public class WritetimeOrTTLTest extends CQLTester
     }
 
     @Test
-    public void testFrozenList() throws Throwable
+    public void testFrozenList()
     {
         createTable("CREATE TABLE %s (k int PRIMARY KEY, v frozen<list<int>>)");
 
@@ -164,7 +163,7 @@ public class WritetimeOrTTLTest extends CQLTester
     }
 
     @Test
-    public void testSet() throws Throwable
+    public void testSet()
     {
         createTable("CREATE TABLE %s (k int PRIMARY KEY, s set<int>)");
 
@@ -257,7 +256,7 @@ public class WritetimeOrTTLTest extends CQLTester
     }
 
     @Test
-    public void testFrozenSet() throws Throwable
+    public void testFrozenSet()
     {
         createTable("CREATE TABLE %s (k int PRIMARY KEY, s frozen<set<int>>)");
 
@@ -349,7 +348,7 @@ public class WritetimeOrTTLTest extends CQLTester
     }
 
     @Test
-    public void testMap() throws Throwable
+    public void testMap()
     {
         createTable("CREATE TABLE %s (k int PRIMARY KEY, m map<int, int>)");
 
@@ -443,7 +442,7 @@ public class WritetimeOrTTLTest extends CQLTester
     }
 
     @Test
-    public void testFrozenMap() throws Throwable
+    public void testFrozenMap()
     {
         createTable("CREATE TABLE %s (k int PRIMARY KEY, m frozen<map<int,int>>)");
 
@@ -535,7 +534,7 @@ public class WritetimeOrTTLTest extends CQLTester
     }
 
     @Test
-    public void testNestedCollections() throws Throwable
+    public void testNestedCollections()
     {
         createTable("CREATE TABLE %s (k int PRIMARY KEY, v map<int,frozen<set<int>>>)");
 
@@ -617,7 +616,7 @@ public class WritetimeOrTTLTest extends CQLTester
     }
 
     @Test
-    public void testFrozenNestedCollections() throws Throwable
+    public void testFrozenNestedCollections()
     {
         createTable("CREATE TABLE %s (k int PRIMARY KEY, v frozen<map<int,frozen<set<int>>>>)");
         execute("INSERT INTO %s (k, v) VALUES (1, {1:{1,2}, 2:{1,2}}) USING TIMESTAMP ? AND TTL ?", TIMESTAMP_1, TTL_1);
@@ -691,7 +690,7 @@ public class WritetimeOrTTLTest extends CQLTester
     }
 
     @Test
-    public void testUDT() throws Throwable
+    public void testUDT()
     {
         String type = createType("CREATE TYPE %s (f1 int, f2 int)");
         createTable("CREATE TABLE %s (k int PRIMARY KEY, t " + type + ')');
@@ -750,7 +749,7 @@ public class WritetimeOrTTLTest extends CQLTester
     }
 
     @Test
-    public void testFrozenUDT() throws Throwable
+    public void testFrozenUDT()
     {
         String type = createType("CREATE TYPE %s (f1 int, f2 int)");
         createTable("CREATE TABLE %s (k int PRIMARY KEY, t frozen<" + type + ">)");
@@ -793,7 +792,7 @@ public class WritetimeOrTTLTest extends CQLTester
     }
 
     @Test
-    public void testNestedUDTs() throws Throwable
+    public void testNestedUDTs()
     {
         String nestedType = createType("CREATE TYPE %s (f1 int, f2 int)");
         String type = createType(format("CREATE TYPE %%s (f1 frozen<%s>, f2 frozen<%<s>)", nestedType));
@@ -924,7 +923,7 @@ public class WritetimeOrTTLTest extends CQLTester
     }
 
     @Test
-    public void testFrozenNestedUDTs() throws Throwable
+    public void testFrozenNestedUDTs()
     {
         String nestedType = createType("CREATE TYPE %s (f1 int, f2 int)");
         String type = createType(format("CREATE TYPE %%s (f1 frozen<%s>, f2 frozen<%<s>)", nestedType));
@@ -1051,7 +1050,7 @@ public class WritetimeOrTTLTest extends CQLTester
     }
 
     @Test
-    public void testFunctions() throws Throwable
+    public void testFunctions()
     {
         createTable("CREATE TABLE %s (k int PRIMARY KEY, v int, s set<int>, fs frozen<set<int>>)");
         execute("INSERT INTO %s (k, v, s, fs) VALUES (0, 0, {1, 2, 3}, {1, 2, 3}) USING TIMESTAMP 1 AND TTL 1000");
@@ -1065,8 +1064,6 @@ public class WritetimeOrTTLTest extends CQLTester
         assertRows("SELECT writetime(v) FROM %s", row(10L), row(1L));
         assertRows("SELECT min(writetime(v)) FROM %s", row(1L));
         assertRows("SELECT max(writetime(v)) FROM %s", row(10L));
-        assertRows("SELECT min(maxwritetime(v)) FROM %s", row(1L));
-        assertRows("SELECT max(maxwritetime(v)) FROM %s", row(10L));
 
         // Frozen collection
         assertRows("SELECT min(fs) FROM %s", row(set(1, 2, 3)));
@@ -1074,8 +1071,6 @@ public class WritetimeOrTTLTest extends CQLTester
         assertRows("SELECT writetime(fs) FROM %s", row(10L), row(1L));
         assertRows("SELECT min(writetime(fs)) FROM %s", row(1L));
         assertRows("SELECT max(writetime(fs)) FROM %s", row(10L));
-        assertRows("SELECT min(maxwritetime(fs)) FROM %s", row(1L));
-        assertRows("SELECT max(maxwritetime(fs)) FROM %s", row(10L));
 
         // Multi-cell collection
         assertRows("SELECT min(s) FROM %s", row(set(1, 2, 3)));
@@ -1083,8 +1078,6 @@ public class WritetimeOrTTLTest extends CQLTester
         assertRows("SELECT writetime(s) FROM %s", row(list(10L, 20L, 20L)), row(list(1L, 2L, 2L)));
         assertRows("SELECT min(writetime(s)) FROM %s", row(list(1L, 2L, 2L)));
         assertRows("SELECT max(writetime(s)) FROM %s", row(list(10L, 20L, 20L)));
-        assertRows("SELECT min(maxwritetime(s)) FROM %s", row(2L));
-        assertRows("SELECT max(maxwritetime(s)) FROM %s", row(20L));
     }
 
     private static List<Integer> ttls(Integer... a)
@@ -1097,35 +1090,27 @@ public class WritetimeOrTTLTest extends CQLTester
         return Arrays.asList(a);
     }
 
-    private void assertRows(String query, Object[]... rows) throws Throwable
+    private void assertRows(String query, Object[]... rows)
     {
         assertRows(execute(query), rows);
     }
 
-    private void assertWritetimeAndTTL(String column, Long timestamp, Integer ttl) throws Throwable
+    private void assertWritetimeAndTTL(String column, Long timestamp, Integer ttl)
     {
         assertWritetimeAndTTL(column, null, timestamp, ttl);
     }
 
-    private void assertWritetimeAndTTL(String column, List<Long> timestamps, List<Integer> ttls) throws Throwable
+    private void assertWritetimeAndTTL(String column, List<Long> timestamps, List<Integer> ttls)
     {
         assertWritetimeAndTTL(column, null, timestamps, ttls);
     }
 
     private void assertWritetimeAndTTL(String column, String where, Long timestamp, Integer ttl)
-    throws Throwable
     {
         where = where == null ? "" : " WHERE " + where;
 
         // Verify write time
         assertRows(format("SELECT WRITETIME(%s) FROM %%s %s", column, where), row(timestamp));
-
-        // Verify max write time
-        assertRows(format("SELECT MAXWRITETIME(%s) FROM %%s %s", column, where), row(timestamp));
-
-        // Verify write time and max write time together
-        assertRows(format("SELECT WRITETIME(%s), MAXWRITETIME(%s) FROM %%s %s", column, column, where),
-                   row(timestamp, timestamp));
 
         // Verify ttl
         UntypedResultSet rs = execute(format("SELECT TTL(%s) FROM %%s %s", column, where));
@@ -1143,20 +1128,11 @@ public class WritetimeOrTTLTest extends CQLTester
     }
 
     private void assertWritetimeAndTTL(String column, String where, List<Long> timestamps, List<Integer> ttls)
-    throws Throwable
     {
         where = where == null ? "" : " WHERE " + where;
 
         // Verify write time
         assertRows(format("SELECT WRITETIME(%s) FROM %%s %s", column, where), row(timestamps));
-
-        // Verify max write time
-        Long maxTimestamp = timestamps.stream().filter(Objects::nonNull).max(Long::compare).orElse(null);
-        assertRows(format("SELECT MAXWRITETIME(%s) FROM %%s %s", column, where), row(maxTimestamp));
-
-        // Verify write time and max write time together
-        assertRows(format("SELECT WRITETIME(%s), MAXWRITETIME(%s) FROM %%s %s", column, column, where),
-                   row(timestamps, maxTimestamp));
 
         // Verify ttl
         UntypedResultSet rs = execute(format("SELECT TTL(%s) FROM %%s %s", column, where));
@@ -1199,20 +1175,17 @@ public class WritetimeOrTTLTest extends CQLTester
         }
     }
 
-    private void assertInvalidPrimaryKeySelection(String column) throws Throwable
+    private void assertInvalidPrimaryKeySelection(String column)
     {
         assertInvalidThrowMessage("Cannot use selection function writetime on PRIMARY KEY part " + column,
                                   InvalidRequestException.class,
                                   format("SELECT WRITETIME(%s) FROM %%s", column));
-        assertInvalidThrowMessage("Cannot use selection function maxwritetime on PRIMARY KEY part " + column,
-                                  InvalidRequestException.class,
-                                  format("SELECT MAXWRITETIME(%s) FROM %%s", column));
         assertInvalidThrowMessage("Cannot use selection function ttl on PRIMARY KEY part " + column,
                                   InvalidRequestException.class,
                                   format("SELECT TTL(%s) FROM %%s", column));
     }
 
-    private void assertInvalidListElementSelection(String column, String list) throws Throwable
+    private void assertInvalidListElementSelection(String column, String list)
     {
         String message = format("Element selection is only allowed on sets and maps, but %s is a list", list);
         assertInvalidThrowMessage(message,
@@ -1220,21 +1193,15 @@ public class WritetimeOrTTLTest extends CQLTester
                                   format("SELECT WRITETIME(%s) FROM %%s", column));
         assertInvalidThrowMessage(message,
                                   InvalidRequestException.class,
-                                  format("SELECT MAXWRITETIME(%s) FROM %%s", column));
-        assertInvalidThrowMessage(message,
-                                  InvalidRequestException.class,
                                   format("SELECT TTL(%s) FROM %%s", column));
     }
 
-    private void assertInvalidListSliceSelection(String column, String list) throws Throwable
+    private void assertInvalidListSliceSelection(String column, String list)
     {
         String message = format("Slice selection is only allowed on sets and maps, but %s is a list", list);
         assertInvalidThrowMessage(message,
                                   InvalidRequestException.class,
                                   format("SELECT WRITETIME(%s) FROM %%s", column));
-        assertInvalidThrowMessage(message,
-                                  InvalidRequestException.class,
-                                  format("SELECT MAXWRITETIME(%s) FROM %%s", column));
         assertInvalidThrowMessage(message,
                                   InvalidRequestException.class,
                                   format("SELECT TTL(%s) FROM %%s", column));

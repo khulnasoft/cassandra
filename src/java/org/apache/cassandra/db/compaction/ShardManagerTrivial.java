@@ -35,12 +35,6 @@ public class ShardManagerTrivial implements ShardManager
         this.partitioner = partitioner;
     }
 
-    public boolean isOutOfDate(long ringVersion)
-    {
-        // We don't do any routing, always up to date
-        return false;
-    }
-
     @Override
     public double rangeSpanned(Range<Token> tableRange)
     {
@@ -48,16 +42,16 @@ public class ShardManagerTrivial implements ShardManager
     }
 
     @Override
-    public double rangeSpanned(SSTableReader rdr)
+    public double rangeSpanned(CompactionSSTable rdr)
     {
         return 1;
     }
 
     @Override
-    public double calculateCombinedDensity(Set<? extends SSTableReader> sstables)
+    public double calculateCombinedDensity(Set<? extends CompactionSSTable> sstables)
     {
         double totalSize = 0;
-        for (SSTableReader sstable : sstables)
+        for (CompactionSSTable sstable : sstables)
             totalSize += sstable.onDiskLength();
         return totalSize;
     }
@@ -72,6 +66,11 @@ public class ShardManagerTrivial implements ShardManager
     public double shardSetCoverage()
     {
         return 1;
+    }
+
+    public double minimumPerPartitionSpan()
+    {
+        throw new AssertionError(); // rangeSpanned is overridden and does not call this method
     }
 
     ShardTracker iterator = new ShardTracker()
@@ -134,7 +133,7 @@ public class ShardManagerTrivial implements ShardManager
         public long shardAdjustedKeyCount(Set<SSTableReader> sstables)
         {
             long shardAdjustedKeyCount = 0;
-            for (SSTableReader sstable : sstables)
+            for (CompactionSSTable sstable : sstables)
                 shardAdjustedKeyCount += sstable.estimatedKeys();
             return shardAdjustedKeyCount;
         }

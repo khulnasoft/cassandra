@@ -33,29 +33,29 @@ import java.util.stream.StreamSupport;
 
 import com.google.common.annotations.VisibleForTesting;
 
-import com.datastax.driver.core.CodecUtils;
+import com.khulnasoft.driver.core.CodecUtils;
 import org.apache.cassandra.cql3.functions.types.LocalDate;
+import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.cql3.statements.SelectStatement;
-import org.apache.cassandra.db.Clustering;
-import org.apache.cassandra.db.ConsistencyLevel;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.ReadExecutionController;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.db.partitions.PartitionIterator;
-import org.apache.cassandra.db.rows.Cell;
-import org.apache.cassandra.db.rows.ComplexColumnData;
-import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.service.pager.QueryPager;
-import org.apache.cassandra.transport.Dispatcher;
+import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.AbstractIterator;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.TimeUUID;
 
 /** a utility for doing internal cql-based queries */
 public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
 {
+    public Stream<Row> stream()
+    {
+        return StreamSupport.stream(spliterator(), false);
+    }
+
     public static UntypedResultSet create(ResultSet rs)
     {
         return new FromResultSet(rs);
@@ -66,7 +66,7 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
         return new FromResultList(results);
     }
 
-    public static UntypedResultSet create(SelectStatement select, QueryPager pager, int pageSize)
+    public static UntypedResultSet create(SelectStatement select, QueryPager pager, PageSize pageSize)
     {
         return new FromPager(select, pager, pageSize);
     }
@@ -78,21 +78,16 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
     @VisibleForTesting
     public static UntypedResultSet create(SelectStatement select,
                                           ConsistencyLevel cl,
-                                          ClientState clientState,
+                                          QueryState queryState,
                                           QueryPager pager,
-                                          int pageSize)
+                                          PageSize pageSize)
     {
-        return new FromDistributedPager(select, cl, clientState, pager, pageSize);
+        return new FromDistributedPager(select, cl, queryState, pager, pageSize);
     }
 
     public boolean isEmpty()
     {
         return size() == 0;
-    }
-
-    public Stream<Row> stream()
-    {
-        return StreamSupport.stream(spliterator(), false);
     }
 
     public abstract int size();
@@ -126,7 +121,7 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
         {
             return new AbstractIterator<Row>()
             {
-                final Iterator<List<ByteBuffer>> iter = cqlRows.rows.iterator();
+                Iterator<List<ByteBuffer>> iter = cqlRows.rows.iterator();
 
                 protected Row computeNext()
                 {
@@ -168,7 +163,7 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
         {
             return new AbstractIterator<Row>()
             {
-                final Iterator<Map<String, ByteBuffer>> iter = cqlRows.iterator();
+                Iterator<Map<String, ByteBuffer>> iter = cqlRows.iterator();
 
                 protected Row computeNext()
                 {
@@ -189,10 +184,10 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
     {
         private final SelectStatement select;
         private final QueryPager pager;
-        private final int pageSize;
+        private final PageSize pageSize;
         private final List<ColumnSpecification> metadata;
 
-        private FromPager(SelectStatement select, QueryPager pager, int pageSize)
+        private FromPager(SelectStatement select, QueryPager pager, PageSize pageSize)
         {
             this.select = select;
             this.pager = pager;
@@ -218,7 +213,7 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
 
                 protected Row computeNext()
                 {
-                    long nowInSec = FBUtilities.nowInSeconds();
+                    int nowInSec = FBUtilities.nowInSeconds();
                     while (currentPage == null || !currentPage.hasNext())
                     {
                         if (pager.isExhausted())
@@ -227,7 +222,7 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
                         try (ReadExecutionController executionController = pager.executionController();
                              PartitionIterator iter = pager.fetchPageInternal(pageSize, executionController))
                         {
-                            currentPage = select.process(iter, nowInSec, true, ClientState.forInternalCalls()).rows.iterator();
+                            currentPage = select.process(iter, nowInSec).rows.iterator();
                         }
                     }
                     return new Row(metadata, currentPage.next());
@@ -248,19 +243,20 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
     {
         private final SelectStatement select;
         private final ConsistencyLevel cl;
-        private final ClientState clientState;
+        private final QueryState queryState;
         private final QueryPager pager;
-        private final int pageSize;
+        private final PageSize pageSize;
         private final List<ColumnSpecification> metadata;
 
         private FromDistributedPager(SelectStatement select,
                                      ConsistencyLevel cl,
-                                     ClientState clientState,
-                                     QueryPager pager, int pageSize)
+                                     QueryState queryState,
+                                     QueryPager pager,
+                                     PageSize pageSize)
         {
             this.select = select;
             this.cl = cl;
-            this.clientState = clientState;
+            this.queryState = queryState;
             this.pager = pager;
             this.pageSize = pageSize;
             this.metadata = select.getResultMetadata().requestNames();
@@ -284,15 +280,15 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
 
                 protected Row computeNext()
                 {
-                    long nowInSec = FBUtilities.nowInSeconds();
+                    int nowInSec = FBUtilities.nowInSeconds();
                     while (currentPage == null || !currentPage.hasNext())
                     {
                         if (pager.isExhausted())
                             return endOfData();
 
-                        try (PartitionIterator iter = pager.fetchPage(pageSize, cl, clientState, Dispatcher.RequestTime.forImmediateExecution()))
+                        try (PartitionIterator iter = pager.fetchPage(pageSize, cl, queryState, System.nanoTime()))
                         {
-                            currentPage = select.process(iter, nowInSec, true, clientState).rows.iterator();
+                            currentPage = select.process(iter, nowInSec).rows.iterator();
                         }
                     }
                     return new Row(metadata, currentPage.next());
@@ -347,7 +343,7 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
                 {
                     ComplexColumnData complexData = row.getComplexColumnData(def);
                     if (complexData != null)
-                        data.put(def.name.toString(), ((CollectionType<?>) def.type).serializeForNativeProtocol(complexData.iterator()));
+                        data.put(def.name.toString(), ((CollectionType)def.type).serializeForNativeProtocol(complexData.iterator(), ProtocolVersion.V3));
                 }
             }
 
@@ -390,15 +386,14 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
             return Int32Type.instance.compose(data.get(column));
         }
 
-        public int getInt(String column, int ifNull)
-        {
-            ByteBuffer bytes = data.get(column);
-            return bytes == null ? ifNull : Int32Type.instance.compose(bytes);
-        }
-
         public double getDouble(String column)
         {
             return DoubleType.instance.compose(data.get(column));
+        }
+
+        public double getFloat(String column)
+        {
+            return FloatType.instance.compose(data.get(column));
         }
 
         public ByteBuffer getBytes(String column)
@@ -424,17 +419,6 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
         public UUID getUUID(String column)
         {
             return UUIDType.instance.compose(data.get(column));
-        }
-
-        public UUID getUUID(String column, UUID ifNull)
-        {
-            ByteBuffer bytes = data.get(column);
-            return bytes == null ? ifNull : UUIDType.instance.compose(bytes);
-        }
-
-        public TimeUUID getTimeUUID(String column)
-        {
-            return TimeUUID.deserialize(data.get(column));
         }
 
         public Date getTimestamp(String column)
@@ -465,6 +449,11 @@ public abstract class UntypedResultSet implements Iterable<UntypedResultSet.Row>
         {
             ByteBuffer raw = data.get(column);
             return raw == null ? null : MapType.getInstance(keyType, valueType, true).compose(raw);
+        }
+
+        public Map<String, String> getTextMap(String column)
+        {
+            return getMap(column, UTF8Type.instance, UTF8Type.instance);
         }
 
         public <T> Set<T> getFrozenSet(String column, AbstractType<T> type)

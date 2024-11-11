@@ -30,7 +30,6 @@ import javax.annotation.Nullable;
 
 import com.google.common.collect.ImmutableCollection;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.MapDifference;
 
@@ -88,7 +87,7 @@ public final class SchemaEvent extends DiagnosticEvent
         SCHEMATA_CLEARED
     }
 
-    SchemaEvent(SchemaEventType type, SchemaProvider schema, @Nullable KeyspaceMetadata ksUpdate,
+    SchemaEvent(SchemaEventType type, Schema schema, @Nullable KeyspaceMetadata ksUpdate,
                 @Nullable KeyspaceMetadata previous, @Nullable KeyspaceMetadata.KeyspaceDiff ksDiff,
                 @Nullable TableMetadata tableUpdate, @Nullable Tables.TablesDiff tablesDiff,
                 @Nullable Views.ViewsDiff viewsDiff, @Nullable MapDifference<String, TableMetadata> indexesDiff)
@@ -102,11 +101,11 @@ public final class SchemaEvent extends DiagnosticEvent
         this.viewsDiff = viewsDiff;
         this.indexesDiff = indexesDiff;
 
-        this.keyspaces = ImmutableSet.copyOf(schema.distributedAndLocalKeyspaces().names());
-        this.nonSystemKeyspaces = ImmutableSet.copyOf(schema.distributedKeyspaces().names());
-        this.userKeyspaces = ImmutableSet.copyOf(schema.getUserKeyspaces().names());
+        this.keyspaces = schema.distributedAndLocalKeyspaces().names();
+        this.nonSystemKeyspaces = schema.distributedKeyspaces().names();
+        this.userKeyspaces = schema.getUserKeyspaces().names();
         this.numberOfTables = schema.getNumberOfTables();
-        this.version = schema.getVersion(); // TODO: rename this field to reflect that the schema version we know here is stale (before the entire transformation started)
+        this.version = schema.getVersion();
 
         this.indexTables = schema.distributedKeyspaces().stream()
                                  .flatMap(ks -> ks.tables.indexTables().entrySet().stream())
@@ -249,9 +248,12 @@ public final class SchemaEvent extends DiagnosticEvent
         return ret;
     }
 
-    private String repr(MemtableParams params)
+    private HashMap<String, Serializable> repr(MemtableParams params)
     {
-        return params.configurationKey();
+        HashMap<String, Serializable> ret = new HashMap<>();
+        if (params == null) return ret;
+        ret.putAll(params.asMap());
+        return ret;
     }
 
     private HashMap<String, Serializable> repr(IndexMetadata index)

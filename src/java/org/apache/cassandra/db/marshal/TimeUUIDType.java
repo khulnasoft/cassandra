@@ -18,31 +18,199 @@
 package org.apache.cassandra.db.marshal;
 
 import java.nio.ByteBuffer;
+import java.util.UUID;
 
+import org.apache.cassandra.cql3.CQL3Type;
+import org.apache.cassandra.cql3.Constants;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.serializers.TypeSerializer;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.bytecomparable.ByteComparable;
+import org.apache.cassandra.utils.bytecomparable.ByteSource;
+import org.apache.cassandra.utils.bytecomparable.ByteSourceInverse;
+import org.apache.cassandra.utils.UUIDGen;
+import org.apache.cassandra.serializers.MarshalException;
+import org.apache.cassandra.serializers.TimeUUIDSerializer;
 
-// Fully compatible with UUID, and indeed is interpreted as UUID for UDF
-public class TimeUUIDType extends AbstractTimeUUIDType<TimeUUID>
+public class TimeUUIDType extends TemporalType<UUID>
 {
     public static final TimeUUIDType instance = new TimeUUIDType();
 
-    private static final ByteBuffer MASKED_VALUE = instance.decompose(TimeUUID.minAtUnixMillis(0));
-
-    public TypeSerializer<TimeUUID> getSerializer()
+    TimeUUIDType()
     {
-        return TimeUUID.Serializer.instance;
+        super(ComparisonType.CUSTOM);
+    } // singleton
+
+    @Override
+    public boolean allowsEmpty()
+    {
+        return true;
+    }
+
+    public boolean isEmptyValueMeaningless()
+    {
+        return true;
+    }
+
+    public <VL, VR> int compareCustom(VL left, ValueAccessor<VL> accessorL, VR right, ValueAccessor<VR> accessorR)
+    {
+        // Compare for length
+        boolean p1 = accessorL.size(left) == 16, p2 = accessorR.size(right) == 16;
+        if (!(p1 & p2))
+        {
+            // should we assert exactly 16 bytes (or 0)? seems prudent
+            assert p1 || accessorL.isEmpty(left);
+            assert p2 || accessorR.isEmpty(right);
+            return p1 ? 1 : p2 ? -1 : 0;
+        }
+
+        long msb1 = accessorL.getLong(left, 0);
+        long msb2 = accessorR.getLong(right, 0);
+        verifyVersion(msb1);
+        verifyVersion(msb2);
+
+        msb1 = reorderTimestampBytes(msb1);
+        msb2 = reorderTimestampBytes(msb2);
+
+        int c = Long.compare(msb1, msb2);
+        if (c != 0)
+            return c;
+
+        // this has to be a signed per-byte comparison for compatibility
+        // so we transform the bytes so that a simple long comparison is equivalent
+        long lsb1 = signedBytesToNativeLong(accessorL.getLong(left, 8));
+        long lsb2 = signedBytesToNativeLong(accessorR.getLong(right, 8));
+        return Long.compare(lsb1, lsb2);
     }
 
     @Override
-    public AbstractType<?> udfType()
+    public <V> ByteSource asComparableBytes(ValueAccessor<V> accessor, V data, ByteComparable.Version version)
     {
-        return LegacyTimeUUIDType.instance;
+        if (accessor.isEmpty(data))
+            return null;
+
+        long hiBits = accessor.getLong(data, 0);
+        verifyVersion(hiBits);
+        ByteBuffer swizzled = ByteBuffer.allocate(16);
+        swizzled.putLong(0, TimeUUIDType.reorderTimestampBytes(hiBits));
+        swizzled.putLong(8, accessor.getLong(data, 8) ^ 0x8080808080808080L);
+
+        return ByteSource.preencoded(swizzled);
     }
 
     @Override
-    public ByteBuffer getMaskedValue()
+    public <V> V fromComparableBytes(ValueAccessor<V> accessor, ByteSource.Peekable comparableBytes, ByteComparable.Version version)
     {
-        return MASKED_VALUE;
+        // Optional-style encoding of empty values as null sources
+        if (comparableBytes == null)
+            return accessor.empty();
+
+        // The non-lexical UUID bits are stored as an unsigned fixed-length 128-bit integer.
+        long hiBits = ByteSourceInverse.getUnsignedFixedLengthAsLong(comparableBytes, 8);
+        long loBits = ByteSourceInverse.getUnsignedFixedLengthAsLong(comparableBytes, 8);
+
+        hiBits = reorderBackTimestampBytes(hiBits);
+        verifyVersion(hiBits);
+        // In addition, TimeUUIDType also touches the low bits of the UUID (see CASSANDRA-8730 and DB-1758).
+        loBits ^= 0x8080808080808080L;
+
+        return UUIDType.makeUuidBytes(accessor, hiBits, loBits);
+    }
+
+    // takes as input 8 signed bytes in native machine order
+    // returns the first byte unchanged, and the following 7 bytes converted to an unsigned representation
+    // which is the same as a 2's complement long in native format
+    private static long signedBytesToNativeLong(long signedBytes)
+    {
+        return signedBytes ^ 0x0080808080808080L;
+    }
+
+    private void verifyVersion(long hiBits)
+    {
+        long version = (hiBits >>> 12) & 0xf;
+        if (version != 1)
+            throw new MarshalException(String.format("Invalid UUID version %d for timeuuid",
+                                                     version));
+    }
+
+    protected static long reorderTimestampBytes(long input)
+    {
+        return (input <<  48)
+               | ((input <<  16) & 0xFFFF00000000L)
+               |  (input >>> 32);
+    }
+
+    protected static long reorderBackTimestampBytes(long input)
+    {
+        // In a time-based UUID the high bits are significantly more shuffled than in other UUIDs - if [X] represents a
+        // 16-bit tuple, [1][2][3][4] should become [3][4][2][1].
+        // See the UUID Javadoc (and more specifically the high bits layout of a Leach-Salz UUID) to understand the
+        // reasoning behind this bit twiddling in the first place (in the context of comparisons).
+        return (input << 32)
+               | ((input >>> 16) & 0xFFFF0000L)
+               | (input >>> 48);
+    }
+
+    public ByteBuffer fromString(String source) throws MarshalException
+    {
+        ByteBuffer parsed = UUIDType.parse(source);
+        if (parsed == null)
+            throw new MarshalException(String.format("Unknown timeuuid representation: %s", source));
+        if (parsed.remaining() == 16 && UUIDType.version(parsed) != 1)
+            throw new MarshalException("TimeUUID supports only version 1 UUIDs");
+        return parsed;
+    }
+
+    @Override
+    public Term fromJSONObject(Object parsed) throws MarshalException
+    {
+        try
+        {
+            return new Constants.Value(fromString((String) parsed));
+        }
+        catch (ClassCastException exc)
+        {
+            throw new MarshalException(
+                    String.format("Expected a string representation of a timeuuid, but got a %s: %s", parsed.getClass().getSimpleName(), parsed));
+        }
+    }
+
+    public CQL3Type asCQL3Type()
+    {
+        return CQL3Type.Native.TIMEUUID;
+    }
+
+    public TypeSerializer<UUID> getSerializer()
+    {
+        return TimeUUIDSerializer.instance;
+    }
+
+    @Override
+    public int valueLengthIfFixed()
+    {
+        return 16;
+    }
+
+    @Override
+    public long toTimeInMillis(ByteBuffer value)
+    {
+        return UUIDGen.unixTimestamp(UUIDGen.getUUID(value));
+    }
+
+    @Override
+    public ByteBuffer addDuration(ByteBuffer temporal, ByteBuffer duration)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public ByteBuffer substractDuration(ByteBuffer temporal, ByteBuffer duration)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public ByteBuffer now()
+    {
+        return ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes());
     }
 }

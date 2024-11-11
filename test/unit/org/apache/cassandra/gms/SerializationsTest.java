@@ -32,11 +32,10 @@ import org.apache.cassandra.AbstractSerializationsTester;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
 import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.io.util.FileInputStreamPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 
 public class SerializationsTest extends AbstractSerializationsTester
@@ -45,7 +44,6 @@ public class SerializationsTest extends AbstractSerializationsTester
     public static void initDD()
     {
         DatabaseDescriptor.daemonInitialization();
-        ClusterMetadataTestHelper.setInstanceForTest();
     }
 
     private void testEndpointStateWrite() throws IOException
@@ -86,8 +84,7 @@ public class SerializationsTest extends AbstractSerializationsTester
         GossipDigestAck ack = new GossipDigestAck(Statics.Digests, states);
         GossipDigestAck2 ack2 = new GossipDigestAck2(states);
         GossipDigestSyn syn = new GossipDigestSyn("Not a real cluster name",
-                                                  ClusterMetadata.current().tokenMap.partitioner().getClass().getCanonicalName(),
-                                                  20240430,
+                                                  StorageService.instance.getTokenMetadata().partitioner.getClass().getCanonicalName(),
                                                   Statics.Digests);
 
         DataOutputStreamPlus out = getOutput("gms.Gossip.bin");
@@ -114,8 +111,8 @@ public class SerializationsTest extends AbstractSerializationsTester
 
         int count = 0;
         FileInputStreamPlus in = getInput("gms.Gossip.bin");
-        while (count++ < Statics.Digests.size())
-            assert GossipDigest.serializer.deserialize(in, getVersion()) != null;
+        while (count < Statics.Digests.size())
+            assert GossipDigestAck2.serializer.deserialize(in, getVersion()) != null;
         assert GossipDigestAck.serializer.deserialize(in, getVersion()) != null;
         assert GossipDigestAck2.serializer.deserialize(in, getVersion()) != null;
         assert GossipDigestSyn.serializer.deserialize(in, getVersion()) != null;
@@ -126,12 +123,12 @@ public class SerializationsTest extends AbstractSerializationsTester
     {
         private static HeartBeatState HeartbeatSt = new HeartBeatState(101, 201);
         private static EndpointState EndpointSt = new EndpointState(HeartbeatSt);
-        private static IPartitioner partitioner = ClusterMetadata.current().tokenMap.partitioner();
+        private static IPartitioner partitioner = StorageService.instance.getTokenMetadata().partitioner;
         private static VersionedValue.VersionedValueFactory vvFact = new VersionedValue.VersionedValueFactory(partitioner);
         private static VersionedValue vv0 = vvFact.load(23d);
         private static VersionedValue vv1 = vvFact.bootstrapping(Collections.<Token>singleton(partitioner.getRandomToken()));
         private static List<GossipDigest> Digests = new ArrayList<GossipDigest>();
-        static
+
         {
             HeartbeatSt.updateHeartBeat();
             EndpointSt.addApplicationState(ApplicationState.LOAD, vv0);

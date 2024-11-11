@@ -20,19 +20,21 @@ package org.apache.cassandra.db.memtable;
 
 import org.junit.Assert;
 import org.junit.BeforeClass;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
 import org.apache.cassandra.config.Config;
-import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.utils.memory.MemtablePool;
 import org.apache.cassandra.utils.memory.SlabPool;
 
+@RunWith(Parameterized.class)
 public class MemtableSizeOffheapBuffersTest extends MemtableSizeTestBase
 {
     // Overrides CQLTester.setUpClass to run before it
     @BeforeClass
     public static void setUpClass()
     {
-        setup(Config.MemtableAllocationType.offheap_buffers, Murmur3Partitioner.instance);
+        setup(Config.MemtableAllocationType.offheap_buffers);
     }
 
 
@@ -40,7 +42,7 @@ public class MemtableSizeOffheapBuffersTest extends MemtableSizeTestBase
     void checkMemtablePool()
     {
         MemtablePool memoryPool = AbstractAllocatorMemtable.MEMORY_POOL;
-        logger.info("Memtable pool {} off-heap limit {}", memoryPool, memoryPool.offHeap.limit);
+        System.out.println("Memtable pool " + memoryPool + " off-heap limit " + memoryPool.offHeap.limit);
         Assert.assertTrue(memoryPool instanceof SlabPool);
         Assert.assertTrue(memoryPool.offHeap.limit > 0);
     }

@@ -19,37 +19,44 @@ package org.apache.cassandra.cql3.validation.operations;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
+import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.Duration;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.memtable.Memtable;
 import org.apache.cassandra.db.memtable.SkipListMemtable;
-import org.apache.cassandra.db.memtable.TestMemtable;
 import org.apache.cassandra.db.memtable.TrieMemtable;
 import org.apache.cassandra.db.partitions.Partition;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.locator.AbstractEndpointSnitch;
+import org.apache.cassandra.locator.IEndpointSnitch;
+import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.schema.MemtableParams;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.SchemaKeyspaceTables;
-import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.tcm.ClusterMetadataService;
-import org.apache.cassandra.tcm.membership.Location;
-import org.apache.cassandra.tcm.membership.NodeAddresses;
-import org.apache.cassandra.tcm.membership.NodeVersion;
-import org.apache.cassandra.tcm.transformations.Register;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.triggers.ITrigger;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -58,16 +65,30 @@ import static org.apache.cassandra.cql3.Duration.NANOS_PER_HOUR;
 import static org.apache.cassandra.cql3.Duration.NANOS_PER_MICRO;
 import static org.apache.cassandra.cql3.Duration.NANOS_PER_MILLI;
 import static org.apache.cassandra.cql3.Duration.NANOS_PER_MINUTE;
-import static org.apache.cassandra.tcm.membership.MembershipUtils.endpoint;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+@RunWith(Parameterized.class)
 public class CreateTest extends CQLTester
 {
+    @Parameterized.Parameter(0)
+    public boolean durationLegacyMode;
+
+    @Parameterized.Parameters(name = "durationLegacyMode={0}")
+    public static List<Object[]> params()
+    {
+        return Arrays.asList(new Object[]{ false }, new Object[]{ true });
+    }
+
+    @Before
+    public void before() throws Throwable
+    {
+        CassandraRelevantProperties.DURATION_IN_MAPS_COMPATIBILITY_MODE.setBoolean(durationLegacyMode);
+    }
+
     @Test
     public void testCreateTableWithNameCapitalPAndColumnDuration() throws Throwable
     {
@@ -123,13 +144,13 @@ public class CreateTest extends CQLTester
     @Test
     public void testCreateTableWithDurationColumns() throws Throwable
     {
-        assertInvalidMessage("duration type is not supported for PRIMARY KEY column 'a'",
+        assertInvalidMessage("Invalid type duration for column a: duration types are not supported within PRIMARY KEY columns",
                              "CREATE TABLE cql_test_keyspace.table0 (a duration PRIMARY KEY, b int);");
 
-        assertInvalidMessage("duration type is not supported for PRIMARY KEY column 'b'",
+        assertInvalidMessage("Invalid type duration for column b: duration types are not supported within PRIMARY KEY columns",
                              "CREATE TABLE cql_test_keyspace.table0 (a text, b duration, c duration, primary key (a, b));");
 
-        assertInvalidMessage("duration type is not supported for PRIMARY KEY column 'b'",
+        assertInvalidMessage("Invalid type duration for column b: duration types are not supported within PRIMARY KEY columns",
                              "CREATE TABLE cql_test_keyspace.table0 (a text, b duration, c duration, primary key (a, b)) with clustering order by (b DESC);");
 
         createTable("CREATE TABLE %s (a int, b int, c duration, primary key (a, b));");
@@ -209,7 +230,7 @@ public class CreateTest extends CQLTester
         createTable("CREATE TABLE %s (a text PRIMARY KEY, duration duration);");
 
         // Test duration within Map
-        assertInvalidMessage("Durations are not allowed as map keys: map<duration, text>",
+        assertInvalidMessage("Invalid type map<duration, text> for column m: duration types are not supported within non-frozen map keys",
                              "CREATE TABLE cql_test_keyspace.table0(pk int PRIMARY KEY, m map<duration, text>)");
 
         createTable("CREATE TABLE %s(pk int PRIMARY KEY, m map<text, duration>)");
@@ -217,18 +238,68 @@ public class CreateTest extends CQLTester
         assertRows(execute("SELECT * FROM %s"),
                    row(1, map("one month", Duration.from("1mo"), "60 days", Duration.from("60d"))));
 
-        assertInvalidMessage("duration type is not supported for PRIMARY KEY column 'm'",
-                "CREATE TABLE cql_test_keyspace.table0(m frozen<map<text, duration>> PRIMARY KEY, v int)");
+        assertInvalidMessage("Invalid type frozen<map<text, duration>> for column m: duration types are not supported within PRIMARY KEY columns",
+                             "CREATE TABLE cql_test_keyspace.table0(m frozen<map<text, duration>> PRIMARY KEY, v int)");
 
-        assertInvalidMessage("duration type is not supported for PRIMARY KEY column 'm'",
+        assertInvalidMessage("Invalid type frozen<map<duration, text>> for column m: duration types are not supported within PRIMARY KEY columns",
+                             "CREATE TABLE cql_test_keyspace.table0(m frozen<map<duration, text>> PRIMARY KEY, v int)");
+
+        assertInvalidMessage("Invalid type frozen<map<text, duration>> for column m: duration types are not supported within PRIMARY KEY columns",
                              "CREATE TABLE cql_test_keyspace.table0(pk int, m frozen<map<text, duration>>, v int, PRIMARY KEY (pk, m))");
 
+        assertInvalidMessage("Invalid type frozen<map<duration, text>> for column m: duration types are not supported within PRIMARY KEY columns",
+                             "CREATE TABLE cql_test_keyspace.table0(pk int, m frozen<map<duration, text>>, v int, PRIMARY KEY (pk, m))");
+
         // Test duration within Set
-        assertInvalidMessage("Durations are not allowed inside sets: set<duration>",
+        assertInvalidMessage("Invalid type set<duration> for column s: duration types are not supported within non-frozen",
                              "CREATE TABLE cql_test_keyspace.table0(pk int PRIMARY KEY, s set<duration>)");
 
-        assertInvalidMessage("Durations are not allowed inside sets: frozen<set<duration>>",
+        assertInvalidMessage("Invalid type frozen<set<duration>> for column s: duration types are not supported within PRIMARY KEY columns",
                              "CREATE TABLE cql_test_keyspace.table0(s frozen<set<duration>> PRIMARY KEY, v int)");
+
+        // Test duration in map in a regular column
+        // duration as a value in a non-frozen map should work
+        createTable("CREATE TABLE %s(pk int, m map<text, duration>, v int, PRIMARY KEY (pk))");
+        assertInvalidMessage("Secondary indexes are not supported on collections containing durations",
+                             String.format("CREATE INDEX ON %s.%s (m)", KEYSPACE, currentTable()));
+        assertInvalidMessage("Secondary indexes are not supported on collections containing durations",
+                             String.format("CREATE INDEX ON %s.%s (full(m))", KEYSPACE, currentTable()));
+        assertInvalidMessage("Secondary indexes are not supported on collections containing durations",
+                             String.format("CREATE INDEX ON %s.%s (keys(m))", KEYSPACE, currentTable())); // TODO perhaps this should be allowed
+        assertInvalidMessage("Secondary indexes are not supported on collections containing durations",
+                             String.format("CREATE INDEX ON %s.%s (entries(m))", KEYSPACE, currentTable()));
+
+        // duration as a key in a non-frozen map should not work
+        assertInvalidMessage("Invalid type map<duration, text> for column m: duration types are not supported within non-frozen map keys.",
+                             "CREATE TABLE cql_test_keyspace.table0(pk int, m map<duration, text>, v int, PRIMARY KEY (pk))");
+
+        // Test duration in map in a static column
+        // duration as a value in a non-frozen map should work
+        createTable("CREATE TABLE %s(pk int, ck int, m map<text, duration> static, v int, PRIMARY KEY (pk, ck))");
+
+        // duration as a key in a non-frozen map should not work
+        assertInvalidMessage("Invalid type map<duration, text> for column m: duration types are not supported within non-frozen map keys.",
+                             "CREATE TABLE cql_test_keyspace.table0(pk int, ck int, m map<duration, text> static, v int, PRIMARY KEY (pk, ck))");
+
+        createTable("CREATE TABLE %s(pk int, m frozen<map<text, duration>>, v int, PRIMARY KEY (pk))");
+        assertInvalidMessage("Secondary indexes are not supported on collections containing durations",
+                             String.format("CREATE INDEX ON %s.%s (m)", KEYSPACE, currentTable()));
+        assertInvalidMessage("Secondary indexes are not supported on collections containing durations",
+                             String.format("CREATE INDEX ON %s.%s (full(m))", KEYSPACE, currentTable()));
+        assertInvalidMessage("Secondary indexes are not supported on collections containing durations",
+                             String.format("CREATE INDEX ON %s.%s (keys(m))", KEYSPACE, currentTable()));
+        assertInvalidMessage("Secondary indexes are not supported on collections containing durations",
+                             String.format("CREATE INDEX ON %s.%s (entries(m))", KEYSPACE, currentTable())); // TODO perhaps this should be allowed
+
+        createTable("CREATE TABLE %s(pk int, m frozen<map<duration, text>>, v int, PRIMARY KEY (pk))");
+        assertInvalidMessage("Secondary indexes are not supported on collections containing durations",
+                             String.format("CREATE INDEX ON %s.%s (m)", KEYSPACE, currentTable()));
+        assertInvalidMessage("Secondary indexes are not supported on collections containing durations",
+                             String.format("CREATE INDEX ON %s.%s (full(m))", KEYSPACE, currentTable()));
+        assertInvalidMessage("Secondary indexes are not supported on collections containing durations",
+                             String.format("CREATE INDEX ON %s.%s (keys(m))", KEYSPACE, currentTable())); // TODO perhaps this should be allowed
+        assertInvalidMessage("Secondary indexes are not supported on collections containing durations",
+                             String.format("CREATE INDEX ON %s.%s (entries(m))", KEYSPACE, currentTable()));
 
         // Test duration within List
         createTable("CREATE TABLE %s(pk int PRIMARY KEY, l list<duration>)");
@@ -236,7 +307,7 @@ public class CreateTest extends CQLTester
         assertRows(execute("SELECT * FROM %s"),
                    row(1, list(Duration.from("1mo"), Duration.from("60d"))));
 
-        assertInvalidMessage("duration type is not supported for PRIMARY KEY column 'l'",
+        assertInvalidMessage("Invalid type frozen<list<duration>> for column l: duration types are not supported within PRIMARY KEY columns",
                              "CREATE TABLE cql_test_keyspace.table0(l frozen<list<duration>> PRIMARY KEY, v int)");
 
         // Test duration within Tuple
@@ -245,23 +316,23 @@ public class CreateTest extends CQLTester
         assertRows(execute("SELECT * FROM %s"),
                    row(1, tuple(1, Duration.from("1mo"))));
 
-        assertInvalidMessage("duration type is not supported for PRIMARY KEY column 't'",
+        assertInvalidMessage("Invalid type frozen<tuple<int, duration>> for column t: duration types are not supported within PRIMARY KEY columns",
                              "CREATE TABLE cql_test_keyspace.table0(t frozen<tuple<int, duration>> PRIMARY KEY, v int)");
 
         // Test duration within UDT
         String typename = createType("CREATE TYPE %s (a duration)");
         String myType = KEYSPACE + '.' + typename;
-        createTable("CREATE TABLE %s(pk int PRIMARY KEY, u " + myType + ")");
+        createTable("CREATE TABLE %s(pk int PRIMARY KEY, u " + myType + ')');
         execute("INSERT INTO %s (pk, u) VALUES (1, {a : 1mo})");
         assertRows(execute("SELECT * FROM %s"),
                    row(1, userType("a", Duration.from("1mo"))));
 
-        assertInvalidMessage("duration type is not supported for PRIMARY KEY column 'u'",
+        assertInvalidMessage("Invalid type frozen<" + typename + "> for column u: duration types are not supported within PRIMARY KEY columns",
                              "CREATE TABLE cql_test_keyspace.table0(pk int, u frozen<" + myType + ">, v int, PRIMARY KEY(pk, u))");
 
         // Test duration with several level of depth
-        assertInvalidMessage("duration type is not supported for PRIMARY KEY column 'm'",
-                "CREATE TABLE cql_test_keyspace.table0(pk int, m frozen<map<text, list<tuple<int, duration>>>>, v int, PRIMARY KEY (pk, m))");
+        assertInvalidMessage("Invalid type frozen<map<text, frozen<list<frozen<tuple<int, duration>>>>>> for column m: duration types are not supported within PRIMARY KEY columns",
+                             "CREATE TABLE cql_test_keyspace.table0(pk int, m frozen<map<text, list<tuple<int, duration>>>>, v int, PRIMARY KEY (pk, m))");
     }
 
     private ByteBuffer duration(long months, long days, long nanoseconds) throws IOException
@@ -385,8 +456,8 @@ public class CreateTest extends CQLTester
 
         execute("CREATE KEYSPACE testXYZ WITH replication = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 }");
 
-        assertInvalid(
-                     "CREATE KEYSPACE My_much_much_too_long_identifier_that_should_not_work WITH replication = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 }");
+        String tooLongKeyspace = IntStream.range(0, SchemaConstants.NAME_LENGTH + 1).mapToObj(i ->"x").collect(Collectors.joining());
+        assertInvalid("CREATE KEYSPACE " + tooLongKeyspace + " WITH replication = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 }");
 
         execute("DROP KEYSPACE testXYZ");
         assertInvalidThrow(InvalidRequestException.class, "DROP KEYSPACE non_existing");
@@ -415,27 +486,13 @@ public class CreateTest extends CQLTester
     }
 
     /**
-     * Test {@link ConfigurationException} is not thrown on create NetworkTopologyStrategy keyspace without any options.
+     * Test {@link ConfigurationException} is thrown on create keyspace without any options.
      */
     @Test
-    public void testCreateKeyspaceWithNetworkTopologyStrategyNoOptions() throws Throwable
+    public void testConfigurationExceptionThrownWhenCreateKeyspaceWithNoOptions() throws Throwable
     {
-        schemaChange("CREATE KEYSPACE testXYZ with replication = { 'class': 'NetworkTopologyStrategy' }");
-
-        // clean-up
-        execute("DROP KEYSPACE IF EXISTS testXYZ");
-    }
-
-    /**
-     * Test {@link ConfigurationException} is not thrown on create SimpleStrategy keyspace without any options.
-     */
-    @Test
-    public void testCreateKeyspaceWithSimpleStrategyNoOptions() throws Throwable
-    {
-        schemaChange("CREATE KEYSPACE testXYZ WITH replication = { 'class' : 'SimpleStrategy' }");
-
-        // clean-up
-        execute("DROP KEYSPACE IF EXISTS testXYZ");
+        assertInvalidThrow(ConfigurationException.class, "CREATE KEYSPACE testXYZ with replication = { 'class': 'NetworkTopologyStrategy' }");
+        assertInvalidThrow(ConfigurationException.class, "CREATE KEYSPACE testXYZ WITH replication = { 'class' : 'SimpleStrategy' }");
     }
 
     @Test
@@ -558,12 +615,31 @@ public class CreateTest extends CQLTester
     // tests CASSANDRA-4278
     public void testHyphenDatacenters() throws Throwable
     {
-        // this forces the dc 'us-east-1' to be added to the list of known datacenters (fixes static init problem
+        IEndpointSnitch snitch = DatabaseDescriptor.getEndpointSnitch();
+
+        // Register an EndpointSnitch which returns fixed values for test.
+        DatabaseDescriptor.setEndpointSnitch(new AbstractEndpointSnitch()
+        {
+            @Override
+            public String getRack(InetAddressAndPort endpoint) { return RACK1; }
+
+            @Override
+            public String getDatacenter(InetAddressAndPort endpoint) { return "us-east-1"; }
+
+            @Override
+            public int compareEndpoints(InetAddressAndPort target, Replica a1, Replica a2) { return 0; }
+        });
+
+        // this forces the dc above to be added to the list of known datacenters (fixes static init problem
         // with this group of tests), ok to remove at some point if doing so doesn't break the test
-        ClusterMetadataService.instance().commit(new Register(new NodeAddresses(endpoint(255)),
-                                                              new Location("us-east-1", RACK1),
-                                                              NodeVersion.CURRENT));
+        StorageService.instance.getTokenMetadata().updateHostId(UUID.randomUUID(), InetAddressAndPort.getByName("127.0.0.255"));
         execute("CREATE KEYSPACE Foo WITH replication = { 'class' : 'NetworkTopologyStrategy', 'us-east-1' : 1 };");
+
+        // Restore the previous EndpointSnitch
+        DatabaseDescriptor.setEndpointSnitch(snitch);
+
+        // clean up
+        execute("DROP KEYSPACE IF EXISTS Foo");
     }
 
     @Test
@@ -577,9 +653,22 @@ public class CreateTest extends CQLTester
             assertInvalidSyntaxMessage("no viable alternative at input 'WITH'", stmt);
     }
 
+    public static class TestMemtableFactory
+    {
+        public static Memtable.Factory factory(Map<String, String> options)
+        {
+            String skiplist = options.remove("skiplist");
+            if (!options.isEmpty())
+                throw new ConfigurationException("Options " + options + " not expected.");
+            if (Boolean.parseBoolean(skiplist))
+                return SkipListMemtable.FACTORY;
+            else
+                return TrieMemtable.FACTORY;
+        }
+    }
+
     public static class InvalidMemtableFactoryMethod
     {
-        @SuppressWarnings("unused")
         public static String factory(Map<String, String> options)
         {
             return "invalid";
@@ -588,7 +677,6 @@ public class CreateTest extends CQLTester
 
     public static class InvalidMemtableFactoryField
     {
-        @SuppressWarnings("unused")
         public static String FACTORY = "invalid";
     }
 
@@ -596,100 +684,189 @@ public class CreateTest extends CQLTester
     public void testCreateTableWithMemtable() throws Throwable
     {
         createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))");
-        assertSame(MemtableParams.DEFAULT.factory(), getCurrentColumnFamilyStore().metadata().params.memtable.factory());
-        Class<? extends Memtable> defaultClass = getCurrentColumnFamilyStore().getTracker().getView().getCurrentMemtable().getClass();
+        assertSame(MemtableParams.DEFAULT.factory, getCurrentColumnFamilyStore().metadata().params.memtable.factory);
 
-        assertSchemaOption("memtable", null);
-
-        testMemtableConfig("skiplist", SkipListMemtable.FACTORY, SkipListMemtable.class);
-        testMemtableConfig("trie", MemtableParams.get("trie").factory(), TrieMemtable.class);
-        testMemtableConfig("skiplist_remapped", SkipListMemtable.FACTORY, SkipListMemtable.class);
-        testMemtableConfig("test_fullname", TestMemtable.FACTORY, SkipListMemtable.class);
-        testMemtableConfig("test_shortname", SkipListMemtable.FACTORY, SkipListMemtable.class);
-        testMemtableConfig("default", MemtableParams.DEFAULT.factory(), defaultClass);
-
-        assertThrowsConfigurationException("The 'class_name' option must be specified.",
-                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
-                                           + " WITH memtable = 'test_empty_class';");
-
-        assertThrowsConfigurationException("The 'class_name' option must be specified.",
-                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
-                                           + " WITH memtable = 'test_missing_class';");
-
-        assertThrowsConfigurationException("Memtable class org.apache.cassandra.db.memtable.SkipListMemtable does not accept any futher parameters, but {invalid=throw} were given.",
-                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
-                                           + " WITH memtable = 'test_invalid_param';");
-
-        assertThrowsConfigurationException("Could not create memtable factory for class NotExisting",
-                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
-                                           + " WITH memtable = 'test_unknown_class';");
-
-        assertThrowsConfigurationException("Memtable class org.apache.cassandra.db.memtable.TestMemtable does not accept any futher parameters, but {invalid=throw} were given.",
-                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
-                                           + " WITH memtable = 'test_invalid_extra_param';");
-
-        assertThrowsConfigurationException("Could not create memtable factory for class " + InvalidMemtableFactoryMethod.class.getName(),
-                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
-                                           + " WITH memtable = 'test_invalid_factory_method';");
-
-        assertThrowsConfigurationException("Could not create memtable factory for class " + InvalidMemtableFactoryField.class.getName(),
-                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
-                                           + " WITH memtable = 'test_invalid_factory_field';");
-
-        assertThrowsConfigurationException("Memtable configuration \"unknown\" not found.",
-                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
-                                           + " WITH memtable = 'unknown';");
-    }
-
-    private void testMemtableConfig(String memtableConfig, Memtable.Factory factoryInstance, Class<? extends Memtable> memtableClass) throws Throwable
-    {
-        createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
-                    + " WITH memtable = '" + memtableConfig + "';");
-        assertSame(factoryInstance, getCurrentColumnFamilyStore().metadata().params.memtable.factory());
-        Assert.assertTrue(memtableClass.isInstance(getCurrentColumnFamilyStore().getTracker().getView().getCurrentMemtable()));
-
-        assertSchemaOption("memtable", MemtableParams.DEFAULT.configurationKey().equals(memtableConfig) ? null : memtableConfig);
-    }
-
-    void assertSchemaOption(String option, Object expected) throws Throwable
-    {
-        assertRows(execute(format("SELECT " + option + " FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+        assertRows(execute(format("SELECT memtable FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
                                   SchemaConstants.SCHEMA_KEYSPACE_NAME,
                                   SchemaKeyspaceTables.TABLES),
                            KEYSPACE,
                            currentTable()),
-                   row(expected));
+                   row(map()));
+
+        createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                    + " WITH memtable = { 'class' : 'SkipListMemtable' };");
+        assertSame(SkipListMemtable.FACTORY, getCurrentColumnFamilyStore().metadata().params.memtable.factory);
+        Assert.assertTrue(getCurrentColumnFamilyStore().getTracker().getView().getCurrentMemtable() instanceof SkipListMemtable);
+
+        assertRows(execute(format("SELECT memtable FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+                                  SchemaConstants.SCHEMA_KEYSPACE_NAME,
+                                  SchemaKeyspaceTables.TABLES),
+                           KEYSPACE,
+                           currentTable()),
+                   row(map("class", "SkipListMemtable")));
+
+        createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                    + " WITH memtable = { 'class' : 'org.apache.cassandra.db.memtable.TrieMemtable' };");
+        assertSame(TrieMemtable.FACTORY, getCurrentColumnFamilyStore().metadata().params.memtable.factory);
+        Assert.assertTrue(getCurrentColumnFamilyStore().getTracker().getView().getCurrentMemtable() instanceof TrieMemtable);
+
+        assertRows(execute(format("SELECT memtable FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+                                  SchemaConstants.SCHEMA_KEYSPACE_NAME,
+                                  SchemaKeyspaceTables.TABLES),
+                           KEYSPACE,
+                           currentTable()),
+                   row(map("class", "org.apache.cassandra.db.memtable.TrieMemtable")));
+
+        createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                    + " WITH memtable = { 'class' : '" + TestMemtableFactory.class.getName() + "' };");
+        Assert.assertTrue(getCurrentColumnFamilyStore().getTracker().getView().getCurrentMemtable() instanceof TrieMemtable);
+
+        assertRows(execute(format("SELECT memtable FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+                                  SchemaConstants.SCHEMA_KEYSPACE_NAME,
+                                  SchemaKeyspaceTables.TABLES),
+                           KEYSPACE,
+                           currentTable()),
+                   row(map("class", TestMemtableFactory.class.getName())));
+
+        createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                    + " WITH memtable = { 'class' : '" + TestMemtableFactory.class.getName() + "', 'skiplist' : 'true' };");
+        Assert.assertTrue(getCurrentColumnFamilyStore().getTracker().getView().getCurrentMemtable() instanceof SkipListMemtable);
+
+        assertRows(execute(format("SELECT memtable FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+                                  SchemaConstants.SCHEMA_KEYSPACE_NAME,
+                                  SchemaKeyspaceTables.TABLES),
+                           KEYSPACE,
+                           currentTable()),
+                   row(map("class", TestMemtableFactory.class.getName(),
+                           "skiplist", "true")));
+
+        createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                    + " WITH memtable = {  };");
+        assertSame(MemtableParams.DEFAULT.factory, getCurrentColumnFamilyStore().metadata().params.memtable.factory);
+
+        assertRows(execute(format("SELECT memtable FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+                                  SchemaConstants.SCHEMA_KEYSPACE_NAME,
+                                  SchemaKeyspaceTables.TABLES),
+                           KEYSPACE,
+                           currentTable()),
+                   row(map()));
+
+        assertThrowsConfigurationException("The 'class' option must not be empty. To use default implementation, remove option.",
+                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                                           + " WITH memtable = { 'class' : '' };");
+
+        assertThrowsConfigurationException("Memtable class org.apache.cassandra.db.memtable.TrieMemtable does not accept any futher parameters, but {invalid=throw} were given.",
+                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                                           + " WITH memtable = { 'class' : 'TrieMemtable', 'invalid' : 'throw' };");
+
+        assertThrowsConfigurationException("Could not create memtable factory for type org.apache.cassandra.db.memtable.NotExisting and options {}",
+                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                                           + " WITH memtable = { 'class' : 'NotExisting'};");
+
+        assertThrowsConfigurationException("Options {invalid=throw} not expected.",
+                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                                           + " WITH memtable = { 'class' : '" + TestMemtableFactory.class.getName() + "', 'invalid' : 'throw' };");
+
+        assertThrowsConfigurationException("Could not create memtable factory for type " + InvalidMemtableFactoryMethod.class.getName() +  " and options {}",
+                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                                           + " WITH memtable = { 'class' : '" + InvalidMemtableFactoryMethod.class.getName() + "' };");
+
+        assertThrowsConfigurationException("Could not create memtable factory for type " + InvalidMemtableFactoryField.class.getName() +  " and options {}",
+                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                                           + " WITH memtable = { 'class' : '" + InvalidMemtableFactoryField.class.getName() + "' };");
     }
 
     @Test
     public void testCreateTableWithCompression() throws Throwable
     {
         createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))");
-        assertSchemaOption("compression", map("chunk_length_in_kb", "16", "class", "org.apache.cassandra.io.compress.LZ4Compressor"));
+
+        assertRows(execute(format("SELECT compression FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+                                  SchemaConstants.SCHEMA_KEYSPACE_NAME,
+                                  SchemaKeyspaceTables.TABLES),
+                           KEYSPACE,
+                           currentTable()),
+                   row(map("chunk_length_in_kb", "16", "class", "org.apache.cassandra.io.compress.LZ4Compressor")));
 
         createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
                 + " WITH compression = { 'class' : 'SnappyCompressor', 'chunk_length_in_kb' : 32 };");
-        assertSchemaOption("compression", map("chunk_length_in_kb", "32", "class", "org.apache.cassandra.io.compress.SnappyCompressor"));
+
+        assertRows(execute(format("SELECT compression FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+                                  SchemaConstants.SCHEMA_KEYSPACE_NAME,
+                                  SchemaKeyspaceTables.TABLES),
+                           KEYSPACE,
+                           currentTable()),
+                   row(map("chunk_length_in_kb", "32", "class", "org.apache.cassandra.io.compress.SnappyCompressor")));
 
         createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
                 + " WITH compression = { 'class' : 'SnappyCompressor', 'chunk_length_in_kb' : 32, 'enabled' : true };");
-        assertSchemaOption("compression", map("chunk_length_in_kb", "32", "class", "org.apache.cassandra.io.compress.SnappyCompressor"));
+
+        assertRows(execute(format("SELECT compression FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+                                  SchemaConstants.SCHEMA_KEYSPACE_NAME,
+                                  SchemaKeyspaceTables.TABLES),
+                           KEYSPACE,
+                           currentTable()),
+                   row(map("chunk_length_in_kb", "32", "class", "org.apache.cassandra.io.compress.SnappyCompressor")));
 
         createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
-                + " WITH compression = { 'class' : 'SnappyCompressor', 'min_compress_ratio' : 2 };");
-        assertSchemaOption("compression", map("chunk_length_in_kb", "16", "class", "org.apache.cassandra.io.compress.SnappyCompressor", "min_compress_ratio", "2.0"));
+                + " WITH compression = { 'sstable_compression' : 'SnappyCompressor', 'chunk_length_kb' : 32 };");
+
+        assertRows(execute(format("SELECT compression FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+                                  SchemaConstants.SCHEMA_KEYSPACE_NAME,
+                                  SchemaKeyspaceTables.TABLES),
+                           KEYSPACE,
+                           currentTable()),
+                   row(map("chunk_length_in_kb", "32", "class", "org.apache.cassandra.io.compress.SnappyCompressor")));
 
         createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
-                    + " WITH compression = { 'class' : 'SnappyCompressor', 'min_compress_ratio' : 1 };");
-        assertSchemaOption("compression", map("chunk_length_in_kb", "16", "class", "org.apache.cassandra.io.compress.SnappyCompressor", "min_compress_ratio", "1.0"));
+                + " WITH compression = { 'sstable_compression' : 'SnappyCompressor', 'min_compress_ratio' : 2 };");
+
+        assertRows(execute(format("SELECT compression FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+                                  SchemaConstants.SCHEMA_KEYSPACE_NAME,
+                                  SchemaKeyspaceTables.TABLES),
+                           KEYSPACE,
+                           currentTable()),
+                   row(map("chunk_length_in_kb", "16", "class", "org.apache.cassandra.io.compress.SnappyCompressor", "min_compress_ratio", "2.0")));
 
         createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
-                    + " WITH compression = { 'class' : 'SnappyCompressor', 'min_compress_ratio' : 0 };");
-        assertSchemaOption("compression", map("chunk_length_in_kb", "16", "class", "org.apache.cassandra.io.compress.SnappyCompressor"));
+                    + " WITH compression = { 'sstable_compression' : 'SnappyCompressor', 'min_compress_ratio' : 1 };");
+
+        assertRows(execute(format("SELECT compression FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+                                  SchemaConstants.SCHEMA_KEYSPACE_NAME,
+                                  SchemaKeyspaceTables.TABLES),
+                           KEYSPACE,
+                           currentTable()),
+                   row(map("chunk_length_in_kb", "16", "class", "org.apache.cassandra.io.compress.SnappyCompressor", "min_compress_ratio", "1.0")));
+
+        createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                    + " WITH compression = { 'sstable_compression' : 'SnappyCompressor', 'min_compress_ratio' : 0 };");
+
+        assertRows(execute(format("SELECT compression FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+                                  SchemaConstants.SCHEMA_KEYSPACE_NAME,
+                                  SchemaKeyspaceTables.TABLES),
+                           KEYSPACE,
+                           currentTable()),
+                   row(map("chunk_length_in_kb", "16", "class", "org.apache.cassandra.io.compress.SnappyCompressor")));
+
+        createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                + " WITH compression = { 'sstable_compression' : '', 'chunk_length_kb' : 32 };");
+
+        assertRows(execute(format("SELECT compression FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+                                  SchemaConstants.SCHEMA_KEYSPACE_NAME,
+                                  SchemaKeyspaceTables.TABLES),
+                           KEYSPACE,
+                           currentTable()),
+                   row(map("enabled", "false")));
 
         createTable("CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
                 + " WITH compression = { 'enabled' : 'false'};");
-        assertSchemaOption("compression", map("enabled", "false"));
+
+        assertRows(execute(format("SELECT compression FROM %s.%s WHERE keyspace_name = ? and table_name = ?;",
+                                  SchemaConstants.SCHEMA_KEYSPACE_NAME,
+                                  SchemaKeyspaceTables.TABLES),
+                           KEYSPACE,
+                           currentTable()),
+                   row(map("enabled", "false")));
 
         assertThrowsConfigurationException("Missing sub-option 'class' for the 'compression' option.",
                                            "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
@@ -707,6 +884,14 @@ public class CreateTest extends CQLTester
                                            "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
                                            + " WITH compression = { 'enabled' : 'false', 'chunk_length_in_kb' : 32};");
 
+        assertThrowsConfigurationException("The 'sstable_compression' option must not be used if the compression algorithm is already specified by the 'class' option",
+                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                                           + " WITH compression = { 'sstable_compression' : 'SnappyCompressor', 'class' : 'SnappyCompressor'};");
+
+        assertThrowsConfigurationException("The 'chunk_length_kb' option must not be used if the chunk length is already specified by the 'chunk_length_in_kb' option",
+                                           "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
+                                           + " WITH compression = { 'class' : 'SnappyCompressor', 'chunk_length_kb' : 32 , 'chunk_length_in_kb' : 32 };");
+
         assertThrowsConfigurationException("chunk_length_in_kb must be a power of 2",
                                            "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
                                            + " WITH compression = { 'class' : 'SnappyCompressor', 'chunk_length_in_kb' : 31 };");
@@ -722,14 +907,6 @@ public class CreateTest extends CQLTester
         assertThrowsConfigurationException("Unknown compression options unknownOption",
                                            "CREATE TABLE %s (a text, b int, c int, primary key (a, b))"
                                             + " WITH compression = { 'class' : 'SnappyCompressor', 'unknownOption' : 32 };");
-    }
-
-    @Test
-    public void testNotUsingDeterministicTableIDOnCreate()
-    {
-        createTable("CREATE TABLE %s (id text PRIMARY KEY);");
-        TableMetadata tmd = currentTableMetadata();
-        assertNotEquals(TableId.unsafeDeterministic(tmd.keyspace, tmd.name), tmd.id);
     }
 
     private void assertThrowsConfigurationException(String errorMsg, String createStmt)
@@ -767,5 +944,4 @@ public class CreateTest extends CQLTester
             return Collections.emptyList();
         }
     }
-
 }

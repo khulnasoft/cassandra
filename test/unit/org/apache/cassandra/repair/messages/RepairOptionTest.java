@@ -23,16 +23,19 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
+import org.junit.Assert;
 import org.junit.Test;
 
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.repair.RepairParallelism;
-import org.apache.cassandra.streaming.PreviewKind;
+import org.apache.cassandra.utils.FBUtilities;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThat;
@@ -50,7 +53,11 @@ public class RepairOptionTest
 
         // parse with empty options
         RepairOption option = RepairOption.parse(new HashMap<String, String>(), partitioner);
-        assertTrue(option.getParallelism() == RepairParallelism.SEQUENTIAL);
+
+        if (FBUtilities.isWindows && (DatabaseDescriptor.getDiskAccessMode() != Config.DiskAccessMode.standard || DatabaseDescriptor.getIndexAccessMode() != Config.DiskAccessMode.standard))
+            assertTrue(option.getParallelism() == RepairParallelism.PARALLEL);
+        else
+            assertTrue(option.getParallelism() == RepairParallelism.SEQUENTIAL);
 
         assertFalse(option.isPrimaryRange());
         assertFalse(option.isIncremental());
@@ -63,11 +70,17 @@ public class RepairOptionTest
         options.put(RepairOption.RANGES_KEY, "0:10,11:20,21:30");
         options.put(RepairOption.COLUMNFAMILIES_KEY, "cf1,cf2,cf3");
         options.put(RepairOption.DATACENTERS_KEY, "dc1,dc2,dc3");
+        options.put(RepairOption.PUSH_REPAIR_KEY, Boolean.toString(true));
+        options.put(RepairOption.OFFLINE_SERVICE, Boolean.toString(true));
 
         option = RepairOption.parse(options, partitioner);
         assertTrue(option.getParallelism() == RepairParallelism.PARALLEL);
         assertFalse(option.isPrimaryRange());
         assertFalse(option.isIncremental());
+        assertTrue(option.isPushRepair());
+        assertTrue(option.isSubrangeRepair());
+        assertTrue(option.isOfflineService());
+        assertEquals(Boolean.toString(true), option.asMap().get(RepairOption.OFFLINE_SERVICE));
 
         Set<Range<Token>> expectedRanges = new HashSet<>(3);
         expectedRanges.add(new Range<>(tokenFactory.fromString("0"), tokenFactory.fromString("10")));
@@ -93,7 +106,9 @@ public class RepairOptionTest
 
         // remove data centers to proceed with testing parsing hosts
         options.remove(RepairOption.DATACENTERS_KEY);
+        options.remove(RepairOption.PUSH_REPAIR_KEY);
         option = RepairOption.parse(options, partitioner);
+        assertFalse(option.isPushRepair());
 
         Set<String> expectedHosts = new HashSet<>(3);
         expectedHosts.add("127.0.0.1");
@@ -142,6 +157,20 @@ public class RepairOptionTest
     }
 
     @Test
+    public void testPullRepairAndPushRepair()
+    {
+        Map<String, String> options = new HashMap<>();
+
+        options.put(RepairOption.PULL_REPAIR_KEY, "true");
+        options.put(RepairOption.PUSH_REPAIR_KEY, "true");
+        options.put(RepairOption.HOSTS_KEY, "127.0.0.1,127.0.0.2");
+        options.put(RepairOption.RANGES_KEY, "0:10");
+
+        assertThatThrownBy(() -> RepairOption.parse(options, Murmur3Partitioner.instance))
+               .hasMessageContaining("Cannot use pushRepair and pullRepair as the same time");
+    }
+
+    @Test
     public void testForceOption() throws Exception
     {
         RepairOption option;
@@ -149,76 +178,17 @@ public class RepairOptionTest
 
         // default value
         option = RepairOption.parse(options, Murmur3Partitioner.instance);
-        assertFalse(option.isForcedRepair());
+        Assert.assertFalse(option.isForcedRepair());
 
         // explicit true
         options.put(RepairOption.FORCE_REPAIR_KEY, "true");
         option = RepairOption.parse(options, Murmur3Partitioner.instance);
-        assertTrue(option.isForcedRepair());
+        Assert.assertTrue(option.isForcedRepair());
 
         // explicit false
         options.put(RepairOption.FORCE_REPAIR_KEY, "false");
         option = RepairOption.parse(options, Murmur3Partitioner.instance);
-        assertFalse(option.isForcedRepair());
-    }
-
-    @Test
-    public void testOptimiseStreams()
-    {
-        boolean optFull = DatabaseDescriptor.autoOptimiseFullRepairStreams();
-        boolean optInc = DatabaseDescriptor.autoOptimiseIncRepairStreams();
-        boolean optPreview = DatabaseDescriptor.autoOptimisePreviewRepairStreams();
-        try
-        {
-            for (PreviewKind previewKind : PreviewKind.values())
-                for (boolean inc : new boolean[] {true, false})
-                    assertOptimise(previewKind, inc);
-        }
-        finally
-        {
-            setOptimise(optFull, optInc, optPreview);
-        }
-    }
-
-    private void assertHelper(Map<String, String> options, boolean full, boolean inc, boolean preview, boolean expected)
-    {
-        setOptimise(full, inc, preview);
-        assertEquals(expected, RepairOption.parse(options, Murmur3Partitioner.instance).optimiseStreams());
-    }
-
-    private void setOptimise(boolean full, boolean inc, boolean preview)
-    {
-        DatabaseDescriptor.setAutoOptimiseFullRepairStreams(full);
-        DatabaseDescriptor.setAutoOptimiseIncRepairStreams(inc);
-        DatabaseDescriptor.setAutoOptimisePreviewRepairStreams(preview);
-    }
-
-    private void assertOptimise(PreviewKind previewKind, boolean incremental)
-    {
-        Map<String, String> options = new HashMap<>();
-        options.put(RepairOption.PREVIEW, previewKind.toString());
-        options.put(RepairOption.INCREMENTAL_KEY, Boolean.toString(incremental));
-        for (boolean a : new boolean[]{ true, false })
-        {
-            for (boolean b : new boolean[]{ true, false })
-            {
-                if (previewKind.isPreview())
-                {
-                    assertHelper(options, a, b, true, true);
-                    assertHelper(options, a, b, false, false);
-                }
-                else if (incremental)
-                {
-                    assertHelper(options, a, true, b, true);
-                    assertHelper(options, a, false, b, false);
-                }
-                else
-                {
-                    assertHelper(options, true, a, b, true);
-                    assertHelper(options, false, a, b, false);
-                }
-            }
-        }
+        Assert.assertFalse(option.isForcedRepair());
     }
 
     private void assertParseThrowsIllegalArgumentExceptionWithMessage(Map<String, String> optionsToParse, String expectedErrorMessage)

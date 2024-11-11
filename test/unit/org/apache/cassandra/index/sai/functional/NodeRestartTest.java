@@ -25,14 +25,14 @@ import org.junit.Test;
 
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.index.sai.IndexContext;
 import org.apache.cassandra.index.sai.SAITester;
 import org.apache.cassandra.index.sai.StorageAttachedIndex;
-import org.apache.cassandra.index.sai.utils.IndexIdentifier;
-import org.apache.cassandra.index.sai.utils.IndexTermType;
 import org.apache.cassandra.inject.Injection;
 import org.apache.cassandra.inject.Injections;
 import org.apache.cassandra.inject.InvokePointBuilder;
-import org.assertj.core.api.Assertions;
+
+import static org.junit.Assert.assertFalse;
 
 public class NodeRestartTest extends SAITester
 {
@@ -66,7 +66,7 @@ public class NodeRestartTest extends SAITester
         // We should have completed no actual SSTable validations:
         assertValidationCount(0, 0);
 
-        Assertions.assertThat(getNotQueryableIndexes()).isNotEmpty();
+        assertFalse(areAllTableIndexesQueryable());
     }
 
     // We don't allow the node to actually join the ring before a valid index is ready to accept queries.
@@ -113,25 +113,19 @@ public class NodeRestartTest extends SAITester
         execute("INSERT INTO %s (id1, v1, v2) VALUES ('0', 0, '0');");
         flush();
 
-        IndexIdentifier numericIndexIdentifier = createIndexIdentifier(createIndex(String.format(CREATE_INDEX_TEMPLATE, "v1")));
-        IndexIdentifier literalIndexIdentifier = createIndexIdentifier(createIndex(String.format(CREATE_INDEX_TEMPLATE, "v2")));
-        IndexTermType numericIndexTermType = createIndexTermType(Int32Type.instance);
-        IndexTermType literalIndexTermType = createIndexTermType(UTF8Type.instance);
-        verifyIndexFiles(numericIndexTermType, numericIndexIdentifier, 1);
-        verifyIndexFiles(literalIndexTermType, literalIndexIdentifier, 1);
+        IndexContext numericIndexContext = createIndexContext(createIndex(String.format(CREATE_INDEX_TEMPLATE, "v1")), Int32Type.instance);
+        IndexContext literalIndexContext = createIndexContext(createIndex(String.format(CREATE_INDEX_TEMPLATE, "v2")), UTF8Type.instance);
+        verifyIndexFiles(numericIndexContext,literalIndexContext, 1, 1);
         assertNumRows(1, "SELECT * FROM %%s WHERE v1 >= 0");
         assertNumRows(1, "SELECT * FROM %%s WHERE v2 = '0'");
         assertValidationCount(0, 0);
 
         simulateNodeRestart();
 
-        verifyIndexFiles(numericIndexTermType, numericIndexIdentifier, 1);
-        verifyIndexFiles(literalIndexTermType, literalIndexIdentifier, 1);
+        verifyIndexFiles(numericIndexContext, literalIndexContext, 1, 1);
 
         assertNumRows(1, "SELECT * FROM %%s WHERE v1 >= 0");
         assertNumRows(1, "SELECT * FROM %%s WHERE v2 = '0'");
-
-        waitForTableIndexesQueryable();
 
         // index components are included after restart
         verifyIndexComponentsIncludedInSSTable();
@@ -178,11 +172,8 @@ public class NodeRestartTest extends SAITester
         execute("INSERT INTO %s (id1, v1, v2) VALUES ('0', 0, '0')");
         flush();
 
-        IndexIdentifier numericIndexIdentifier = createIndexIdentifier(createIndex(String.format(CREATE_INDEX_TEMPLATE, "v1")));
-        IndexTermType numericIndexTermType = createIndexTermType(Int32Type.instance);
-
-        waitForTableIndexesQueryable();
-        verifyIndexFiles(numericIndexTermType, numericIndexIdentifier, 1);
+        IndexContext numericIndexContext = createIndexContext(createIndex(String.format(CREATE_INDEX_TEMPLATE, "v1")), Int32Type.instance);
+        verifyIndexFiles(numericIndexContext, null, 1, 0);
         assertNumRows(1, "SELECT * FROM %%s WHERE v1 >= 0");
         assertValidationCount(0, 0);
     }

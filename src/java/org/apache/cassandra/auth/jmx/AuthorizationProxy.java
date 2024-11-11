@@ -22,7 +22,6 @@ import java.lang.reflect.*;
 import java.security.AccessControlContext;
 import java.security.AccessController;
 import java.security.Principal;
-import java.util.Collections;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
@@ -42,7 +41,6 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.auth.*;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.MBeanWrapper;
 
 /**
  * Provides a proxy interface to the platform's MBeanServer instance to perform
@@ -106,7 +104,7 @@ public class AuthorizationProxy implements InvocationHandler
                                                                       "registerMBean",
                                                                       "unregisterMBean");
 
-    public static final JmxPermissionsCache jmxPermissionsCache = new JmxPermissionsCache();
+    private static final JMXPermissionsCache permissionsCache = new JMXPermissionsCache();
     private MBeanServer mbs;
 
     /*
@@ -120,7 +118,7 @@ public class AuthorizationProxy implements InvocationHandler
      the permissions from the local cache, which in turn loads them from the configured IAuthorizer
      but can be overridden for testing.
      */
-    protected Function<RoleResource, Set<PermissionDetails>> getPermissions = jmxPermissionsCache::get;
+    protected Function<RoleResource, Set<PermissionDetails>> getPermissions = permissionsCache::get;
 
     /*
      Used to decide whether authorization is enabled or not, usually this depends on the configured
@@ -189,12 +187,11 @@ public class AuthorizationProxy implements InvocationHandler
      *             as an invocation of a method on the MBeanServer.
      */
     @VisibleForTesting
-    public boolean authorize(Subject subject, String methodName, Object[] args)
+    boolean authorize(Subject subject, String methodName, Object[] args)
     {
-        if (logger.isTraceEnabled())
-            logger.trace("Authorizing JMX method invocation {} for {}",
-                         methodName,
-                         subject == null ? "" : subject.toString().replaceAll("\\n", " "));
+        logger.trace("Authorizing JMX method invocation {} for {}",
+                     methodName,
+                     subject == null ? "" :subject.toString().replaceAll("\\n", " "));
 
         if (!isAuthSetupComplete.getAsBoolean())
         {
@@ -282,8 +279,7 @@ public class AuthorizationProxy implements InvocationHandler
         if (null == requiredPermission)
             return false;
 
-        if (logger.isTraceEnabled())
-            logger.trace("JMX invocation of {} on {} requires permission {}", methodName, targetBean, requiredPermission);
+        logger.trace("JMX invocation of {} on {} requires permission {}", methodName, targetBean, requiredPermission);
 
         // find any JMXResources upon which the authenticated subject has been granted the
         // reqired permission. We'll do ObjectName-specific filtering & matching of resources later
@@ -550,47 +546,19 @@ public class AuthorizationProxy implements InvocationHandler
             throw new SecurityException("Access is denied!");
     }
 
-    public static final class JmxPermissionsCache extends AuthCache<RoleResource, Set<PermissionDetails>>
-        implements JmxPermissionsCacheMBean
+    private static final class JMXPermissionsCache extends AuthCache<RoleResource, Set<PermissionDetails>>
     {
-        protected JmxPermissionsCache()
+        protected JMXPermissionsCache()
         {
-            super(CACHE_NAME,
+            super("JMXPermissionsCache",
                   DatabaseDescriptor::setPermissionsValidity,
                   DatabaseDescriptor::getPermissionsValidity,
                   DatabaseDescriptor::setPermissionsUpdateInterval,
                   DatabaseDescriptor::getPermissionsUpdateInterval,
                   DatabaseDescriptor::setPermissionsCacheMaxEntries,
                   DatabaseDescriptor::getPermissionsCacheMaxEntries,
-                  DatabaseDescriptor::setPermissionsCacheActiveUpdate,
-                  DatabaseDescriptor::getPermissionsCacheActiveUpdate,
                   AuthorizationProxy::loadPermissions,
-                  Collections::emptyMap,
                   () -> true);
-
-            MBeanWrapper.instance.registerMBean(this, MBEAN_NAME_BASE + DEPRECATED_CACHE_NAME);
         }
-
-        public void invalidatePermissions(String roleName)
-        {
-            invalidate(RoleResource.role(roleName));
-        }
-
-        @Override
-        protected void unregisterMBean()
-        {
-            super.unregisterMBean();
-            MBeanWrapper.instance.unregisterMBean(MBEAN_NAME_BASE + DEPRECATED_CACHE_NAME, MBeanWrapper.OnException.LOG);
-        }
-    }
-
-    public static interface JmxPermissionsCacheMBean extends AuthCacheMBean
-    {
-        public static final String CACHE_NAME = "JmxPermissionsCache";
-        /** @deprecated See CASSANDRA-16404 */
-        @Deprecated(since = "4.1")
-        public static final String DEPRECATED_CACHE_NAME = "JMXPermissionsCache";
-
-        public void invalidatePermissions(String roleName);
     }
 }

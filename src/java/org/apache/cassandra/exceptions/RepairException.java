@@ -17,8 +17,6 @@
  */
 package org.apache.cassandra.exceptions;
 
-import javax.annotation.Nullable;
-
 import org.apache.cassandra.repair.RepairJobDesc;
 import org.apache.cassandra.streaming.PreviewKind;
 
@@ -27,36 +25,24 @@ import org.apache.cassandra.streaming.PreviewKind;
  */
 public class RepairException extends Exception
 {
-    private final boolean shouldLogWarn;
+    public final RepairJobDesc desc;
+    public final PreviewKind previewKind;
 
-    private RepairException(@Nullable RepairJobDesc desc, PreviewKind previewKind, String message, boolean shouldLogWarn)
+    public RepairException(RepairJobDesc desc, String message)
     {
-        this((desc == null ? "" : desc.toString(previewKind != null ? previewKind : PreviewKind.NONE)) + ' ' + message, shouldLogWarn);
+        this(desc, null, message);
     }
 
-    private RepairException(String msg, boolean shouldLogWarn)
+    public RepairException(RepairJobDesc desc, PreviewKind previewKind, String message)
     {
-        super(msg);
-        this.shouldLogWarn = shouldLogWarn;
+        super(message);
+        this.desc = desc;
+        this.previewKind = previewKind != null ? previewKind : PreviewKind.NONE;
     }
 
-    public static RepairException error(@Nullable RepairJobDesc desc, PreviewKind previewKind, String message)
+    @Override
+    public String getMessage()
     {
-        return new RepairException(desc, previewKind, message, false);
-    }
-
-    public static RepairException warn(@Nullable RepairJobDesc desc, PreviewKind previewKind, String message)
-    {
-        return new RepairException(desc, previewKind, message, true);
-    }
-
-    public static RepairException warn(String message)
-    {
-        return new RepairException(message, true);
-    }
-
-    public static boolean shouldWarn(Throwable throwable)
-    {
-        return throwable instanceof RepairException && ((RepairException)throwable).shouldLogWarn;
+        return desc.toString(previewKind) + ' ' + super.getMessage();
     }
 }

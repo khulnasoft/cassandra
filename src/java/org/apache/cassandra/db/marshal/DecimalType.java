@@ -27,9 +27,8 @@ import java.util.Objects;
 import com.google.common.primitives.Ints;
 
 import org.apache.cassandra.cql3.CQL3Type;
-import org.apache.cassandra.cql3.terms.Constants;
-import org.apache.cassandra.cql3.terms.Term;
-import org.apache.cassandra.cql3.functions.ArgumentDeserializer;
+import org.apache.cassandra.cql3.Constants;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.serializers.TypeSerializer;
 import org.apache.cassandra.serializers.DecimalSerializer;
 import org.apache.cassandra.serializers.MarshalException;
@@ -38,16 +37,9 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 import org.apache.cassandra.utils.bytecomparable.ByteSource;
 
-import ch.obermuhlner.math.big.BigDecimalMath;
-
 public class DecimalType extends NumberType<BigDecimal>
 {
     public static final DecimalType instance = new DecimalType();
-
-    private static final ArgumentDeserializer ARGUMENT_DESERIALIZER = new DefaultArgumentDeserializer(instance);
-
-    private static final ByteBuffer MASKED_VALUE = instance.decompose(BigDecimal.ZERO);
-
     private static final int MIN_SCALE = 32;
     private static final int MIN_SIGNIFICANT_DIGITS = MIN_SCALE;
     private static final int MAX_SCALE = 1000;
@@ -71,7 +63,6 @@ public class DecimalType extends NumberType<BigDecimal>
         return true;
     }
 
-    @Override
     public boolean isEmptyValueMeaningless()
     {
         return true;
@@ -234,7 +225,7 @@ public class DecimalType extends NumberType<BigDecimal>
         // but when decoding we don't need that property on the transient mantissa value.
         BigInteger mantissa = BigInteger.ZERO;
         int curr = comparableBytes.next();
-        while (curr != DECIMAL_LAST_BYTE)
+        while (curr > DECIMAL_LAST_BYTE)
         {
             // The mantissa value is constructed by a standard positional notation value calculation.
             // The value of the next digit is the next most-significant mantissa byte as an unsigned integer,
@@ -327,59 +318,60 @@ public class DecimalType extends NumberType<BigDecimal>
     }
 
     @Override
-    public ArgumentDeserializer getArgumentDeserializer()
+    protected int toInt(ByteBuffer value)
     {
-        return ARGUMENT_DESERIALIZER;
-    }
-
-    /**
-     * Converts the specified number into a {@link BigDecimal}.
-     *
-     * @param number the value to convert
-     * @return the converted value
-     */
-    protected BigDecimal toBigDecimal(Number number)
-    {
-        if (number instanceof BigDecimal)
-            return (BigDecimal) number;
-
-        if (number instanceof BigInteger)
-            return new BigDecimal((BigInteger) number);
-
-        double d = number.doubleValue();
-
-        if (Double.isNaN(d))
-            throw new NumberFormatException("A NaN cannot be converted into a decimal");
-
-        if (Double.isInfinite(d))
-            throw new NumberFormatException("An infinite number cannot be converted into a decimal");
-
-        return BigDecimal.valueOf(d);
+        throw new UnsupportedOperationException();
     }
 
     @Override
-    public ByteBuffer add(Number left, Number right)
+    protected float toFloat(ByteBuffer value)
     {
-        return decompose(toBigDecimal(left).add(toBigDecimal(right), MAX_PRECISION));
+        throw new UnsupportedOperationException();
     }
 
     @Override
-    public ByteBuffer substract(Number left, Number right)
+    protected long toLong(ByteBuffer value)
     {
-        return decompose(toBigDecimal(left).subtract(toBigDecimal(right), MAX_PRECISION));
+        throw new UnsupportedOperationException();
     }
 
     @Override
-    public ByteBuffer multiply(Number left, Number right)
+    protected double toDouble(ByteBuffer value)
     {
-        return decompose(toBigDecimal(left).multiply(toBigDecimal(right), MAX_PRECISION));
+        throw new UnsupportedOperationException();
     }
 
     @Override
-    public ByteBuffer divide(Number left, Number right)
+    protected BigInteger toBigInteger(ByteBuffer value)
     {
-        BigDecimal leftOperand = toBigDecimal(left);
-        BigDecimal rightOperand = toBigDecimal(right);
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public BigDecimal toBigDecimal(ByteBuffer value)
+    {
+        return compose(value);
+    }
+
+    public ByteBuffer add(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
+    {
+        return decompose(leftType.toBigDecimal(left).add(rightType.toBigDecimal(right), MAX_PRECISION));
+    }
+
+    public ByteBuffer substract(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
+    {
+        return decompose(leftType.toBigDecimal(left).subtract(rightType.toBigDecimal(right), MAX_PRECISION));
+    }
+
+    public ByteBuffer multiply(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
+    {
+        return decompose(leftType.toBigDecimal(left).multiply(rightType.toBigDecimal(right), MAX_PRECISION));
+    }
+
+    public ByteBuffer divide(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
+    {
+        BigDecimal leftOperand = leftType.toBigDecimal(left);
+        BigDecimal rightOperand = rightType.toBigDecimal(right);
 
         // Predict position of first significant digit in the quotient.
         // Note: it is possible to improve prediction accuracy by comparing first significant digits in operands
@@ -395,78 +387,13 @@ public class DecimalType extends NumberType<BigDecimal>
         return decompose(leftOperand.divide(rightOperand, scale, RoundingMode.HALF_UP).stripTrailingZeros());
     }
 
-    @Override
-    public ByteBuffer mod(Number left, Number right)
+    public ByteBuffer mod(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
     {
-        return decompose(toBigDecimal(left).remainder(toBigDecimal(right)));
+        return decompose(leftType.toBigDecimal(left).remainder(rightType.toBigDecimal(right)));
     }
 
-    @Override
-    public ByteBuffer negate(Number input)
+    public ByteBuffer negate(ByteBuffer input)
     {
         return decompose(toBigDecimal(input).negate());
-    }
-
-    @Override
-    public ByteBuffer abs(Number input)
-    {
-        return decompose(toBigDecimal(input).abs());
-    }
-
-    @Override
-    public ByteBuffer exp(Number input)
-    {
-        return decompose(exp(toBigDecimal(input)));
-    }
-
-    protected BigDecimal exp(BigDecimal input)
-    {
-        int precision = input.precision();
-        precision = Math.max(MIN_SIGNIFICANT_DIGITS, precision);
-        precision = Math.min(MAX_PRECISION.getPrecision(), precision);
-        return BigDecimalMath.exp(input, new MathContext(precision, RoundingMode.HALF_EVEN));
-    }
-
-    @Override
-    public ByteBuffer log(Number input)
-    {
-        return decompose(log(toBigDecimal(input)));
-    }
-
-    protected BigDecimal log(BigDecimal input)
-    {
-        if (input.compareTo(BigDecimal.ZERO) <= 0) throw new ArithmeticException("Natural log of number zero or less");
-        int precision = input.precision();
-        precision = Math.max(MIN_SIGNIFICANT_DIGITS, precision);
-        precision = Math.min(MAX_PRECISION.getPrecision(), precision);
-        return BigDecimalMath.log(input, new MathContext(precision, RoundingMode.HALF_EVEN));
-    }
-
-    @Override
-    public ByteBuffer log10(Number input)
-    {
-        return decompose(log10(toBigDecimal(input)));
-    }
-
-    protected BigDecimal log10(BigDecimal input)
-    {
-        if (input.compareTo(BigDecimal.ZERO) <= 0) throw new ArithmeticException("Log10 of number zero or less");
-        int precision = input.precision();
-        precision = Math.max(MIN_SIGNIFICANT_DIGITS, precision);
-        precision = Math.min(MAX_PRECISION.getPrecision(), precision);
-        return BigDecimalMath.log10(input, new MathContext(precision, RoundingMode.HALF_EVEN));
-    }
-
-    @Override
-    public ByteBuffer round(Number input)
-    {
-        return DecimalType.instance.decompose(
-        toBigDecimal(input).setScale(0, RoundingMode.HALF_UP));
-    }
-
-    @Override
-    public ByteBuffer getMaskedValue()
-    {
-        return MASKED_VALUE;
     }
 }

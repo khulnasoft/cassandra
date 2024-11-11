@@ -20,9 +20,8 @@ package org.apache.cassandra.db.marshal;
 import java.nio.ByteBuffer;
 import java.util.UUID;
 
-import org.apache.cassandra.cql3.terms.Constants;
-import org.apache.cassandra.cql3.terms.Term;
-import org.apache.cassandra.cql3.functions.ArgumentDeserializer;
+import org.apache.cassandra.cql3.Constants;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.serializers.TypeSerializer;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.serializers.UUIDSerializer;
@@ -33,14 +32,13 @@ import org.apache.cassandra.utils.bytecomparable.ByteSourceInverse;
 
 public class LexicalUUIDType extends AbstractType<UUID>
 {
-    public static class Serializer extends UUIDSerializer {}
-    private static final Serializer SERIALIZER = new Serializer();
-
     public static final LexicalUUIDType instance = new LexicalUUIDType();
 
-    private static final ArgumentDeserializer ARGUMENT_DESERIALIZER = new DefaultArgumentDeserializer(instance);
-
-    private static final ByteBuffer MASKED_VALUE = instance.decompose(UUID.fromString("00000000-0000-0000-0000-000000000000"));
+    // we just need it to be something different to UUIDSerializer
+    private static class Serializer extends UUIDSerializer
+    {
+        public static final Serializer instance = new Serializer();
+    }
 
     LexicalUUIDType()
     {
@@ -53,7 +51,6 @@ public class LexicalUUIDType extends AbstractType<UUID>
         return true;
     }
 
-    @Override
     public boolean isEmptyValueMeaningless()
     {
         return true;
@@ -136,27 +133,14 @@ public class LexicalUUIDType extends AbstractType<UUID>
         }
     }
 
-    @Override
     public TypeSerializer<UUID> getSerializer()
     {
-        return SERIALIZER;
-    }
-
-    @Override
-    public ArgumentDeserializer getArgumentDeserializer()
-    {
-        return ARGUMENT_DESERIALIZER;
+        return Serializer.instance;
     }
 
     @Override
     public int valueLengthIfFixed()
     {
         return 16;
-    }
-
-    @Override
-    public ByteBuffer getMaskedValue()
-    {
-        return MASKED_VALUE;
     }
 }

@@ -21,66 +21,128 @@ import java.util.Arrays;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import io.github.jbellis.jvector.vector.VectorSimilarityFunction;
 import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.apache.cassandra.index.sai.disk.v1.vector.OptimizeFor;
-import org.apache.cassandra.index.sai.utils.IndexTermType;
+import org.apache.cassandra.index.sai.disk.vector.VectorSourceModel;
+import org.apache.cassandra.index.sai.utils.TypeUtil;
 
 import static org.apache.cassandra.config.CassandraRelevantProperties.SAI_VECTOR_SEARCH_MAX_TOP_K;
-import static org.apache.cassandra.utils.LocalizeString.toUpperCaseLocalized;
 
 /**
  * Per-index config for storage-attached index writers.
  */
 public class IndexWriterConfig
 {
-    public static final String MAXIMUM_NODE_CONNECTIONS = "maximum_node_connections";
-    public static final int MAXIMUM_MAXIMUM_NODE_CONNECTIONS = 512;
-    public static final int DEFAULT_MAXIMUM_NODE_CONNECTIONS = 16;
+    public static final String POSTING_LIST_LVL_MIN_LEAVES = "bkd_postings_min_leaves";
+    public static final String POSTING_LIST_LVL_SKIP_OPTION = "bkd_postings_skip";
 
+    private static final int DEFAULT_POSTING_LIST_MIN_LEAVES = 64;
+    private static final int DEFAULT_POSTING_LIST_LVL_SKIP = 3;
+
+    public static final String MAXIMUM_NODE_CONNECTIONS = "maximum_node_connections";
     public static final String CONSTRUCTION_BEAM_WIDTH = "construction_beam_width";
+    public static final String SIMILARITY_FUNCTION = "similarity_function";
+    public static final String SOURCE_MODEL = "source_model";
+    public static final String OPTIMIZE_FOR = "optimize_for"; // unused, retained for compatibility w/ old schemas
+
+    public static final int MAXIMUM_MAXIMUM_NODE_CONNECTIONS = 512;
     public static final int MAXIMUM_CONSTRUCTION_BEAM_WIDTH = 3200;
+
+    public static final int DEFAULT_MAXIMUM_NODE_CONNECTIONS = 16;
     public static final int DEFAULT_CONSTRUCTION_BEAM_WIDTH = 100;
 
-    public static final String SIMILARITY_FUNCTION = "similarity_function";
-    public static final VectorSimilarityFunction DEFAULT_SIMILARITY_FUNCTION = VectorSimilarityFunction.COSINE;
+    public static final int MAX_TOP_K = SAI_VECTOR_SEARCH_MAX_TOP_K.getInt();
+
     public static final String validSimilarityFunctions = Arrays.stream(VectorSimilarityFunction.values())
                                                                 .map(Enum::name)
                                                                 .collect(Collectors.joining(", "));
 
-    public static final String OPTIMIZE_FOR = "optimize_for";
-    private static final OptimizeFor DEFAULT_OPTIMIZE_FOR = OptimizeFor.LATENCY;
-    private static final String validOptimizeFor = Arrays.stream(OptimizeFor.values())
-                                                         .map(Enum::name)
-                                                         .collect(Collectors.joining(", "));
+    private static final VectorSourceModel DEFAULT_SOURCE_MODEL = VectorSourceModel.OTHER;
 
-    public static final int MAX_TOP_K = SAI_VECTOR_SEARCH_MAX_TOP_K.getInt();
+    private static final IndexWriterConfig EMPTY_CONFIG = new IndexWriterConfig(null, -1, -1, -1, -1, null, DEFAULT_SOURCE_MODEL);
 
-    private static final IndexWriterConfig EMPTY_CONFIG = new IndexWriterConfig(-1, -1, null, null);
+    /**
+     * Fully qualified index name, in the format "<keyspace>.<table>.<index_name>".
+     */
+    private final String indexName;
 
-    // The maximum number of outgoing connections a node can have in a graph.
+    /**
+     * Skip, or the sampling interval, for selecting a bkd tree level that is eligible for an auxiliary posting list.
+     * Sampling starts from 0, but bkd tree root node is at level 1. For skip = 4, eligible levels are 4, 8, 12, etc (no
+     * level 0, because there is no node at level 0).
+     */
+    private final int bkdPostingsSkip;
+
+    /**
+     * Min. number of reachable leaves for a given node to be eligible for an auxiliary posting list.
+     */
+    private final int bkdPostingsMinLeaves;
+
     private final int maximumNodeConnections;
-
-    // The size of the beam search used when finding nearest neighbours.
     private final int constructionBeamWidth;
-
-    // Used to determine the search to determine the topK results. The score returned is used to order the topK results.
     private final VectorSimilarityFunction similarityFunction;
+    private final VectorSourceModel sourceModel;
 
-    private final OptimizeFor optimizeFor;
+    public IndexWriterConfig(String indexName,
+                             int bkdPostingsSkip,
+                             int bkdPostingsMinLeaves)
+    {
+        this(indexName,
+             bkdPostingsSkip,
+             bkdPostingsMinLeaves,
+             DEFAULT_MAXIMUM_NODE_CONNECTIONS,
+             DEFAULT_CONSTRUCTION_BEAM_WIDTH,
+             DEFAULT_SOURCE_MODEL.defaultSimilarityFunction,
+             DEFAULT_SOURCE_MODEL
+        );
+    }
 
-    public IndexWriterConfig(int maximumNodeConnections,
+    public IndexWriterConfig(String indexName,
+                             int bkdPostingsSkip,
+                             int bkdPostingsMinLeaves,
+                             int maximumNodeConnections,
                              int constructionBeamWidth,
                              VectorSimilarityFunction similarityFunction,
-                             OptimizeFor optimizerFor)
+                             VectorSourceModel sourceModel)
     {
+        this.indexName = indexName;
+        this.bkdPostingsSkip = bkdPostingsSkip;
+        this.bkdPostingsMinLeaves = bkdPostingsMinLeaves;
         this.maximumNodeConnections = maximumNodeConnections;
         this.constructionBeamWidth = constructionBeamWidth;
         this.similarityFunction = similarityFunction;
-        this.optimizeFor = optimizerFor;
+        this.sourceModel = sourceModel;
     }
 
+    public String getIndexName()
+    {
+        return indexName;
+    }
+
+    public int getBkdPostingsMinLeaves()
+    {
+        return bkdPostingsMinLeaves;
+    }
+
+    public int getBkdPostingsSkip()
+    {
+        return bkdPostingsSkip;
+    }
+
+    public int getAnnMaxDegree()
+    {
+        // For historical reasons (Lucene doubled the maximum node connections for its HNSW),
+        // maximumNodeConnections represents half of the graph degree, so double it
+        return 2 * maximumNodeConnections;
+    }
+
+    /** you should probably use getAnnMaxDegree instead */
+    @VisibleForTesting
+    @Deprecated
     public int getMaximumNodeConnections()
     {
         return maximumNodeConnections;
@@ -96,30 +158,70 @@ public class IndexWriterConfig
         return similarityFunction;
     }
 
-    public OptimizeFor getOptimizeFor()
+    public VectorSourceModel getSourceModel()
     {
-        return optimizeFor;
+        return sourceModel;
     }
 
-    public static IndexWriterConfig fromOptions(String indexName, IndexTermType indexTermType, Map<String, String> options)
+    public static IndexWriterConfig fromOptions(String indexName, AbstractType<?> type, Map<String, String> options)
     {
+        int minLeaves = DEFAULT_POSTING_LIST_MIN_LEAVES;
+        int skip = DEFAULT_POSTING_LIST_LVL_SKIP;
         int maximumNodeConnections = DEFAULT_MAXIMUM_NODE_CONNECTIONS;
         int queueSize = DEFAULT_CONSTRUCTION_BEAM_WIDTH;
-        VectorSimilarityFunction similarityFunction = DEFAULT_SIMILARITY_FUNCTION;
-        OptimizeFor optimizeFor = DEFAULT_OPTIMIZE_FOR;
+        VectorSourceModel sourceModel = DEFAULT_SOURCE_MODEL;
+        VectorSimilarityFunction similarityFunction = sourceModel.defaultSimilarityFunction; // don't leave null in case no options at all are given
 
-        if (options.get(MAXIMUM_NODE_CONNECTIONS) != null ||
-            options.get(CONSTRUCTION_BEAM_WIDTH) != null ||
-            options.get(SIMILARITY_FUNCTION) != null ||
-            options.get(OPTIMIZE_FOR) != null)
+        if (options.get(POSTING_LIST_LVL_MIN_LEAVES) != null || options.get(POSTING_LIST_LVL_SKIP_OPTION) != null)
         {
-            if (!indexTermType.isVector())
-                throw new InvalidRequestException(String.format("CQL type %s cannot have vector options", indexTermType.asCQL3Type()));
+            if (TypeUtil.isLiteral(type))
+            {
+                throw new InvalidRequestException(String.format("CQL type %s cannot have auxiliary posting lists on index %s.", type.asCQL3Type(), indexName));
+            }
+
+            for (Map.Entry<String, String> entry : options.entrySet())
+            {
+                switch (entry.getKey())
+                {
+                    case POSTING_LIST_LVL_MIN_LEAVES:
+                    {
+                        minLeaves = Integer.parseInt(entry.getValue());
+
+                        if (minLeaves < 1)
+                        {
+                            throw new InvalidRequestException(String.format("Posting list min. leaves count can't be less than 1 on index %s.", indexName));
+                        }
+
+                        break;
+                    }
+
+                    case POSTING_LIST_LVL_SKIP_OPTION:
+                    {
+                        skip = Integer.parseInt(entry.getValue());
+
+                        if (skip < 1)
+                        {
+                            throw new InvalidRequestException(String.format("Posting list skip can't be less than 1 on index %s.", indexName));
+                        }
+
+                        break;
+                    }
+                }
+            }
+        }
+        else if (options.get(MAXIMUM_NODE_CONNECTIONS) != null ||
+                 options.get(CONSTRUCTION_BEAM_WIDTH) != null ||
+                 options.get(OPTIMIZE_FOR) != null ||
+                 options.get(SIMILARITY_FUNCTION) != null ||
+                 options.get(SOURCE_MODEL) != null)
+        {
+            if (!type.isVector())
+                throw new InvalidRequestException(String.format("CQL type %s cannot have vector options", type.asCQL3Type()));
 
             if (options.containsKey(MAXIMUM_NODE_CONNECTIONS))
             {
-                if (!CassandraRelevantProperties.SAI_VECTOR_ALLOW_CUSTOM_PARAMETERS.getBoolean())
-                    throw new InvalidRequestException(String.format("Maximum node connections cannot be set without enabling %s", CassandraRelevantProperties.SAI_VECTOR_ALLOW_CUSTOM_PARAMETERS.name()));
+                if (!CassandraRelevantProperties.SAI_HNSW_ALLOW_CUSTOM_PARAMETERS.getBoolean())
+                    throw new InvalidRequestException(String.format("Maximum node connections cannot be set without enabling %s", CassandraRelevantProperties.SAI_HNSW_ALLOW_CUSTOM_PARAMETERS.name()));
 
                 try
                 {
@@ -135,8 +237,8 @@ public class IndexWriterConfig
             }
             if (options.containsKey(CONSTRUCTION_BEAM_WIDTH))
             {
-                if (!CassandraRelevantProperties.SAI_VECTOR_ALLOW_CUSTOM_PARAMETERS.getBoolean())
-                    throw new InvalidRequestException(String.format("Construction beam width cannot be set without enabling %s", CassandraRelevantProperties.SAI_VECTOR_ALLOW_CUSTOM_PARAMETERS.name()));
+                if (!CassandraRelevantProperties.SAI_HNSW_ALLOW_CUSTOM_PARAMETERS.getBoolean())
+                    throw new InvalidRequestException(String.format("Construction beam width cannot be set without enabling %s", CassandraRelevantProperties.SAI_HNSW_ALLOW_CUSTOM_PARAMETERS.name()));
 
                 try
                 {
@@ -150,9 +252,25 @@ public class IndexWriterConfig
                 if (queueSize <= 0 || queueSize > MAXIMUM_CONSTRUCTION_BEAM_WIDTH)
                     throw new InvalidRequestException(String.format("Construction beam width for index %s cannot be <= 0 or > %s, was %s", indexName, MAXIMUM_CONSTRUCTION_BEAM_WIDTH, queueSize));
             }
+            if (options.containsKey(SOURCE_MODEL))
+            {
+                String option = options.get(SOURCE_MODEL).toUpperCase().replace("-", "_");
+                try
+                {
+                    sourceModel = VectorSourceModel.valueOf(option);
+                }
+                catch (IllegalArgumentException e)
+                {
+                    var validSourceModels = Arrays.stream(VectorSourceModel.values())
+                                                  .map(Enum::name)
+                                                  .collect(Collectors.joining(", "));
+                    throw new InvalidRequestException(String.format("source_model '%s' was not recognized for index %s. Valid values are: %s",
+                                                                    option, indexName, validSourceModels));
+                }
+            }
             if (options.containsKey(SIMILARITY_FUNCTION))
             {
-                String option = toUpperCaseLocalized(options.get(SIMILARITY_FUNCTION));
+                String option = options.get(SIMILARITY_FUNCTION).toUpperCase();
                 try
                 {
                     similarityFunction = VectorSimilarityFunction.valueOf(option);
@@ -163,21 +281,25 @@ public class IndexWriterConfig
                                                                     option, indexName, validSimilarityFunctions));
                 }
             }
-            if (options.containsKey(OPTIMIZE_FOR))
+            else
             {
-                String option = toUpperCaseLocalized(options.get(OPTIMIZE_FOR));
-                try
-                {
-                    optimizeFor = OptimizeFor.valueOf(option);
-                }
-                catch (IllegalArgumentException e)
-                {
-                    throw new InvalidRequestException(String.format("optimize_for '%s' was not recognized for index %s. Valid values are: %s",
-                                                                    option, indexName, validOptimizeFor));
-                }
+                similarityFunction = sourceModel.defaultSimilarityFunction;
             }
         }
-        return new IndexWriterConfig(maximumNodeConnections, queueSize, similarityFunction, optimizeFor);
+
+        return new IndexWriterConfig(indexName, skip, minLeaves, maximumNodeConnections, queueSize, similarityFunction, sourceModel);
+    }
+
+    public static IndexWriterConfig defaultConfig(String indexName)
+    {
+        return new IndexWriterConfig(indexName,
+                                     DEFAULT_POSTING_LIST_LVL_SKIP,
+                                     DEFAULT_POSTING_LIST_MIN_LEAVES,
+                                     DEFAULT_MAXIMUM_NODE_CONNECTIONS,
+                                     DEFAULT_CONSTRUCTION_BEAM_WIDTH,
+                                     DEFAULT_SOURCE_MODEL.defaultSimilarityFunction,
+                                     DEFAULT_SOURCE_MODEL
+        );
     }
 
     public static IndexWriterConfig emptyConfig()
@@ -188,10 +310,12 @@ public class IndexWriterConfig
     @Override
     public String toString()
     {
-        return String.format("IndexWriterConfig{%s=%d, %s=%d, %s=%s, %s=%s}",
+        return String.format("IndexWriterConfig{%s=%d, %s=%d, %s=%d, %s=%d, %s=%s, %s=%s}",
+                             POSTING_LIST_LVL_SKIP_OPTION, bkdPostingsSkip,
+                             POSTING_LIST_LVL_MIN_LEAVES, bkdPostingsMinLeaves,
                              MAXIMUM_NODE_CONNECTIONS, maximumNodeConnections,
                              CONSTRUCTION_BEAM_WIDTH, constructionBeamWidth,
                              SIMILARITY_FUNCTION, similarityFunction,
-                             OPTIMIZE_FOR, optimizeFor);
+                             SOURCE_MODEL, sourceModel);
     }
 }

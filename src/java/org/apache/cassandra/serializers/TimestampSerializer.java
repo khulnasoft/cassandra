@@ -22,7 +22,7 @@ import org.apache.cassandra.db.marshal.ValueAccessor;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 import java.nio.ByteBuffer;
-import java.text.Format;
+import java.text.SimpleDateFormat;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -32,9 +32,8 @@ import java.time.temporal.ChronoField;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.TimeZone;
 import java.util.regex.Pattern;
-
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 
 
 public class TimestampSerializer extends TypeSerializer<Date>
@@ -104,29 +103,23 @@ public class TimestampSerializer extends TypeSerializer<Date>
 
     private static final Pattern timestampPattern = Pattern.compile("^-?\\d+$");
 
-    private static final FastThreadLocal<Format> FORMATTER_UTC = new FastThreadLocal<>()
+    private static final FastThreadLocal<SimpleDateFormat> FORMATTER_UTC = new FastThreadLocal<SimpleDateFormat>()
     {
-        protected java.text.Format initialValue()
+        protected SimpleDateFormat initialValue()
         {
-            return new DateTimeFormatterBuilder()
-                   .appendPattern("yyyy-MM-dd'T'HH:mm:ss.SSSX")
-                   .parseDefaulting(ChronoField.NANO_OF_DAY, 0)
-                   .toFormatter()
-                   .withZone(ZoneId.of("UTC"))
-                   .toFormat();
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSX");
+            sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
+            return sdf;
         }
     };
 
-    private static final FastThreadLocal<Format> FORMATTER_TO_JSON = new FastThreadLocal<>()
+    private static final FastThreadLocal<SimpleDateFormat> FORMATTER_TO_JSON = new FastThreadLocal<SimpleDateFormat>()
     {
-        protected java.text.Format initialValue()
+        protected SimpleDateFormat initialValue()
         {
-            return new DateTimeFormatterBuilder()
-                   .appendPattern("yyyy-MM-dd HH:mm:ss.SSSX")
-                   .parseDefaulting(ChronoField.NANO_OF_DAY, 0)
-                   .toFormatter()
-                   .withZone(ZoneId.of("UTC"))
-                   .toFormat();
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSSX");
+            sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
+            return sdf;
         }
     };
 
@@ -147,7 +140,7 @@ public class TimestampSerializer extends TypeSerializer<Date>
     public static long dateStringToTimestamp(String source) throws MarshalException
     {
         if (source.equalsIgnoreCase("now"))
-            return currentTimeMillis();
+            return System.currentTimeMillis();
 
         // Milliseconds since epoch?
         if (timestampPattern.matcher(source).matches())
@@ -176,7 +169,7 @@ public class TimestampSerializer extends TypeSerializer<Date>
         throw new MarshalException(String.format("Unable to parse a date/time from '%s'", source));
     }
 
-    public static Format getJsonDateFormatter()
+    public static SimpleDateFormat getJsonDateFormatter()
     {
     	return FORMATTER_TO_JSON.get();
     }
@@ -194,7 +187,7 @@ public class TimestampSerializer extends TypeSerializer<Date>
 
     public String toStringUTC(Date value)
     {
-        return value == null ? "" : FORMATTER_UTC.get().format(value.toInstant());
+        return value == null ? "" : FORMATTER_UTC.get().format(value);
     }
 
     public Class<Date> getType()
@@ -202,15 +195,15 @@ public class TimestampSerializer extends TypeSerializer<Date>
         return Date.class;
     }
 
+    /**
+     * Builds CQL literal for a timestamp using time zone UTC and fixed date format.
+     * @see #FORMATTER_UTC
+     */
     @Override
-    public boolean shouldQuoteCQLLiterals()
+    public String toCQLLiteral(ByteBuffer buffer)
     {
-        return true;
-    }
-
-    @Override
-    protected String toCQLLiteralNonNull(ByteBuffer buffer)
-    {
-        return FORMATTER_UTC.get().format(deserialize(buffer).toInstant());
+        return buffer == null || !buffer.hasRemaining()
+               ? "null"
+               : FORMATTER_UTC.get().format(deserialize(buffer));
     }
 }

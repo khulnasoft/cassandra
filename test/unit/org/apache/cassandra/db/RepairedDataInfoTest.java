@@ -26,7 +26,7 @@ import java.util.stream.IntStream;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import org.apache.cassandra.ServerTestUtils;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.schema.MockSchema;
@@ -62,13 +62,14 @@ public class RepairedDataInfoTest
     private static ColumnMetadata valueMetadata;
     private static ColumnMetadata staticMetadata;
 
-    private final long nowInSec = FBUtilities.nowInSeconds();
+    private final int nowInSec = FBUtilities.nowInSeconds();
 
     @BeforeClass
     public static void setUp()
     {
-        ServerTestUtils.prepareServerNoRegister();
+        DatabaseDescriptor.daemonInitialization();
         CommitLog.instance.start();
+        MockSchema.cleanup();
         String ks = "repaired_data_info_test";
         cfs = MockSchema.newCFS(ks, metadata -> metadata.addStaticColumn("s", UTF8Type.instance));
         metadata = cfs.metadata();
@@ -171,8 +172,8 @@ public class RepairedDataInfoTest
     @Test
     public void digestOfFullyPurgedPartition()
     {
-        long deletionTime = nowInSec - cfs.metadata().params.gcGraceSeconds - 1;
-        DeletionTime deletion = DeletionTime.build((deletionTime * 1000), deletionTime);
+        int deletionTime = nowInSec - cfs.metadata().params.gcGraceSeconds - 1;
+        DeletionTime deletion = new DeletionTime(((long)deletionTime * 1000), deletionTime);
         Row staticRow = staticRow(nowInSec, deletion);
         Row row = row(1, nowInSec, deletion);
         UnfilteredRowIterator partition = partitionWithStaticRow(bytes(0), staticRow, row);
@@ -220,7 +221,7 @@ public class RepairedDataInfoTest
     private byte[] consume(UnfilteredPartitionIterator partitions)
     {
         RepairedDataInfo info = info();
-        info.prepare(cfs, nowInSec, Long.MAX_VALUE);
+        info.prepare(cfs, nowInSec, Integer.MAX_VALUE);
         partitions.forEachRemaining(partition ->
         {
             try (UnfilteredRowIterator iter = info.withRepairedDataInfo(partition))
@@ -234,7 +235,7 @@ public class RepairedDataInfoTest
     private byte[] consume(UnfilteredRowIterator partition)
     {
         RepairedDataInfo info = info();
-        info.prepare(cfs, nowInSec, Long.MAX_VALUE);
+        info.prepare(cfs, nowInSec, Integer.MAX_VALUE);
         try (UnfilteredRowIterator iter = info.withRepairedDataInfo(partition))
         {
             iter.forEachRemaining(u -> {});
@@ -248,7 +249,7 @@ public class RepairedDataInfoTest
         return new BufferCell(def, 1L, BufferCell.NO_TTL, BufferCell.NO_DELETION_TIME, bb, null);
     }
 
-    private Row staticRow(long nowInSec)
+    private Row staticRow(int nowInSec)
     {
         Row.Builder builder = BTreeRow.unsortedBuilder();
         builder.newRow(Clustering.STATIC_CLUSTERING);
@@ -256,7 +257,7 @@ public class RepairedDataInfoTest
         return builder.build();
     }
 
-    private Row staticRow(long nowInSec, DeletionTime deletion)
+    private Row staticRow(int nowInSec, DeletionTime deletion)
     {
         Row.Builder builder = BTreeRow.unsortedBuilder();
         builder.newRow(Clustering.STATIC_CLUSTERING);
@@ -264,7 +265,7 @@ public class RepairedDataInfoTest
         return builder.build();
     }
 
-    private Row row(int clustering, int value, long nowInSec)
+    private Row row(int clustering, int value, int nowInSec)
     {
         Row.Builder builder = BTreeRow.unsortedBuilder();
         builder.newRow(clustering(metadata.comparator, Integer.toString(clustering)));
@@ -272,7 +273,7 @@ public class RepairedDataInfoTest
         return builder.build();
     }
 
-    private Row row(int clustering, long nowInSec, DeletionTime deletion)
+    private Row row(int clustering, int nowInSec, DeletionTime deletion)
     {
         Row.Builder builder = BTreeRow.unsortedBuilder();
         builder.newRow(clustering(metadata.comparator, Integer.toString(clustering)));
@@ -280,7 +281,7 @@ public class RepairedDataInfoTest
         return builder.build();
     }
 
-    private Row[] rows(int clusteringStart, int clusteringEnd, long nowInSec)
+    private Row[] rows(int clusteringStart, int clusteringEnd, int nowInSec)
     {
         return IntStream.range(clusteringStart, clusteringEnd)
                         .mapToObj(v -> row(v, v, nowInSec))
@@ -292,7 +293,7 @@ public class RepairedDataInfoTest
         return new RangeTombstoneBoundMarker(
             ClusteringBound.create(ClusteringBound.boundKind(true, true),
                                    Clustering.make(Int32Type.instance.decompose(start))),
-            DeletionTime.build(FBUtilities.timestampMicros(), FBUtilities.nowInSeconds()));
+            new DeletionTime(FBUtilities.timestampMicros(), FBUtilities.nowInSeconds()));
     }
 
     private RangeTombstoneBoundMarker close(int close)
@@ -300,7 +301,7 @@ public class RepairedDataInfoTest
         return new RangeTombstoneBoundMarker(
             ClusteringBound.create(ClusteringBound.boundKind(false, true),
                                    Clustering.make(Int32Type.instance.decompose(close))),
-            DeletionTime.build(FBUtilities.timestampMicros(), FBUtilities.nowInSeconds()));
+            new DeletionTime(FBUtilities.timestampMicros(), FBUtilities.nowInSeconds()));
     }
 
     private UnfilteredRowIterator partition(ByteBuffer pk, Unfiltered... unfiltereds)

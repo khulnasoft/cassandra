@@ -27,7 +27,5 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd $DIR/../..
 CLASSPATH=`for f in build/lib/jars/*.jar ; do echo -n '${project.dir}/'$f: ; done ; for f in build/test/lib/jars/*.jar ; do echo -n '${project.dir}/'$f: ; done ;`
 
-sed 's/cassandra\.classpath\.jars\">.*<\/property>/cassandra\.classpath\.jars\">NEW_CLASSPATH<\/property>/' $DIR/project.xml > $DIR/project.xml.tmp
-mv $DIR/project.xml.tmp $DIR/project.xml
-sed "s@NEW_CLASSPATH@"$CLASSPATH"@" $DIR/project.xml > $DIR/project.xml.tmp
-mv $DIR/project.xml.tmp $DIR/project.xml
+sed -i '' 's/cassandra\.classpath\.jars\">.*<\/property>/cassandra\.classpath\.jars\">NEW_CLASSPATH<\/property>/' $DIR/project.xml
+sed -i '' "s@NEW_CLASSPATH@"$CLASSPATH"@" $DIR/project.xml

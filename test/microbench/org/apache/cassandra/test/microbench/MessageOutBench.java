@@ -21,6 +21,7 @@ package org.apache.cassandra.test.microbench;
 import java.io.IOException;
 import java.util.EnumMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import com.google.common.net.InetAddresses;
@@ -35,7 +36,7 @@ import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.NoPayload;
 import org.apache.cassandra.net.ParamType;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.UUIDGen;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -49,8 +50,6 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 
 import static org.apache.cassandra.net.Verb.ECHO_REQ;
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 
 @State(Scope.Thread)
 @Warmup(iterations = 4, time = 1, timeUnit = TimeUnit.SECONDS)
@@ -72,12 +71,12 @@ public class MessageOutBench
     {
         DatabaseDescriptor.daemonInitialization();
 
-        TimeUUID timeUuid = nextTimeUUID();
+        UUID uuid = UUIDGen.getTimeUUID();
         Map<ParamType, Object> parameters = new EnumMap<>(ParamType.class);
 
         if (withParams)
         {
-            parameters.put(ParamType.TRACE_SESSION, timeUuid);
+            parameters.put(ParamType.TRACE_SESSION, uuid);
         }
 
         addr = InetAddressAndPort.getByAddress(InetAddresses.forString("127.0.73.101"));
@@ -97,11 +96,17 @@ public class MessageOutBench
     {
         try (DataOutputBuffer out = new DataOutputBuffer())
         {
-            Message.serializer.serialize(Message.builder(msgOut).withCreatedAt(nanoTime()).withId(42).build(),
+            Message.serializer.serialize(Message.builder(msgOut).withCreatedAt(System.nanoTime()).withId(42).build(),
                                          out, messagingVersion);
             DataInputBuffer in = new DataInputBuffer(out.buffer(), false);
             Message.serializer.deserialize(in, addr, messagingVersion);
             return msgOut.serializedSize(messagingVersion);
         }
+    }
+
+    @Benchmark
+    public int serializePre40() throws Exception
+    {
+        return serialize(MessagingService.VERSION_30);
     }
 }

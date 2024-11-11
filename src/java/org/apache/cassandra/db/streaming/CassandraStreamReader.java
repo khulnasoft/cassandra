@@ -20,11 +20,10 @@ package org.apache.cassandra.db.streaming;
 import java.io.IOError;
 import java.io.IOException;
 import java.util.Collection;
-import java.util.List;
-import java.util.ListIterator;
-import java.util.concurrent.TimeUnit;
+import java.util.UUID;
 
 import com.google.common.base.Preconditions;
+import com.google.common.base.Throwables;
 import com.google.common.collect.UnmodifiableIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,37 +34,31 @@ import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.commitlog.IntervalSet;
 import org.apache.cassandra.db.lifecycle.LifecycleNewTracker;
 import org.apache.cassandra.db.rows.DeserializationHelper;
 import org.apache.cassandra.db.rows.EncodingStats;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
-import org.apache.cassandra.dht.Range;
-import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.UnknownColumnException;
-import org.apache.cassandra.io.sstable.RangeAwareSSTableWriter;
 import org.apache.cassandra.io.sstable.SSTableMultiWriter;
 import org.apache.cassandra.io.sstable.SSTableSimpleIterator;
+import org.apache.cassandra.io.sstable.format.RangeAwareSSTableWriter;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.TrackedDataInputPlus;
-import org.apache.cassandra.metrics.StorageMetrics;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.streaming.ProgressInfo;
-import org.apache.cassandra.streaming.StreamReceivedOutOfTokenRangeException;
 import org.apache.cassandra.streaming.StreamReceiver;
 import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.compress.StreamCompressionInputStream;
 import org.apache.cassandra.streaming.messages.StreamMessageHeader;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.NoSpamLogger;
-import org.apache.cassandra.utils.TimeUUID;
 
 import static org.apache.cassandra.net.MessagingService.current_version;
 
@@ -75,14 +68,14 @@ import static org.apache.cassandra.net.MessagingService.current_version;
 public class CassandraStreamReader implements IStreamReader
 {
     private static final Logger logger = LoggerFactory.getLogger(CassandraStreamReader.class);
-    private static final String logMessageTemplate = "[Stream #{}] Received streamed SSTable {} from {} containing key outside valid ranges {}";
     protected final TableId tableId;
     protected final long estimatedKeys;
     protected final Collection<SSTableReader.PartitionPositionBounds> sections;
     protected final StreamSession session;
     protected final Version inputVersion;
     protected final long repairedAt;
-    protected final TimeUUID pendingRepair;
+    protected final UUID pendingRepair;
+    protected final SSTableFormat.Type format;
     protected final int sstableLevel;
     protected final SerializationHeader.Component header;
     protected final int fileSeqNum;
@@ -102,6 +95,7 @@ public class CassandraStreamReader implements IStreamReader
         this.inputVersion = streamHeader.version;
         this.repairedAt = header.repairedAt;
         this.pendingRepair = header.pendingRepair;
+        this.format = streamHeader.format;
         this.sstableLevel = streamHeader.sstableLevel;
         this.header = streamHeader.serializationHeader;
         this.fileSeqNum = header.sequenceNumber;
@@ -112,18 +106,21 @@ public class CassandraStreamReader implements IStreamReader
      * @return SSTable transferred
      * @throws IOException if reading the remote sstable fails. Will throw an RTE if local write fails.
      */
+    @SuppressWarnings("resource") // input needs to remain open, streams on top of it can't be closed
     @Override
-    public SSTableMultiWriter read(DataInputPlus inputPlus) throws Throwable
+    public SSTableMultiWriter read(DataInputPlus inputPlus) throws IOException
     {
         long totalSize = totalSize();
 
         ColumnFamilyStore cfs = ColumnFamilyStore.getIfExists(tableId);
         if (cfs == null)
+        {
             // schema was dropped during streaming
-            throw new IllegalStateException("Table " + tableId + " was dropped during streaming");
+            throw new IOException("CF " + tableId + " was dropped during streaming");
+        }
 
         logger.debug("[Stream #{}] Start receiving file #{} from {}, repairedAt = {}, size = {}, ks = '{}', table = '{}', pendingRepair = '{}'.",
-                     session.planId(), fileSeqNum, session.peer, repairedAt, totalSize, cfs.getKeyspaceName(),
+                     session.planId(), fileSeqNum, session.peer, repairedAt, totalSize, cfs.keyspace.getName(),
                      cfs.getTableName(), pendingRepair);
 
         StreamDeserializer deserializer = null;
@@ -131,18 +128,13 @@ public class CassandraStreamReader implements IStreamReader
         try (StreamCompressionInputStream streamCompressionInputStream = new StreamCompressionInputStream(inputPlus, current_version))
         {
             TrackedDataInputPlus in = new TrackedDataInputPlus(streamCompressionInputStream);
-            writer = createWriter(cfs, totalSize, repairedAt, pendingRepair, inputVersion.format);
-            deserializer = getDeserializer(cfs.metadata(), in, inputVersion, session, writer);
-            String sequenceName = writer.getFilename() + '-' + fileSeqNum;
-            long lastBytesRead = 0;
+            deserializer = new StreamDeserializer(cfs.metadata(), in, inputVersion, getHeader(cfs.metadata()));
+            writer = createWriter(cfs, totalSize, repairedAt, pendingRepair, format);
             while (in.getBytesRead() < totalSize)
             {
                 writePartition(deserializer, writer);
                 // TODO move this to BytesReadTracker
-                long bytesRead = in.getBytesRead();
-                long bytesDelta = bytesRead - lastBytesRead;
-                lastBytesRead = bytesRead;
-                session.progress(sequenceName, ProgressInfo.Direction.IN, bytesRead, bytesDelta, totalSize);
+                session.progress(writer.getFilename() + '-' + fileSeqNum, ProgressInfo.Direction.IN, in.getBytesRead(), totalSize);
             }
             logger.debug("[Stream #{}] Finished receiving file #{} from {} readBytes = {}, totalSize = {}",
                          session.planId(), fileSeqNum, session.peer, FBUtilities.prettyPrintMemory(in.getBytesRead()), FBUtilities.prettyPrintMemory(totalSize));
@@ -152,27 +144,22 @@ public class CassandraStreamReader implements IStreamReader
         {
             Object partitionKey = deserializer != null ? deserializer.partitionKey() : "";
             logger.warn("[Stream {}] Error while reading partition {} from stream on ks='{}' and table='{}'.",
-                        session.planId(), partitionKey, cfs.getKeyspaceName(), cfs.getTableName(), e);
+                        session.planId(), partitionKey, cfs.keyspace.getName(), cfs.getTableName(), e);
             if (writer != null)
-                e = writer.abort(e);
-            throw e;
+            {
+                writer.abort(e);
+            }
+            throw Throwables.propagate(e);
         }
-    }
-
-    protected StreamDeserializer getDeserializer(TableMetadata metadata,
-                                                 TrackedDataInputPlus in,
-                                                 Version inputVersion,
-                                                 StreamSession session,
-                                                 SSTableMultiWriter writer) throws IOException
-    {
-        return new StreamDeserializer(metadata, in, inputVersion, getHeader(metadata), session, writer);
     }
 
     protected SerializationHeader getHeader(TableMetadata metadata) throws UnknownColumnException
     {
-        return header != null? header.toHeader(metadata) : null; //pre-3.0 sstable have no SerializationHeader
+        return header != null? header.toHeader("stream from " + session.peer, metadata, inputVersion, false) : null; //pre-3.0 sstable have no SerializationHeader
     }
-    protected SSTableMultiWriter createWriter(ColumnFamilyStore cfs, long totalSize, long repairedAt, TimeUUID pendingRepair, SSTableFormat<?, ?> format) throws IOException
+
+    @SuppressWarnings("resource")
+    protected SSTableMultiWriter createWriter(ColumnFamilyStore cfs, long totalSize, long repairedAt, UUID pendingRepair, SSTableFormat.Type format) throws IOException
     {
         Directories.DataDirectory localDir = cfs.getDirectories().getWriteableLocation(totalSize);
         if (localDir == null)
@@ -182,7 +169,18 @@ public class CassandraStreamReader implements IStreamReader
         Preconditions.checkState(streamReceiver instanceof CassandraStreamReceiver);
         LifecycleNewTracker lifecycleNewTracker = CassandraStreamReceiver.fromReceiver(session.getAggregator(tableId)).createLifecycleNewTracker();
 
-        RangeAwareSSTableWriter writer = new RangeAwareSSTableWriter(cfs, estimatedKeys, repairedAt, pendingRepair, false, format, sstableLevel, totalSize, lifecycleNewTracker, getHeader(cfs.metadata()));
+        RangeAwareSSTableWriter writer = new RangeAwareSSTableWriter(cfs,
+                                                                     estimatedKeys,
+                                                                     repairedAt,
+                                                                     pendingRepair,
+                                                                     false,
+                                                                     format,
+                                                                     // Commit log intervals for other nodes are not relevant and should not be copied
+                                                                     IntervalSet.empty(),
+                                                                     sstableLevel,
+                                                                     totalSize,
+                                                                     lifecycleNewTracker,
+                                                                     getHeader(cfs.metadata()));
         return writer;
     }
 
@@ -207,52 +205,27 @@ public class CassandraStreamReader implements IStreamReader
         private final SerializationHeader header;
         private final DeserializationHelper helper;
 
-        private final List<Range<Token>> ownedRanges;
-        private final StreamSession session;
-        private final SSTableMultiWriter writer;
-
-        private int lastCheckedRangeIndex;
-        protected DecoratedKey key;
-        protected DeletionTime partitionLevelDeletion;
-        protected SSTableSimpleIterator iterator;
-        protected Row staticRow;
+        private DecoratedKey key;
+        private DeletionTime partitionLevelDeletion;
+        private SSTableSimpleIterator iterator;
+        private Row staticRow;
         private IOException exception;
-        private Version version;
 
-        public StreamDeserializer(TableMetadata metadata, DataInputPlus in, Version version, SerializationHeader header, StreamSession session, SSTableMultiWriter writer) throws IOException
+        public StreamDeserializer(TableMetadata metadata, DataInputPlus in, Version version, SerializationHeader header) throws IOException
         {
             this.metadata = metadata;
             this.in = in;
             this.helper = new DeserializationHelper(metadata, version.correspondingMessagingVersion(), DeserializationHelper.Flag.PRESERVE_SIZE);
             this.header = header;
-            this.version = version;
-            ownedRanges = Range.normalize(StorageService.instance.getLocalAndPendingRanges(metadata.keyspace));
-            lastCheckedRangeIndex = 0;
-
-            this.session = session;
-            this.writer = writer;
         }
 
-        public UnfilteredRowIterator newPartition() throws IOException
-        {
-            readKey();
-            readPartition();
-            return this;
-        }
-
-        protected void readKey() throws IOException
+        public StreamDeserializer newPartition() throws IOException
         {
             key = metadata.partitioner.decorateKey(ByteBufferUtil.readWithShortLength(in));
-            lastCheckedRangeIndex = verifyKeyInOwnedRanges(key,
-                                                           ownedRanges,
-                                                           lastCheckedRangeIndex);
-        }
-
-        protected void readPartition() throws IOException
-        {
-            partitionLevelDeletion = DeletionTime.getSerializer(version).deserialize(in);
+            partitionLevelDeletion = DeletionTime.serializer.deserialize(in);
             iterator = SSTableSimpleIterator.create(metadata, in, header, helper, partitionLevelDeletion);
             staticRow = iterator.readStaticRow();
+            return this;
         }
 
         public TableMetadata metadata()
@@ -332,28 +305,6 @@ public class CassandraStreamReader implements IStreamReader
 
         public void close()
         {
-        }
-
-        private int verifyKeyInOwnedRanges(final DecoratedKey key,
-                                           List<Range<Token>> ownedRanges,
-                                           int lastCheckedRangeIndex)
-        {
-            if (lastCheckedRangeIndex < ownedRanges.size())
-            {
-                ListIterator<Range<Token>> rangesToCheck = ownedRanges.listIterator(lastCheckedRangeIndex);
-                while (rangesToCheck.hasNext())
-                {
-                    Range<Token> range = rangesToCheck.next();
-                    if (range.contains(key.getToken()))
-                        return lastCheckedRangeIndex;
-
-                    lastCheckedRangeIndex++;
-                }
-            }
-
-            StorageMetrics.totalOpsForInvalidToken.inc();
-            NoSpamLogger.log(logger, NoSpamLogger.Level.WARN, 1, TimeUnit.SECONDS, logMessageTemplate, session.planId(), writer.getFilename(), session.peer, ownedRanges);
-            throw new StreamReceivedOutOfTokenRangeException(ownedRanges, key, writer.getFilename());
         }
     }
 }

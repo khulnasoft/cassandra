@@ -23,11 +23,12 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+
 import javax.annotation.Nullable;
-import javax.management.openmbean.CompositeData;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,7 +40,6 @@ import org.apache.cassandra.cql3.PasswordObfuscator;
 import org.apache.cassandra.cql3.QueryEvents;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.statements.BatchStatement;
-import org.apache.cassandra.db.guardrails.PasswordGuardrail;
 import org.apache.cassandra.exceptions.AuthenticationException;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.PreparedQueryNotFoundException;
@@ -49,38 +49,33 @@ import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.Message;
 import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.MBeanWrapper;
-
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 
 /**
  * Central location for managing the logging of client/user-initated actions (like queries, log in commands, and so on).
  *
  */
-public class AuditLogManager implements QueryEvents.Listener, AuthEvents.Listener, AuditLogManagerMBean
+public class AuditLogManager implements QueryEvents.Listener, AuthEvents.Listener
 {
     private static final Logger logger = LoggerFactory.getLogger(AuditLogManager.class);
-
-    public static final String MBEAN_NAME = "org.apache.cassandra.db:type=AuditLogManager";
     public static final AuditLogManager instance = new AuditLogManager();
 
     // auditLogger can write anywhere, as it's pluggable (logback, BinLog, DiagnosticEvents, etc ...)
     private volatile IAuditLogger auditLogger;
+
     private volatile AuditLogFilter filter;
-    private volatile AuditLogOptions auditLogOptions;
 
     private AuditLogManager()
     {
-        auditLogOptions = DatabaseDescriptor.getAuditLoggingOptions();
+        final AuditLogOptions auditLogOptions = DatabaseDescriptor.getAuditLoggingOptions();
 
         if (auditLogOptions.enabled)
         {
             logger.info("Audit logging is enabled.");
-            auditLogger = getAuditLogger(auditLogOptions);
+            auditLogger = getAuditLogger(auditLogOptions.logger);
         }
         else
         {
-            logger.info("Audit logging is disabled.");
+            logger.debug("Audit logging is disabled.");
             auditLogger = new NoOpAuditLogger(Collections.emptyMap());
         }
 
@@ -91,21 +86,16 @@ public class AuditLogManager implements QueryEvents.Listener, AuthEvents.Listene
     {
         if (DatabaseDescriptor.getAuditLoggingOptions().enabled)
             registerAsListener();
-
-        if (!MBeanWrapper.instance.isRegistered(MBEAN_NAME))
-            MBeanWrapper.instance.registerMBean(this, MBEAN_NAME);
     }
 
-    private IAuditLogger getAuditLogger(AuditLogOptions options) throws ConfigurationException
+    private IAuditLogger getAuditLogger(ParameterizedClass logger) throws ConfigurationException
     {
-        final ParameterizedClass logger = options.logger;
-
-        if (logger != null && logger.class_name != null)
+        if (logger.class_name != null)
         {
             return FBUtilities.newAuditLogger(logger.class_name, logger.parameters == null ? Collections.emptyMap() : logger.parameters);
         }
 
-        return new BinAuditLogger(options);
+        return FBUtilities.newAuditLogger(BinAuditLogger.class.getName(), Collections.emptyMap());
     }
 
     @VisibleForTesting
@@ -117,17 +107,6 @@ public class AuditLogManager implements QueryEvents.Listener, AuthEvents.Listene
     public boolean isEnabled()
     {
         return auditLogger.isEnabled();
-    }
-
-    public AuditLogOptions getAuditLogOptions()
-    {
-        return auditLogger.isEnabled() ? auditLogOptions : DatabaseDescriptor.getAuditLoggingOptions();
-    }
-
-    @Override
-    public CompositeData getAuditLogOptionsData()
-    {
-        return AuditLogOptionsCompositeData.toCompositeData(AuditLogManager.instance.getAuditLogOptions());
     }
 
     /**
@@ -178,7 +157,6 @@ public class AuditLogManager implements QueryEvents.Listener, AuthEvents.Listene
         IAuditLogger oldLogger = auditLogger;
         auditLogger = new NoOpAuditLogger(Collections.emptyMap());
         oldLogger.stop();
-        logger.info("Audit logging is disabled.");
     }
 
     /**
@@ -188,28 +166,16 @@ public class AuditLogManager implements QueryEvents.Listener, AuthEvents.Listene
      */
     public synchronized void enable(AuditLogOptions auditLogOptions) throws ConfigurationException
     {
+        // always reload the filters
+        filter = AuditLogFilter.create(auditLogOptions);
+
+        // next, check to see if we're changing the logging implementation; if not, keep the same instance and bail.
+        // note: auditLogger should never be null
         IAuditLogger oldLogger = auditLogger;
+        if (oldLogger.getClass().getSimpleName().equals(auditLogOptions.logger.class_name))
+            return;
 
-        try
-        {
-            // next, check to see if we're changing the logging implementation; if not, keep the same instance and bail.
-            // note: auditLogger should never be null
-            if (oldLogger.getClass().getSimpleName().equals(auditLogOptions.logger.class_name))
-                return;
-
-            auditLogger = getAuditLogger(auditLogOptions);
-            // switch to these audit log options after getAuditLogger() has not thrown
-            // otherwise we might stay with new options but with old logger if it failed
-            this.auditLogOptions = auditLogOptions;
-        }
-        finally
-        {
-            // always reload the filters
-            filter = AuditLogFilter.create(auditLogOptions);
-            // update options so the changed filters are reflected in options,
-            // for example upon nodetool's getauditlog command
-            updateAuditLogOptions(this.auditLogOptions, filter);
-        }
+        auditLogger = getAuditLogger(auditLogOptions.logger);
 
         // note that we might already be registered here and we rely on the fact that Query/AuthEvents have a Set of listeners
         registerAsListener();
@@ -217,17 +183,6 @@ public class AuditLogManager implements QueryEvents.Listener, AuthEvents.Listene
         // ensure oldLogger's stop() is called after we swap it with new logger,
         // otherwise, we might be calling log() on the stopped logger.
         oldLogger.stop();
-        logger.info("Audit logging is enabled.");
-    }
-
-    private void updateAuditLogOptions(final AuditLogOptions options, final AuditLogFilter filter)
-    {
-        options.included_keyspaces = String.join(",", filter.includedKeyspaces.asList());
-        options.excluded_keyspaces = String.join(",", filter.excludedKeyspaces.asList());
-        options.included_categories = String.join(",", filter.includedCategories.asList());
-        options.excluded_categories = String.join(",", filter.excludedCategories.asList());
-        options.included_users = String.join(",", filter.includedUsers.asList());
-        options.excluded_users = String.join(",", filter.excludedUsers.asList());
     }
 
     private void registerAsListener()
@@ -389,13 +344,9 @@ public class AuditLogManager implements QueryEvents.Listener, AuthEvents.Listene
         {
             for (String query : queries)
             {
-                if (toLowerCaseLocalized(query).contains(PasswordObfuscator.PASSWORD_TOKEN))
+                if (query.toLowerCase().contains(PasswordObfuscator.PASSWORD_TOKEN))
                     return "Syntax Exception. Obscured for security reasons.";
             }
-        }
-        else if (e instanceof PasswordGuardrail.PasswordGuardrailException)
-        {
-            return ((PasswordGuardrail.PasswordGuardrailException) e).redactedMessage;
         }
 
         return PasswordObfuscator.obfuscate(e.getMessage());

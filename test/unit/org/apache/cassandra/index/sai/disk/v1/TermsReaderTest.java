@@ -18,111 +18,156 @@
 package org.apache.cassandra.index.sai.disk.v1;
 
 import java.io.IOException;
+import java.util.Collection;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import org.junit.Test;
 
-import com.carrotsearch.hppc.LongArrayList;
+import com.carrotsearch.hppc.IntArrayList;
+import com.carrotsearch.randomizedtesting.annotations.ParametersFactory;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.index.sai.IndexContext;
 import org.apache.cassandra.index.sai.QueryContext;
-import org.apache.cassandra.index.sai.disk.format.IndexComponent;
+import org.apache.cassandra.index.sai.SAITester;
+import org.apache.cassandra.index.sai.disk.MemtableTermsIterator;
+import org.apache.cassandra.index.sai.disk.PostingList;
+import org.apache.cassandra.index.sai.disk.TermsIterator;
+import org.apache.cassandra.index.sai.disk.format.IndexComponentType;
+import org.apache.cassandra.index.sai.disk.format.IndexComponents;
 import org.apache.cassandra.index.sai.disk.format.IndexDescriptor;
-import org.apache.cassandra.index.sai.utils.IndexEntry;
-import org.apache.cassandra.index.sai.utils.IndexIdentifier;
-import org.apache.cassandra.index.sai.disk.v1.segment.LiteralIndexSegmentTermsReader;
-import org.apache.cassandra.index.sai.disk.v1.segment.SegmentMetadata;
-import org.apache.cassandra.index.sai.disk.v1.trie.LiteralIndexWriter;
-import org.apache.cassandra.index.sai.memory.MemtableTermsIterator;
+import org.apache.cassandra.index.sai.disk.format.Version;
+import org.apache.cassandra.index.sai.disk.v1.trie.InvertedIndexWriter;
 import org.apache.cassandra.index.sai.metrics.QueryEventListener;
-import org.apache.cassandra.index.sai.postings.PostingList;
-import org.apache.cassandra.index.sai.utils.SAIRandomizedTester;
-import org.apache.cassandra.index.sai.utils.TermsIterator;
+import org.apache.cassandra.index.sai.utils.SAICodecUtils;
+import org.apache.cassandra.index.sai.utils.SaiRandomizedTest;
+import org.apache.cassandra.index.sai.utils.TypeUtil;
 import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 import org.apache.cassandra.utils.bytecomparable.ByteSourceInverse;
 
 import static org.apache.cassandra.index.sai.disk.v1.InvertedIndexBuilder.buildStringTermsEnum;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.apache.cassandra.index.sai.metrics.QueryEventListeners.NO_OP_TRIE_LISTENER;
 
-public class TermsReaderTest extends SAIRandomizedTester
+public class TermsReaderTest extends SaiRandomizedTest
 {
+
+    public static final ByteComparable.Version VERSION = TypeUtil.BYTE_COMPARABLE_VERSION;
+
+    @ParametersFactory()
+    public static Collection<Object[]> data()
+    {
+        // Required because it configures SEGMENT_BUILD_MEMORY_LIMIT, which is needed for Version.AA
+        if (DatabaseDescriptor.getRawConfig() == null)
+            DatabaseDescriptor.setConfig(DatabaseDescriptor.loadConfig());
+        return Version.ALL.stream().map(v -> new Object[]{v}).collect(Collectors.toList());
+    }
+
+    private final Version version;
+
+    public TermsReaderTest(Version version)
+    {
+        this.version = version;
+    }
+
     @Test
     public void testTermQueriesAgainstShortPostingLists() throws IOException
     {
-        testTermQueries(getRandom().nextIntBetween(5, 10), getRandom().nextIntBetween(5, 10));
+        testTermQueries(version, randomIntBetween(5, 10), randomIntBetween(5, 10));
     }
 
     @Test
     public void testTermQueriesAgainstLongPostingLists() throws  IOException
     {
-        testTermQueries(getRandom().nextIntBetween(512, 1024), getRandom().nextIntBetween(1024, 2048));
+        testTermQueries(version, 513, 1025);
     }
 
     @Test
     public void testTermsIteration() throws IOException
     {
-        doTestTermsIteration();
+        doTestTermsIteration(version);
     }
 
-    private void doTestTermsIteration() throws IOException
+    private void doTestTermsIteration(Version version) throws IOException
     {
         final int terms = 70, postings = 2;
         final IndexDescriptor indexDescriptor = newIndexDescriptor();
-        final IndexIdentifier indexIdentifier = createIndexIdentifier("test", "test", newIndex());
-        final List<Pair<ByteComparable, LongArrayList>> termsEnum = buildTermsEnum(terms, postings);
+        final String index = newIndex();
+        final IndexContext indexContext = SAITester.createIndexContext(index, UTF8Type.instance);
+        final List<InvertedIndexBuilder.TermsEnum> termsEnum = buildTermsEnum(version, terms, postings);
 
         SegmentMetadata.ComponentMetadataMap indexMetas;
-        LiteralIndexWriter writer = new LiteralIndexWriter(indexDescriptor, indexIdentifier);
-        indexMetas = writer.writeCompleteSegment(new MemtableTermsIterator(null, null, termsEnum.iterator()));
-
-        FileHandle termsData = indexDescriptor.createPerIndexFileHandle(IndexComponent.TERMS_DATA, indexIdentifier, null);
-        FileHandle postingLists = indexDescriptor.createPerIndexFileHandle(IndexComponent.POSTING_LISTS, indexIdentifier, null);
-
-        try (TermsIterator iterator = new TermsScanner(termsData, postingLists, indexMetas.get(IndexComponent.TERMS_DATA).root))
+        IndexComponents.ForWrite components = indexDescriptor.newPerIndexComponentsForWrite(indexContext);
+        try (InvertedIndexWriter writer = new InvertedIndexWriter(components))
         {
-            int i = 0;
-            for (IndexEntry indexEntry = iterator.next(); indexEntry != null; indexEntry = iterator.next())
+            var iter = termsEnum.stream().map(InvertedIndexBuilder.TermsEnum::toPair).iterator();
+            indexMetas = writer.writeAll(new MemtableTermsIterator(null, null, iter));
+        }
+
+        FileHandle termsData = components.get(IndexComponentType.TERMS_DATA).createFileHandle();
+        FileHandle postingLists = components.get(IndexComponentType.POSTING_LISTS).createFileHandle();
+
+        long termsFooterPointer = Long.parseLong(indexMetas.get(IndexComponentType.TERMS_DATA).attributes.get(SAICodecUtils.FOOTER_POINTER));
+
+        try (TermsReader reader = new TermsReader(indexContext,
+                                                  termsData,
+                                                  components.byteComparableVersionFor(IndexComponentType.TERMS_DATA),
+                                                  postingLists,
+                                                  indexMetas.get(IndexComponentType.TERMS_DATA).root,
+                                                  termsFooterPointer,
+                                                  version))
+        {
+            try (TermsIterator actualTermsEnum = reader.allTerms())
             {
-                final ByteComparable expected = termsEnum.get(i++).left;
-                assertEquals(0, ByteComparable.compare(expected, indexEntry.term, ByteComparable.Version.OSS50));
+                int i = 0;
+                for (ByteComparable term = actualTermsEnum.next(); term != null; term = actualTermsEnum.next())
+                {
+                    final ByteComparable expected = termsEnum.get(i++).byteComparableBytes;
+                    assertEquals(0, ByteComparable.compare(expected, term, VERSION));
+                }
             }
         }
     }
 
-    private void testTermQueries(int numTerms, int numPostings) throws IOException
+    private void testTermQueries(Version version, int numTerms, int numPostings) throws IOException
     {
         final IndexDescriptor indexDescriptor = newIndexDescriptor();
-        final IndexIdentifier indexIdentifier = createIndexIdentifier("test", "test", newIndex());
-        final List<Pair<ByteComparable, LongArrayList>> termsEnum = buildTermsEnum(numTerms, numPostings);
+        final String index = newIndex();
+        final IndexContext indexContext = SAITester.createIndexContext(index, UTF8Type.instance);
+        final List<InvertedIndexBuilder.TermsEnum> termsEnum = buildTermsEnum(version, numTerms, numPostings);
 
         SegmentMetadata.ComponentMetadataMap indexMetas;
-        LiteralIndexWriter writer = new LiteralIndexWriter(indexDescriptor, indexIdentifier);
-        indexMetas = writer.writeCompleteSegment(new MemtableTermsIterator(null, null, termsEnum.iterator()));
-
-        FileHandle termsData = indexDescriptor.createPerIndexFileHandle(IndexComponent.TERMS_DATA, indexIdentifier, null);
-        FileHandle postingLists = indexDescriptor.createPerIndexFileHandle(IndexComponent.POSTING_LISTS, indexIdentifier, null);
-
-        long termsFooterPointer = Long.parseLong(indexMetas.get(IndexComponent.TERMS_DATA).attributes.get(SAICodecUtils.FOOTER_POINTER));
-
-        try (LiteralIndexSegmentTermsReader reader = new LiteralIndexSegmentTermsReader(indexIdentifier,
-                                                                                        termsData,
-                                                                                        postingLists,
-                                                                                        indexMetas.get(IndexComponent.TERMS_DATA).root,
-                                                                                        termsFooterPointer))
+        IndexComponents.ForWrite components = indexDescriptor.newPerIndexComponentsForWrite(indexContext);
+        try (InvertedIndexWriter writer = new InvertedIndexWriter(components))
         {
-            for (Pair<ByteComparable, LongArrayList> pair : termsEnum)
+            var iter = termsEnum.stream().map(InvertedIndexBuilder.TermsEnum::toPair).iterator();
+            indexMetas = writer.writeAll(new MemtableTermsIterator(null, null, iter));
+        }
+
+        FileHandle termsData = components.get(IndexComponentType.TERMS_DATA).createFileHandle();
+        FileHandle postingLists = components.get(IndexComponentType.POSTING_LISTS).createFileHandle();
+
+        long termsFooterPointer = Long.parseLong(indexMetas.get(IndexComponentType.TERMS_DATA).attributes.get(SAICodecUtils.FOOTER_POINTER));
+
+        try (TermsReader reader = new TermsReader(indexContext,
+                                                  termsData,
+                                                  components.byteComparableVersionFor(IndexComponentType.TERMS_DATA),
+                                                  postingLists,
+                                                  indexMetas.get(IndexComponentType.TERMS_DATA).root,
+                                                  termsFooterPointer,
+                                                  version))
+        {
+            var iter = termsEnum.stream().map(InvertedIndexBuilder.TermsEnum::toPair).collect(Collectors.toList());
+            for (Pair<ByteComparable, IntArrayList> pair : iter)
             {
-                final byte[] bytes = ByteSourceInverse.readBytes(pair.left.asComparableBytes(ByteComparable.Version.OSS50));
-                QueryEventListener.TrieIndexEventListener listener = mock(QueryEventListener.TrieIndexEventListener.class);
-                when(listener.postingListEventListener()).thenReturn(mock(QueryEventListener.PostingListEventListener.class));
-                try (PostingList actualPostingList = reader.exactMatch(ByteComparable.fixedLength(bytes),
-                                                                       listener,
-                                                                       mock(QueryContext.class)))
+                final byte[] bytes = ByteSourceInverse.readBytes(pair.left.asComparableBytes(VERSION));
+                try (PostingList actualPostingList = reader.exactMatch(ByteComparable.preencoded(VERSION, bytes),
+                                                                       (QueryEventListener.TrieIndexEventListener)NO_OP_TRIE_LISTENER,
+                                                                       new QueryContext()))
                 {
-                    final LongArrayList expectedPostingList = pair.right;
+                    final IntArrayList expectedPostingList = pair.right;
 
                     assertNotNull(actualPostingList);
                     assertEquals(expectedPostingList.size(), actualPostingList.size());
@@ -139,15 +184,15 @@ public class TermsReaderTest extends SAIRandomizedTester
                 }
 
                 // test skipping
-                try (PostingList actualPostingList = reader.exactMatch(ByteComparable.fixedLength(bytes),
-                                                                       listener,
-                                                                       mock(QueryContext.class)))
+                try (PostingList actualPostingList = reader.exactMatch(ByteComparable.preencoded(VERSION, bytes),
+                                                                       (QueryEventListener.TrieIndexEventListener)NO_OP_TRIE_LISTENER,
+                                                                       new QueryContext()))
                 {
-                    final LongArrayList expectedPostingList = pair.right;
+                    final IntArrayList expectedPostingList = pair.right;
                     // test skipping to the last block
                     final int idxToSkip = numPostings - 2;
                     // tokens are equal to their corresponding row IDs
-                    final long tokenToSkip = expectedPostingList.get(idxToSkip);
+                    final int tokenToSkip = expectedPostingList.get(idxToSkip);
 
                     long advanceResult = actualPostingList.advance(tokenToSkip);
                     assertEquals(tokenToSkip, advanceResult);
@@ -166,8 +211,8 @@ public class TermsReaderTest extends SAIRandomizedTester
         }
     }
 
-    private List<Pair<ByteComparable, LongArrayList>> buildTermsEnum(int terms, int postings)
+    private List<InvertedIndexBuilder.TermsEnum> buildTermsEnum(Version version, int terms, int postings)
     {
-        return buildStringTermsEnum(terms, postings, () -> randomSimpleString(4, 10), () -> nextInt(0, Integer.MAX_VALUE));
+        return buildStringTermsEnum(version, terms, postings, () -> randomSimpleString(4, 10), () -> nextInt(0, Integer.MAX_VALUE));
     }
 }

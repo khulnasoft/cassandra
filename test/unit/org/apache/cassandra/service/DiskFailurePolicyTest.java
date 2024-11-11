@@ -39,10 +39,10 @@ import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.utils.JVMKiller;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.KillerForTests;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.JOIN_RING;
 import static org.apache.cassandra.config.Config.DiskFailurePolicy.best_effort;
 import static org.apache.cassandra.config.Config.DiskFailurePolicy.die;
 import static org.apache.cassandra.config.Config.DiskFailurePolicy.ignore;
@@ -56,7 +56,7 @@ import static org.junit.Assert.assertTrue;
 public class DiskFailurePolicyTest
 {
     DiskFailurePolicy originalDiskFailurePolicy;
-    JVMStabilityInspector.Killer originalKiller;
+    JVMKiller originalKiller;
     KillerForTests killerForTests;
     DiskFailurePolicy testPolicy;
     boolean isStartUpInProgress;
@@ -69,7 +69,6 @@ public class DiskFailurePolicyTest
     @BeforeClass
     public static void defineSchema() throws ConfigurationException
     {
-        JOIN_RING.setBoolean(false); // required to start gossiper without setting tokens
         SchemaLoader.prepareServer();
         StorageService.instance.initServer();
         FileUtils.setFSErrorHandler(new DefaultFSErrorHandler());
@@ -106,7 +105,7 @@ public class DiskFailurePolicyTest
                              { ignore, false, new CorruptSSTableException(new IOException(), "blah"), true, false, false},
                              { stop, false, new CorruptSSTableException(new IOException(), "blah"), true, false, false},
                              { stop_paranoid, false, new CorruptSSTableException(new IOException(), "blah"), false, false, false},
-                             { best_effort, false, new FSReadError(new IOException(new OutOfMemoryError("Java heap space")), "best_effort_oom"), true, false, false},
+                             { best_effort, false, new FSReadError(new IOException(new OutOfMemoryError("Java heap space test")), "best_effort_oom"), true, false, false},
                              { best_effort, false, new FSReadError(new IOException(), "best_effort_io_exception"), true, false, false},
                              }
         );
@@ -143,20 +142,15 @@ public class DiskFailurePolicyTest
         }
         catch (OutOfMemoryError e)
         {
-            if (testPolicy == best_effort)
-            {
-                if (t.getCause().getCause() != e)
-                    throw e;
-            }
-            else
+            if (!e.getMessage().equals("Java heap space test"))
                 throw e;
         }
 
-        if (testPolicy == best_effort && ((FSReadError) t).path.equals("best_effort_io_exception"))
+        if (testPolicy == best_effort && ((FSReadError) t).file.name().equals("best_effort_io_exception"))
             assertTrue(DisallowedDirectories.isUnreadable(new File("best_effort_io_exception")));
 
         // when we have OOM, as cause, there is no reason to remove data
-        if (testPolicy == best_effort && ((FSReadError) t).path.equals("best_effort_oom"))
+        if (testPolicy == best_effort && ((FSReadError) t).file.name().equals("best_effort_oom"))
             assertFalse(DisallowedDirectories.isUnreadable(new File("best_effort_oom")));
 
         assertEquals(expectJVMKilled, killerForTests.wasKilled());

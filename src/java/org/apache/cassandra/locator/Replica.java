@@ -18,22 +18,14 @@
 
 package org.apache.cassandra.locator;
 
-import java.io.IOException;
 import java.util.Objects;
 import java.util.Set;
 
 import com.google.common.base.Preconditions;
 
-import org.apache.cassandra.db.TypeSizes;
-import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.dht.IPartitionerDependentSerializer;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.utils.FBUtilities;
-
-import static org.apache.cassandra.dht.AbstractBounds.tokenSerializer;
 
 /**
  * A Replica represents an owning node for a copy of a portion of the token ring.
@@ -53,8 +45,6 @@ import static org.apache.cassandra.dht.AbstractBounds.tokenSerializer;
  */
 public final class Replica implements Comparable<Replica>
 {
-    public static final IPartitionerDependentSerializer<Replica> serializer = new Serializer();
-
     private final Range<Token> range;
     private final InetAddressAndPort endpoint;
     private final boolean full;
@@ -178,7 +168,7 @@ public final class Replica implements Comparable<Replica>
 
     public Replica decorateSubrange(Range<Token> subrange)
     {
-        Preconditions.checkArgument(range.contains(subrange), range + " " + subrange);
+        Preconditions.checkArgument(range.contains(subrange));
         return new Replica(endpoint(), subrange, isFull());
     }
 
@@ -202,32 +192,5 @@ public final class Replica implements Comparable<Replica>
         return transientReplica(endpoint, new Range<>(start, end));
     }
 
-    public static class Serializer implements IPartitionerDependentSerializer<Replica>
-    {
-        @Override
-        public void serialize(Replica t, DataOutputPlus out, int version) throws IOException
-        {
-            tokenSerializer.serialize(t.range, out, version);
-            InetAddressAndPort.Serializer.inetAddressAndPortSerializer.serialize(t.endpoint, out, version);
-            out.writeBoolean(t.isFull());
-        }
-
-        @Override
-        public Replica deserialize(DataInputPlus in, IPartitioner partitioner, int version) throws IOException
-        {
-            Range<Token> range = (Range<Token>) tokenSerializer.deserialize(in, partitioner, version);
-            InetAddressAndPort endpoint = InetAddressAndPort.Serializer.inetAddressAndPortSerializer.deserialize(in, version);
-            boolean isFull = in.readBoolean();
-            return new Replica(endpoint, range, isFull);
-        }
-
-        @Override
-        public long serializedSize(Replica t, int version)
-        {
-            return tokenSerializer.serializedSize(t.range, version) +
-                   InetAddressAndPort.Serializer.inetAddressAndPortSerializer.serializedSize(t.endpoint, version) +
-                   TypeSizes.sizeof(t.isFull());
-        }
-    }
 }
 

@@ -24,34 +24,26 @@ import java.util.stream.Collectors;
 
 import javax.annotation.Nullable;
 
-import com.google.common.annotations.VisibleForTesting;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.utils.CassandraVersion;
-import org.apache.cassandra.utils.NullableSerializer;
-
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 
 /**
  * This abstraction represents both the HeartBeatState and the ApplicationState in an EndpointState
  * instance. Any state for a given endpoint can be retrieved from this instance.
  */
+
+
 public class EndpointState
 {
     protected static final Logger logger = LoggerFactory.getLogger(EndpointState.class);
 
-    static volatile boolean LOOSE_DEF_OF_EMPTY_ENABLED = CassandraRelevantProperties.LOOSE_DEF_OF_EMPTY_ENABLED.getBoolean();
-
     public final static IVersionedSerializer<EndpointState> serializer = new EndpointStateSerializer();
-    public final static IVersionedSerializer<EndpointState> nullableSerializer = NullableSerializer.wrap(serializer);
 
     private volatile HeartBeatState hbState;
     private final AtomicReference<Map<ApplicationState, VersionedValue>> applicationState;
@@ -70,17 +62,15 @@ public class EndpointState
         this(new HeartBeatState(other.hbState), new EnumMap<>(other.applicationState.get()));
     }
 
-    @VisibleForTesting
-    public EndpointState(HeartBeatState initialHbState, Map<ApplicationState, VersionedValue> states)
+    EndpointState(HeartBeatState initialHbState, Map<ApplicationState, VersionedValue> states)
     {
         hbState = initialHbState;
-        applicationState = new AtomicReference<>(new EnumMap<>(states));
-        updateTimestamp = nanoTime();
+        applicationState = new AtomicReference<Map<ApplicationState, VersionedValue>>(new EnumMap<>(states));
+        updateTimestamp = System.nanoTime();
         isAlive = true;
     }
 
-    @VisibleForTesting
-    public HeartBeatState getHeartBeatState()
+    HeartBeatState getHeartBeatState()
     {
         return hbState;
     }
@@ -183,13 +173,7 @@ public class EndpointState
 
     void updateTimestamp()
     {
-        updateTimestamp = nanoTime();
-    }
-
-    @VisibleForTesting
-    public void unsafeSetUpdateTimestamp(long value)
-    {
-        updateTimestamp = value;
+        updateTimestamp = System.nanoTime();
     }
 
     public boolean isAlive()
@@ -197,21 +181,14 @@ public class EndpointState
         return isAlive;
     }
 
-    @VisibleForTesting
-    public void markAlive()
+    void markAlive()
     {
         isAlive = true;
     }
 
-    @VisibleForTesting
-    public void markDead()
+    void markDead()
     {
         isAlive = false;
-    }
-
-    public boolean isStateEmpty()
-    {
-        return applicationState.get().isEmpty();
     }
 
     /**
@@ -220,23 +197,18 @@ public class EndpointState
     public boolean isEmptyWithoutStatus()
     {
         Map<ApplicationState, VersionedValue> state = applicationState.get();
-        boolean hasStatus = state.containsKey(ApplicationState.STATUS_WITH_PORT) || state.containsKey(ApplicationState.STATUS);
-        return hbState.isEmpty() && !hasStatus
-               // In the very specific case where hbState.isEmpty and STATUS is missing, this is known to be safe to "fake"
-               // the data, as this happens when the gossip state isn't coming from the node but instead from a peer who
-               // restarted and is missing the node's state.
-               //
-               // When hbState is not empty, then the node gossiped an empty STATUS; this happens during bootstrap and it's not
-               // possible to tell if this is ok or not (we can't really tell if the node is dead or having networking issues).
-               // For these cases allow an external actor to verify and inform Cassandra that it is safe - this is done by
-               // updating the LOOSE_DEF_OF_EMPTY_ENABLED field.
-               || (LOOSE_DEF_OF_EMPTY_ENABLED && !hasStatus);
+        return hbState.isEmpty() && !(state.containsKey(ApplicationState.STATUS_WITH_PORT) || state.containsKey(ApplicationState.STATUS));
     }
 
     public boolean isRpcReady()
     {
         VersionedValue rpcState = getApplicationState(ApplicationState.RPC_READY);
         return rpcState != null && Boolean.parseBoolean(rpcState.value);
+    }
+
+    public boolean isNormalState()
+    {
+        return getStatus().equals(VersionedValue.STATUS_NORMAL);
     }
 
     public String getStatus()
@@ -259,7 +231,10 @@ public class EndpointState
     @Nullable
     public UUID getSchemaVersion()
     {
-        return ClusterMetadata.current().schema.getVersion();
+        VersionedValue applicationState = getApplicationState(ApplicationState.SCHEMA);
+        return applicationState != null
+               ? UUID.fromString(applicationState.value)
+               : null;
     }
 
     @Nullable
@@ -274,20 +249,6 @@ public class EndpointState
     public String toString()
     {
         return "EndpointState: HeartBeatState = " + hbState + ", AppStateMap = " + applicationState.get();
-    }
-
-    public boolean isSupersededBy(EndpointState that)
-    {
-        int thisGeneration = this.getHeartBeatState().getGeneration();
-        int thatGeneration = that.getHeartBeatState().getGeneration();
-
-        if (thatGeneration > thisGeneration)
-            return true;
-
-        if (thisGeneration > thatGeneration)
-            return false;
-
-        return Gossiper.getMaxEndpointStateVersion(that) > Gossiper.getMaxEndpointStateVersion(this);
     }
 }
 

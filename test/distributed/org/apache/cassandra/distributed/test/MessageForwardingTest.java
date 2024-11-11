@@ -23,6 +23,7 @@ import java.net.InetAddress;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -39,34 +40,29 @@ import org.apache.cassandra.distributed.api.ConsistencyLevel;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.impl.IsolatedExecutor;
 import org.apache.cassandra.distributed.impl.TracingUtil;
-import org.apache.cassandra.distributed.shared.WithProperties;
-import org.apache.cassandra.utils.TimeUUID;
-
-import static org.apache.cassandra.config.CassandraRelevantProperties.WAIT_FOR_TRACING_EVENTS_TIMEOUT_SECS;
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
+import org.apache.cassandra.utils.UUIDGen;
 
 public class MessageForwardingTest extends TestBaseImpl
 {
     @Test
     public void mutationsForwardedToAllReplicasTest()
     {
+        String originalTraceTimeout = TracingUtil.setWaitForTracingEventTimeoutSecs("1");
         final int numInserts = 100;
         Map<InetAddress, Integer> forwardFromCounts = new HashMap<>();
         Map<InetAddress, Integer> commitCounts = new HashMap<>();
 
-        try (WithProperties properties = new WithProperties().set(WAIT_FOR_TRACING_EVENTS_TIMEOUT_SECS, 1);
-             Cluster cluster = (Cluster) init(builder()
+        try (Cluster cluster = (Cluster) init(builder()
                                               .withDC("dc0", 1)
                                               .withDC("dc1", 3)
-                                              .start());
-             )
+                                              .start()))
         {
             cluster.schemaChange("CREATE TABLE " + KEYSPACE + ".tbl (pk int, ck int, v text, PRIMARY KEY (pk, ck))");
 
             cluster.forEach(instance -> commitCounts.put(instance.broadcastAddress().getAddress(), 0));
-            final TimeUUID sessionId = nextTimeUUID();
+            final UUID sessionId = UUIDGen.getTimeUUID();
             Stream<Future<Object[][]>> inserts = IntStream.range(0, numInserts).mapToObj((idx) -> {
-                return cluster.coordinator(1).asyncExecuteWithTracing(sessionId.asUUID(),
+                return cluster.coordinator(1).asyncExecuteWithTracing(sessionId,
                                                                       "INSERT INTO " + KEYSPACE + ".tbl(pk,ck,v) VALUES (1, 1, 'x')",
                                                                       ConsistencyLevel.ALL);
             });
@@ -93,7 +89,7 @@ public class MessageForwardingTest extends TestBaseImpl
 
             cluster.stream("dc1").forEach(instance -> forwardFromCounts.put(instance.broadcastAddress().getAddress(), 0));
             cluster.forEach(instance -> commitCounts.put(instance.broadcastAddress().getAddress(), 0));
-            List<TracingUtil.TraceEntry> traces = TracingUtil.getTrace(cluster, sessionId.asUUID(), ConsistencyLevel.ALL);
+            List<TracingUtil.TraceEntry> traces = TracingUtil.getTrace(cluster, sessionId, ConsistencyLevel.ALL);
             traces.forEach(traceEntry -> {
                 if (traceEntry.activity.contains("Appending to commitlog"))
                 {
@@ -117,6 +113,10 @@ public class MessageForwardingTest extends TestBaseImpl
         catch (IOException e)
         {
             Assert.fail("Threw exception: " + e);
+        }
+        finally
+        {
+            TracingUtil.setWaitForTracingEventTimeoutSecs(originalTraceTimeout);
         }
     }
 }

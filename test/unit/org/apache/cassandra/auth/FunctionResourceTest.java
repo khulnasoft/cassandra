@@ -111,6 +111,7 @@ public class FunctionResourceTest
         String expected = String.format("%s is not a valid function resource name. It must end with \"[]\"", invalidInput);
         assertThatExceptionOfType(IllegalArgumentException.class).isThrownBy(() -> FunctionResource.fromName(invalidInput))
                                                                  .withMessage(expected);
+        ;
     }
 
     @Test

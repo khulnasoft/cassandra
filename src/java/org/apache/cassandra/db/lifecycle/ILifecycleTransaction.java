@@ -21,6 +21,7 @@ package org.apache.cassandra.db.lifecycle;
 import java.util.Collection;
 import java.util.Set;
 
+import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.utils.concurrent.Transactional;
 

@@ -24,9 +24,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.cql3.CQL3Type;
-import org.apache.cassandra.cql3.terms.Constants;
-import org.apache.cassandra.cql3.terms.Term;
-import org.apache.cassandra.cql3.functions.ArgumentDeserializer;
+import org.apache.cassandra.cql3.Constants;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.serializers.EmptySerializer;
@@ -38,9 +37,6 @@ import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 import org.apache.cassandra.utils.bytecomparable.ByteSource;
 import org.apache.cassandra.utils.NoSpamLogger;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.SERIALIZATION_EMPTY_TYPE_NONEMPTY_BEHAVIOR;
-import static org.apache.cassandra.utils.LocalizeString.toUpperCaseLocalized;
-
 /**
  * A type that only accept empty data.
  * It is only useful as a value validation type, not as a comparator since column names can't be empty.
@@ -50,21 +46,22 @@ public class EmptyType extends AbstractType<Void>
     private enum NonEmptyWriteBehavior { FAIL, LOG_DATA_LOSS, SILENT_DATA_LOSS }
 
     private static final Logger logger = LoggerFactory.getLogger(EmptyType.class);
+    private static final String KEY_EMPTYTYPE_NONEMPTY_BEHAVIOR = "cassandra.serialization.emptytype.nonempty_behavior";
     private static final NoSpamLogger NON_EMPTY_WRITE_LOGGER = NoSpamLogger.getLogger(logger, 1, TimeUnit.MINUTES);
     private static final NonEmptyWriteBehavior NON_EMPTY_WRITE_BEHAVIOR = parseNonEmptyWriteBehavior();
 
     private static NonEmptyWriteBehavior parseNonEmptyWriteBehavior()
     {
-        String value = SERIALIZATION_EMPTY_TYPE_NONEMPTY_BEHAVIOR.getString();
+        String value = System.getProperty(KEY_EMPTYTYPE_NONEMPTY_BEHAVIOR);
         if (value == null)
             return NonEmptyWriteBehavior.FAIL;
         try
         {
-            return NonEmptyWriteBehavior.valueOf(toUpperCaseLocalized(value).trim());
+            return NonEmptyWriteBehavior.valueOf(value.toUpperCase().trim());
         }
         catch (Exception e)
         {
-            logger.warn("Unable to parse property " + SERIALIZATION_EMPTY_TYPE_NONEMPTY_BEHAVIOR.getKey() + ", falling back to FAIL", e);
+            logger.warn("Unable to parse property " + KEY_EMPTYTYPE_NONEMPTY_BEHAVIOR + ", falling back to FAIL", e);
             return NonEmptyWriteBehavior.FAIL;
         }
     }
@@ -74,9 +71,24 @@ public class EmptyType extends AbstractType<Void>
     private EmptyType() {super(ComparisonType.CUSTOM);} // singleton
 
     @Override
+    public boolean allowsEmpty()
+    {
+        return true;
+    }
+
+    @Override
     public <V> ByteSource asComparableBytes(ValueAccessor<V> accessor, V data, ByteComparable.Version version)
     {
-        return null;
+        switch (version)
+        {
+            case LEGACY:
+            case OSS41:
+                return null;
+            case OSS50:
+            default:
+                // EmptyType is being used in tuples where a null ByteSource is not acceptable. Use an empty source.
+                return ByteSource.EMPTY;
+        }
     }
 
     @Override
@@ -132,12 +144,6 @@ public class EmptyType extends AbstractType<Void>
     }
 
     @Override
-    public ArgumentDeserializer getArgumentDeserializer()
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
     public int valueLengthIfFixed()
     {
         return 0;
@@ -190,11 +196,5 @@ public class EmptyType extends AbstractType<Void>
         {
             super(message);
         }
-    }
-
-    @Override
-    public ByteBuffer getMaskedValue()
-    {
-        return ByteBufferUtil.EMPTY_BYTE_BUFFER;
     }
 }

@@ -18,7 +18,12 @@
 package org.apache.cassandra.hints;
 
 import java.io.DataInput;
+import java.io.DataOutput;
+import java.io.DataOutputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -33,11 +38,6 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 import com.google.common.collect.ImmutableMap;
-
-import org.apache.cassandra.io.util.File;
-import org.apache.cassandra.io.util.FileInputStreamPlus;
-import com.google.common.io.ByteStreams;
-import com.google.common.io.CountingOutputStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,14 +45,17 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.ParameterizedClass;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.FSReadError;
+import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.compress.ICompressor;
 import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.io.util.FileInputStreamPlus;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.security.EncryptionContext;
-import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.Hex;
-import org.apache.cassandra.utils.JsonUtils;
+import org.json.simple.JSONValue;
 
 import static org.apache.cassandra.utils.FBUtilities.updateChecksumInt;
 
@@ -68,9 +71,8 @@ final class HintsDescriptor
 
     static final int VERSION_30 = 1;
     static final int VERSION_40 = 2;
-    static final int VERSION_50 = 3;
-    static final int VERSION_51 = 4;
-    static final int CURRENT_VERSION = DatabaseDescriptor.getStorageCompatibilityMode().isBefore(5) ? VERSION_40 : VERSION_51;
+    static final int VERSION_SG_10 = 100;
+    static final int CURRENT_VERSION = VERSION_SG_10;
 
     static final String COMPRESSION = "compression";
     static final String ENCRYPTION = "encryption";
@@ -81,22 +83,24 @@ final class HintsDescriptor
     final UUID hostId;
     final int version;
     final long timestamp;
-    final String hintsFileName;
-    final String crc32FileName;
 
     final ImmutableMap<String, Object> parameters;
     final ParameterizedClass compressionConfig;
 
+    // It's set when HintsWriter closed for new hint file or
+    // when descriptor is deserialized from local hint file.
+    private volatile long dataSize = 0;
+
     private final Cipher cipher;
     private final ICompressor compressor;
+
+    private volatile Statistics statistics = EMPTY_STATS;
 
     HintsDescriptor(UUID hostId, int version, long timestamp, ImmutableMap<String, Object> parameters)
     {
         this.hostId = hostId;
         this.version = version;
         this.timestamp = timestamp;
-        hintsFileName = hostId + "-" + timestamp + '-' + version + ".hints";
-        crc32FileName = hostId + "-" + timestamp + '-' + version + ".crc32";
         compressionConfig = createCompressionConfig(parameters);
 
         EncryptionData encryption = createEncryption(parameters);
@@ -193,6 +197,36 @@ final class HintsDescriptor
         }
     }
 
+    public void setDataSize(long length)
+    {
+        this.dataSize = length;
+    }
+
+    public long getDataSize()
+    {
+        return dataSize;
+    }
+
+    public void setStatistics(Statistics statistics)
+    {
+        this.statistics = statistics;
+    }
+
+    public Statistics statistics()
+    {
+        return statistics;
+    }
+
+    String statisticsFileName()
+    {
+        return statisticsFileName(hostId, timestamp, version);
+    }
+
+    static String statisticsFileName(UUID hostId, long timestamp, int version)
+    {
+        return String.format("%s-%s-%s-Statistics.hints", hostId, timestamp, version);
+    }
+
     private static final class EncryptionData
     {
         final Cipher cipher;
@@ -209,38 +243,12 @@ final class HintsDescriptor
 
     String fileName()
     {
-        return hintsFileName;
+        return String.format("%s-%s-%s.hints", hostId, timestamp, version);
     }
 
     String checksumFileName()
     {
-        return crc32FileName;
-    }
-
-    File file(File hintsDirectory)
-    {
-        return new File(hintsDirectory, fileName());
-    }
-
-    File checksumFile(File hintsDirectory)
-    {
-        return new File(hintsDirectory, checksumFileName());
-    }
-
-    /** cached size of the represented hints file */
-    private transient volatile long hintsFileSize = -1L;
-
-    long hintsFileSize(File hintsDirectory)
-    {
-        long size = hintsFileSize;
-        if (size == -1L) // we may race and duplicate lookup the first time the size is being queried, but that is fine
-            hintsFileSize = size = file(hintsDirectory).length();
-        return size;
-    }
-
-    void hintsFileSize(long value)
-    {
-        hintsFileSize = value;
+        return String.format("%s-%s-%s.crc32", hostId, timestamp, version);
     }
 
     int messagingVersion()
@@ -256,10 +264,8 @@ final class HintsDescriptor
                 return MessagingService.VERSION_30;
             case VERSION_40:
                 return MessagingService.VERSION_40;
-            case VERSION_50:
-                return MessagingService.VERSION_50;
-            case VERSION_51:
-                return MessagingService.VERSION_51;
+            case VERSION_SG_10:
+                return MessagingService.VERSION_SG_10;
             default:
                 throw new AssertionError();
         }
@@ -274,7 +280,10 @@ final class HintsDescriptor
     {
         try (FileInputStreamPlus raf = new FileInputStreamPlus(path))
         {
-            return Optional.of(deserialize(raf));
+            HintsDescriptor descriptor = deserialize(raf);
+            descriptor.setDataSize(FileUtils.size(path));
+            descriptor.loadStatsComponent(path.getParent());
+            return Optional.of(descriptor);
         }
         catch (ChecksumMismatchException e)
         {
@@ -308,18 +317,6 @@ final class HintsDescriptor
         catch (IOException ex)
         {
             logger.error("Error handling corrupt hints file {}", path.toString(), ex);
-        }
-    }
-
-    static HintsDescriptor readFromFile(File path)
-    {
-        try (FileInputStreamPlus raf = new FileInputStreamPlus(path))
-        {
-            return deserialize(raf);
-        }
-        catch (IOException e)
-        {
-            throw new FSReadError(e, path);
         }
     }
 
@@ -396,7 +393,7 @@ final class HintsDescriptor
         out.writeLong(hostId.getLeastSignificantBits());
         updateChecksumLong(crc, hostId.getLeastSignificantBits());
 
-        byte[] paramsBytes = JsonUtils.writeAsJsonBytes(parameters);
+        byte[] paramsBytes = JSONValue.toJSONString(parameters).getBytes(StandardCharsets.UTF_8);
         out.writeInt(paramsBytes.length);
         updateChecksumInt(crc, paramsBytes.length);
         out.writeInt((int) crc.getValue());
@@ -415,20 +412,10 @@ final class HintsDescriptor
         size += TypeSizes.sizeof(hostId.getMostSignificantBits());
         size += TypeSizes.sizeof(hostId.getLeastSignificantBits());
 
-        // Let's avoid allocation of serialized output, use counting output stream
-        int serializedParamsLength;
-        try (CountingOutputStream out = new CountingOutputStream(ByteStreams.nullOutputStream()))
-        {
-            JsonUtils.JSON_OBJECT_MAPPER.writeValue(out, parameters);
-            serializedParamsLength = (int) out.getCount();
-        }
-        catch (IOException e)
-        {
-            throw new RuntimeException(e); // should never happen
-        }
-        size += TypeSizes.sizeof(serializedParamsLength);
+        byte[] paramsBytes = JSONValue.toJSONString(parameters).getBytes(StandardCharsets.UTF_8);
+        size += TypeSizes.sizeof(paramsBytes.length);
         size += 4; // size checksum
-        size += serializedParamsLength;
+        size += paramsBytes.length;
         size += 4; // total checksum
 
         return size;
@@ -466,18 +453,7 @@ final class HintsDescriptor
     @SuppressWarnings("unchecked")
     private static ImmutableMap<String, Object> decodeJSONBytes(byte[] bytes)
     {
-        // note: There is a Jackson module (datatype-guava) for directly reading into ImmutableMap,
-        // but would require adding dependency to that
-        try
-        {
-            return ImmutableMap.copyOf(JsonUtils.fromJsonMap(bytes));
-        }
-        catch (MarshalException e)
-        {
-            // Couple of options here: up to 4.0 simply returned null and caller failed with NPE.
-            // Seems cleaner to throw an exception
-            throw new MarshalException("Corrupt HintsDescriptor serialization, problem: " + e.getMessage(), e);
-        }
+        return ImmutableMap.copyOf((Map<String, Object>) JSONValue.parse(new String(bytes, StandardCharsets.UTF_8)));
     }
 
     private static void updateChecksumLong(CRC32 crc, long value)
@@ -490,5 +466,73 @@ final class HintsDescriptor
     {
         if (expected != actual)
             throw new ChecksumMismatchException("Hints Descriptor CRC Mismatch");
+    }
+
+    @VisibleForTesting
+    void loadStatsComponent(Path hintsDirectory)
+    {
+        Path file = hintsDirectory.resolve(statisticsFileName());
+        try (RandomAccessFile statsFile = new RandomAccessFile(file.toFile(), "r"))
+        {
+            this.statistics = Statistics.deserialize(statsFile);
+        }
+        catch (FileNotFoundException e)
+        {
+            // Statistics are only used for metrics; it's ok to ignore an absent component during upgrades
+            logger.warn("Cannot find stats component `{}` for hints descriptor, initialising with empty statistics.", file);
+            this.statistics = EMPTY_STATS;
+        }
+        catch (IOException e)
+        {
+            // Ignore error in case of corruption
+            logger.error("Cannot read stats component `{}` for hints descriptor, initialising with empty statistics.", file, e);
+            this.statistics = EMPTY_STATS;
+        }
+    }
+
+    void writeStatsComponent(Path directory)
+    {
+        File file = new File(directory, statisticsFileName());
+        try (DataOutputStream out = new DataOutputStream(Files.newOutputStream(file.toPath())))
+        {
+            statistics.serialize(out);
+        }
+        catch (IOException e)
+        {
+            throw new FSWriteError(e, file);
+        }
+    }
+
+    public static Statistics EMPTY_STATS = new Statistics(0);
+
+    public static class Statistics
+    {
+        private final long totalCount;
+
+        public Statistics(long totalCount)
+        {
+            this.totalCount = totalCount;
+        }
+
+        public long totalCount()
+        {
+            return totalCount;
+        }
+
+        public void serialize(DataOutput out) throws IOException
+        {
+            out.writeLong(totalCount);
+        }
+
+        public static Statistics deserialize(DataInput in) throws IOException
+        {
+            long totalCount = in.readLong();
+            return new Statistics(totalCount);
+        }
+
+        public static int serializedSize()
+        {
+            return Long.BYTES;
+        }
     }
 }

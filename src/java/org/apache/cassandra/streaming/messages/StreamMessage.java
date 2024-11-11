@@ -21,10 +21,13 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 
+import io.netty.channel.Channel;
+
 import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.streaming.StreamingChannel;
-import org.apache.cassandra.streaming.StreamingDataOutputPlus;
+import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.streaming.StreamSession;
+
+import static java.lang.Math.max;
 
 /**
  * StreamMessage is an abstract base class that every messages in streaming protocol inherit.
@@ -33,7 +36,7 @@ import org.apache.cassandra.streaming.StreamSession;
  */
 public abstract class StreamMessage
 {
-    public static void serialize(StreamMessage message, StreamingDataOutputPlus out, int version, StreamSession session) throws IOException
+    public static void serialize(StreamMessage message, DataOutputStreamPlus out, int version, StreamSession session) throws IOException
     {
         out.writeByte(message.type.id);
         message.type.outSerializer.serialize(message, out, version, session);
@@ -54,7 +57,7 @@ public abstract class StreamMessage
     public static interface Serializer<V extends StreamMessage>
     {
         V deserialize(DataInputPlus in, int version) throws IOException;
-        void serialize(V message, StreamingDataOutputPlus out, int version, StreamSession session) throws IOException;
+        void serialize(V message, DataOutputStreamPlus out, int version, StreamSession session) throws IOException;
         long serializedSize(V message, int version) throws IOException;
     }
 
@@ -135,7 +138,7 @@ public abstract class StreamMessage
      * Get or create a {@link StreamSession} based on this stream message data: not all stream messages support this,
      * so the default implementation just throws an exception.
      */
-    public StreamSession getOrCreateAndAttachInboundSession(StreamingChannel channel, int messagingVersion)
+    public StreamSession getOrCreateSession(Channel channel)
     {
         throw new UnsupportedOperationException("Not supported by streaming messages of type: " + this.getClass());
     }

@@ -25,7 +25,6 @@ import org.apache.cassandra.exceptions.WriteFailureException;
 import org.apache.cassandra.exceptions.WriteTimeoutException;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.Message;
-import org.apache.cassandra.transport.Dispatcher;
 
 public class BatchlogResponseHandler<T> extends AbstractWriteResponseHandler<T>
 {
@@ -35,15 +34,15 @@ public class BatchlogResponseHandler<T> extends AbstractWriteResponseHandler<T>
     private static final AtomicIntegerFieldUpdater<BatchlogResponseHandler> requiredBeforeFinishUpdater
             = AtomicIntegerFieldUpdater.newUpdater(BatchlogResponseHandler.class, "requiredBeforeFinish");
 
-    public BatchlogResponseHandler(AbstractWriteResponseHandler<T> wrapped, int requiredBeforeFinish, BatchlogCleanup cleanup, Dispatcher.RequestTime requestTime)
+    public BatchlogResponseHandler(AbstractWriteResponseHandler<T> wrapped, int requiredBeforeFinish, BatchlogCleanup cleanup, long queryStartNanoTime)
     {
-        super(wrapped.replicaPlan, wrapped.callback, wrapped.writeType, null, requestTime);
+        super(wrapped.replicaPlan, wrapped.callback, wrapped.writeType, queryStartNanoTime);
         this.wrapped = wrapped;
         this.requiredBeforeFinish = requiredBeforeFinish;
         this.cleanup = cleanup;
     }
 
-    protected int ackCount()
+    public int ackCount()
     {
         return wrapped.ackCount();
     }
@@ -70,22 +69,22 @@ public class BatchlogResponseHandler<T> extends AbstractWriteResponseHandler<T>
         wrapped.get();
     }
 
-    protected int blockFor()
+    public int blockFor()
     {
         return wrapped.blockFor();
     }
 
-    protected int candidateReplicaCount()
+    public int candidateReplicaCount()
     {
         return wrapped.candidateReplicaCount();
     }
 
-    protected boolean waitingFor(InetAddressAndPort from)
+    public boolean waitingFor(InetAddressAndPort from)
     {
         return wrapped.waitingFor(from);
     }
 
-    protected void signal()
+    public void signal()
     {
         wrapped.signal();
     }

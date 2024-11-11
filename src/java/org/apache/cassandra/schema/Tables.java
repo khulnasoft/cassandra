@@ -17,27 +17,26 @@
  */
 package org.apache.cassandra.schema;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
-
 import javax.annotation.Nullable;
 
-import com.google.common.collect.*;
+import com.google.common.collect.ImmutableCollection;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.MapDifference;
+import com.google.common.collect.Maps;
 
-import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.index.internal.CassandraIndex;
-import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.tcm.serialization.UDTAndFunctionsAwareMetadataSerializer;
-import org.apache.cassandra.tcm.serialization.Version;
 
 import static com.google.common.collect.Iterables.any;
 import static com.google.common.collect.Iterables.transform;
@@ -47,8 +46,6 @@ import static com.google.common.collect.Iterables.transform;
  */
 public final class Tables implements Iterable<TableMetadata>
 {
-    public static final Serializer serializer = new Serializer();
-
     private static final Tables NONE = builder().build();
 
     private final ImmutableMap<String, TableMetadata> tables;
@@ -131,7 +128,7 @@ public final class Tables implements Iterable<TableMetadata>
     }
 
     @Nullable
-    public TableMetadata getNullable(TableId id)
+    TableMetadata getNullable(TableId id)
     {
         return tablesById.get(id);
     }
@@ -185,6 +182,31 @@ public final class Tables implements Iterable<TableMetadata>
         return any(this, t -> t.referencesUserType(udt.name))
              ? builder().add(transform(this, t -> t.withUpdatedUserType(udt))).build()
              : this;
+    }
+
+    public Tables withNewKeyspace(String newName, Types udts)
+    {
+        Map<String, TableMetadata> updated = new HashMap<>();
+        for (TableMetadata table : this)
+        {
+            updated.put(table.name, table.withNewKeyspace(newName, udts));
+        }
+
+        return builder().add(updated.values()).build();
+    }
+
+    public Tables withTransformedParams(Function<TableParams, TableParams> transformFunction)
+    {
+        Map<String, TableMetadata> updated = new HashMap<>();
+
+        // We order the tables by dependencies so that vertices tables are
+        // processed before edges tables, in case graph constructs are used
+        for (TableMetadata table : this)
+        {
+            updated.put(table.name, table.withTransformedParams(transformFunction));
+        }
+
+        return builder().add(updated.values()).build();
     }
 
     MapDifference<String, TableMetadata> indexesDiff(Tables other)
@@ -291,36 +313,6 @@ public final class Tables implements Iterable<TableMetadata>
             });
 
             return new TablesDiff(created, dropped, altered.build());
-        }
-    }
-
-    public static class Serializer implements UDTAndFunctionsAwareMetadataSerializer<Tables>
-    {
-        public void serialize(Tables t, DataOutputPlus out, Version version) throws IOException
-        {
-            out.writeInt(t.tables.size());
-            for (TableMetadata tm : t.tables.values())
-                TableMetadata.serializer.serialize(tm, out, version);
-        }
-
-        public Tables deserialize(DataInputPlus in, Types types, UserFunctions functions, Version version) throws IOException
-        {
-            int count = in.readInt();
-            Tables.Builder builder = Tables.builder();
-            for (int i = 0; i < count; i++)
-            {
-                TableMetadata tm = TableMetadata.serializer.deserialize(in, types, functions, version);
-                builder.add(tm);
-            }
-            return builder.build();
-        }
-
-        public long serializedSize(Tables t, Version version)
-        {
-            int size = TypeSizes.sizeof(t.tables.size());
-            for (TableMetadata tm : t.tables.values())
-                size += TableMetadata.serializer.serializedSize(tm, version);
-            return size;
         }
     }
 }

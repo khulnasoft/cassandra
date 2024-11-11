@@ -23,44 +23,56 @@ import java.util.stream.IntStream;
 
 import org.junit.Test;
 
-import org.apache.cassandra.dht.Murmur3Partitioner;
-import org.apache.cassandra.index.sai.utils.PrimaryKey;
 import org.apache.cassandra.utils.Pair;
 
 import static org.apache.cassandra.index.sai.iterators.LongIterator.convert;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertTrue;
 
-public class KeyRangeConcatIteratorTest extends AbstractKeyRangeIteratorTester
+public class KeyRangeConcatIteratorTest extends AbstractKeyRangeIteratorTest
 {
-    PrimaryKey.Factory primaryKeyFactory = new PrimaryKey.Factory(Murmur3Partitioner.instance, null);
     @Test
     public void testValidation()
     {
-        // Iterators being merged via concatanation must not include each other
-        assertThatThrownBy(() -> buildConcat(build(1L, 4L), build(2L, 3L))).isInstanceOf(IllegalArgumentException.class)
-                                                                           .hasMessage(createErrorMessage(4, 2));
+        try
+        {
+            buildConcat(build(1L, 4L), build(2L, 3L));
+            fail("Flows for a merging concatenation must not contain one another.");
+        }
+        catch (IllegalArgumentException ignored)
+        {
+        }
 
-        // Iterators being merged via concatanation must not overlap
-        assertThatThrownBy(() -> buildConcat(build(1L, 4L), build(2L, 5L))).isInstanceOf(IllegalArgumentException.class)
-                                                                           .hasMessage(createErrorMessage(4, 2));
-
-        assertThatThrownBy(() -> buildConcat(build(1L, 4L), build(0L, 3L))).isInstanceOf(IllegalArgumentException.class)
-                                                                           .hasMessage(createErrorMessage(4, 0));
-
-        // Iterators being merged via concatanation must be sorted
-        assertThatThrownBy(() -> buildConcat(build(2L, 4L), build(0L, 1L))).isInstanceOf(IllegalArgumentException.class)
-                                                                           .hasMessage(createErrorMessage(4, 0));
+        try
+        {
+            buildConcat(build(1L, 4L), build(2L, 5L));
+            fail("Minimum for flow must not be included in exclusive range of previous flow.");
+        }
+        catch (IllegalArgumentException ignored)
+        {
+        }
 
         // allow min boundary included
         KeyRangeIterator concat = buildConcat(build(1L, 4L), build(4L, 5L));
         assertEquals(convert(1L, 4L, 4L, 5L), convert(concat));
 
-        // with empty iterator
+        try
+        {
+            buildConcat(build(1L, 4L), build(0L, 3L));
+            fail("Maximum for flow must not be included in exclusive range of previous flow.");
+        }
+        catch (IllegalArgumentException ignored)
+        {
+        }
+
+        try
+        {
+            buildConcat(build(2L, 4L), build(0L, 1L));
+            fail("Flows for merging concatenation must be sorted.");
+        }
+        catch (IllegalArgumentException ignored)
+        {
+        }
+
+        // with empty flow
         concat = buildConcat(build(), build(0L, 1L));
         assertEquals(convert(0L, 1L), convert(concat));
 
@@ -104,77 +116,79 @@ public class KeyRangeConcatIteratorTest extends AbstractKeyRangeIteratorTester
         builder.add(build(7L, 8L, 9L));
 
         assertEquals(9L, builder.getMaximum().token().getLongValue());
-        assertEquals(9L, builder.getCount());
+        assertEquals(9L, builder.getTokenCount());
 
-        KeyRangeIterator keyIterator = builder.build();
+        KeyRangeIterator tokens = builder.build();
 
-        assertNotNull(keyIterator);
-        assertEquals(1L, keyIterator.getMinimum().token().getLongValue());
-        assertEquals(9L, keyIterator.getMaximum().token().getLongValue());
-        assertEquals(9L, keyIterator.getMaxKeys());
+        assertNotNull(tokens);
+        assertEquals(1L, tokens.getMinimum().token().getLongValue());
+        assertEquals(9L, tokens.getMaximum().token().getLongValue());
+        assertEquals(9L, tokens.getMaxKeys());
 
         for (long i = 1; i < 10; i++)
         {
-            assertTrue(keyIterator.hasNext());
-            assertEquals(i, keyIterator.next().token().getLongValue());
+            assertTrue(tokens.hasNext());
+            assertEquals(i, tokens.next().token().getLongValue());
         }
 
-        assertFalse(keyIterator.hasNext());
-        assertEquals(1L, keyIterator.getMinimum().token().getLongValue());
+        assertFalse(tokens.hasNext());
+        assertEquals(1L, tokens.getMinimum().token().getLongValue());
     }
 
     @Test
     public void testSkipTo()
     {
+        // flow is single use..
         Supplier<KeyRangeIterator> init = () ->  buildConcat(build(1L, 2L, 3L),
                                                              build( 4L, 5L, 6L),
                                                              build( 7L, 8L, 9L));
 
-        KeyRangeIterator keyIterator;
+        KeyRangeIterator tokens;
 
-        keyIterator = init.get();
-        keyIterator.skipTo(LongIterator.fromToken(5));
-        assertTrue(keyIterator.hasNext());
-        assertEquals(5L, keyIterator.next().token().getLongValue());
+        tokens = init.get();
+        tokens.skipTo(LongIterator.fromToken(5));
+        assertTrue(tokens.hasNext());
+        assertEquals(5L, tokens.next().token().getLongValue());
 
-        keyIterator = init.get();
-        keyIterator.skipTo(LongIterator.fromToken(7L));
-        assertTrue(keyIterator.hasNext());
-        assertEquals(7L, keyIterator.next().token().getLongValue());
+        tokens = init.get();
+        tokens.skipTo(LongIterator.fromToken(7L));
+        assertTrue(tokens.hasNext());
+        assertEquals(7L, tokens.next().token().getLongValue());
 
-        keyIterator = init.get();
-        keyIterator.skipTo(LongIterator.fromToken(2L));
-        keyIterator.skipTo(LongIterator.fromToken(5L));
-        keyIterator.skipTo(LongIterator.fromToken(10L));
-        assertFalse(keyIterator.hasNext());
-        assertEquals(1L, keyIterator.getMinimum().token().getLongValue());
-        assertEquals(9L, keyIterator.getMaximum().token().getLongValue());
+        tokens = init.get();
+        tokens.skipTo(LongIterator.fromToken(2L));
+        tokens.skipTo(LongIterator.fromToken(5L));
+        tokens.skipTo(LongIterator.fromToken(10L));
+        assertFalse(tokens.hasNext());
+        assertEquals(1L, tokens.getMinimum().token().getLongValue());
+        assertEquals(9L, tokens.getMaximum().token().getLongValue());
     }
 
     @Test
     public void testSkipToWithGaps()
     {
+        // flow is single use..
         Supplier<KeyRangeIterator> init = () ->  buildConcat(build(1L, 2L, 3L), build(4L, 6L), build(8L, 9L));
 
-        KeyRangeIterator keyIterator;
+        KeyRangeIterator tokens;
 
-        keyIterator = init.get();
-        keyIterator.skipTo(LongIterator.fromToken(5L));
-        assertTrue(keyIterator.hasNext());
-        assertEquals(6L, keyIterator.next().token().getLongValue());
+        tokens = init.get();
+        tokens.skipTo(LongIterator.fromToken(5L));
+        assertTrue(tokens.hasNext());
+        assertEquals(6L, tokens.next().token().getLongValue());
 
-        keyIterator = init.get();
-        keyIterator.skipTo(LongIterator.fromToken(7L));
-        assertTrue(keyIterator.hasNext());
-        assertEquals(8L, keyIterator.next().token().getLongValue());
+        tokens = init.get();
+        tokens.skipTo(LongIterator.fromToken(7L));
+        assertTrue(tokens.hasNext());
+        assertEquals(8L, tokens.next().token().getLongValue());
 
-        keyIterator = init.get();
-        keyIterator.skipTo(LongIterator.fromToken(2L));
-        keyIterator.skipTo(LongIterator.fromToken(5L));
-        keyIterator.skipTo(LongIterator.fromToken(10L));
-        assertFalse(keyIterator.hasNext());
-        assertEquals(1L, keyIterator.getMinimum().token().getLongValue());
-        assertEquals(9L, keyIterator.getMaximum().token().getLongValue());
+        tokens = init.get();
+        tokens.skipTo(LongIterator.fromToken(2L));
+        tokens.skipTo(LongIterator.fromToken(5L));
+        tokens.skipTo(LongIterator.fromToken(10L));
+        assertFalse(tokens.hasNext());
+        assertEquals(1L, tokens.getMinimum().token().getLongValue());
+        assertEquals(9L, tokens.getMaximum().token().getLongValue());
     }
 
     @Test
@@ -194,11 +208,12 @@ public class KeyRangeConcatIteratorTest extends AbstractKeyRangeIteratorTester
         builder.add(build());
         IntStream.range(10, 20).forEach(value -> builder.add(build(value)));
 
-        KeyRangeIterator keyIterator = builder.build();
-        assertEquals(10L, keyIterator.getMinimum().token().getLongValue());
-        assertEquals(19L, keyIterator.getMaximum().token().getLongValue());
-        assertTrue(keyIterator.hasNext());
-        assertEquals(10, keyIterator.getMaxKeys());
+        KeyRangeIterator range = builder.build();
+
+        assertEquals(10L, range.getMinimum().token().getLongValue());
+        assertEquals(19L, range.getMaximum().token().getLongValue());
+        assertTrue(range.hasNext());
+        assertEquals(10, range.getMaxKeys());
     }
 
     @Test
@@ -209,11 +224,11 @@ public class KeyRangeConcatIteratorTest extends AbstractKeyRangeIteratorTester
         builder.add(build());
         builder.add(build(10));
 
-        KeyRangeIterator keyIterator = builder.build();
-        assertEquals(10L, keyIterator.getMinimum().token().getLongValue());
-        assertEquals(10L, keyIterator.getMaximum().token().getLongValue());
-        assertTrue(keyIterator.hasNext());
-        assertEquals(1, keyIterator.getMaxKeys());
+        KeyRangeIterator range = builder.build();
+        assertEquals(10L, range.getMinimum().token().getLongValue());
+        assertEquals(10L, range.getMaximum().token().getLongValue());
+        assertTrue(range.hasNext());
+        assertEquals(1, range.getMaxKeys());
     }
 
     @Test
@@ -224,11 +239,11 @@ public class KeyRangeConcatIteratorTest extends AbstractKeyRangeIteratorTester
         IntStream.range(10, 20).forEach(value -> builder.add(build(value)));
         builder.add(build());
 
-        KeyRangeIterator keyIterator = builder.build();
-        assertEquals(10L, keyIterator.getMinimum().token().getLongValue());
-        assertEquals(19L, keyIterator.getMaximum().token().getLongValue());
-        assertTrue(keyIterator.hasNext());
-        assertEquals(10, keyIterator.getMaxKeys());
+        KeyRangeIterator range = builder.build();
+        assertEquals(10L, range.getMinimum().token().getLongValue());
+        assertEquals(19L, range.getMaximum().token().getLongValue());
+        assertTrue(range.hasNext());
+        assertEquals(10, range.getMaxKeys());
     }
 
     @Test
@@ -239,11 +254,11 @@ public class KeyRangeConcatIteratorTest extends AbstractKeyRangeIteratorTester
         builder.add(build(10));
         builder.add(build());
 
-        KeyRangeIterator keyIterator = builder.build();
-        assertEquals(10L, keyIterator.getMinimum().token().getLongValue());
-        assertEquals(10L, keyIterator.getMaximum().token().getLongValue());
-        assertTrue(keyIterator.hasNext());
-        assertEquals(1, keyIterator.getMaxKeys());
+        KeyRangeIterator range = builder.build();
+        assertEquals(10L, range.getMinimum().token().getLongValue());
+        assertEquals(10L, range.getMaximum().token().getLongValue());
+        assertTrue(range.hasNext());
+        assertEquals(1, range.getMaxKeys());
     }
 
     @Test
@@ -255,11 +270,11 @@ public class KeyRangeConcatIteratorTest extends AbstractKeyRangeIteratorTester
         IntStream.range(10, 20).forEach(value -> builder.add(build(value)));
         builder.add(build());
 
-        KeyRangeIterator keyIterator = builder.build();
-        assertEquals(10L, keyIterator.getMinimum().token().getLongValue());
-        assertEquals(19L, keyIterator.getMaximum().token().getLongValue());
-        assertTrue(keyIterator.hasNext());
-        assertEquals(10, keyIterator.getMaxKeys());
+        KeyRangeIterator range = builder.build();
+        assertEquals(10L, range.getMinimum().token().getLongValue());
+        assertEquals(19L, range.getMaximum().token().getLongValue());
+        assertTrue(range.hasNext());
+        assertEquals(10, range.getMaxKeys());
     }
 
     @Test
@@ -271,11 +286,11 @@ public class KeyRangeConcatIteratorTest extends AbstractKeyRangeIteratorTester
         builder.add(build());
         IntStream.range(15, 20).forEach(value -> builder.add(build(value)));
 
-        KeyRangeIterator keyIterator = builder.build();
-        assertEquals(10L, keyIterator.getMinimum().token().getLongValue());
-        assertEquals(19L, keyIterator.getMaximum().token().getLongValue());
-        assertTrue(keyIterator.hasNext());
-        assertEquals(10, keyIterator.getMaxKeys());
+        KeyRangeIterator range = builder.build();
+        assertEquals(10L, range.getMinimum().token().getLongValue());
+        assertEquals(19L, range.getMaximum().token().getLongValue());
+        assertTrue(range.hasNext());
+        assertEquals(10, range.getMaxKeys());
     }
 
     @Test
@@ -321,9 +336,9 @@ public class KeyRangeConcatIteratorTest extends AbstractKeyRangeIteratorTester
     }
 
     @Test
-    public void testDuplicatedElementsInTheSameIterator()
+    public void testDuplicatedElementsInTheSameFlow()
     {
-        // In real case, we should not have duplicated elements from the same PostingListRangeIterator
+        // In real case, we should not have duplicated elements from the same PostingListKeyRangeIterator
         KeyRangeIterator rangeA = build(1L, 2L, 3L, 3L, 4L, 4L);
         KeyRangeIterator rangeB = build(6L, 6L, 7L, 7L);
         KeyRangeIterator rangeC = build(8L, 8L);
@@ -384,18 +399,6 @@ public class KeyRangeConcatIteratorTest extends AbstractKeyRangeIteratorTester
         assertEquals(convert(1L, 2L, 3L, 3L, 3L, 3L, 4L, 5L), convert(buildConcat(rangeA, rangeB)));
     }
 
-    private KeyRangeIterator.Builder getConcatBuilder()
-    {
-        return KeyRangeConcatIterator.builder(16);
-    }
-
-    private String createErrorMessage(int max, int min)
-    {
-        return String.format(KeyRangeConcatIterator.MUST_BE_SORTED_ERROR,
-                             primaryKeyFactory.create(new Murmur3Partitioner.LongToken(max)),
-                             primaryKeyFactory.create(new Murmur3Partitioner.LongToken(min)));
-    }
-
     @Test
     public void testRandom()
     {
@@ -416,12 +419,12 @@ public class KeyRangeConcatIteratorTest extends AbstractKeyRangeIteratorTester
         {
             allValues.add((long) i);
             current.add((long) i);
-            if (nextDouble() < 0.05)
+            if (randomDouble() < 0.05)
             {
                 ranges.add(build(current.stream().mapToLong(Long::longValue).toArray()));
                 current.clear();
             }
-            if (nextDouble() < 0.1)
+            if (randomDouble() < 0.1)
                 i += nextInt(5);
         }
         ranges.add(build(current.stream().mapToLong(Long::longValue).toArray()));
@@ -430,5 +433,10 @@ public class KeyRangeConcatIteratorTest extends AbstractKeyRangeIteratorTester
         KeyRangeIterator it = buildConcat(ranges.toArray(KeyRangeIterator[]::new));
         assertEquals(totalOrdered.length, it.getMaxKeys());
         return Pair.create(it, totalOrdered);
+    }
+
+    private KeyRangeIterator.Builder getConcatBuilder()
+    {
+        return KeyRangeConcatIterator.builder();
     }
 }

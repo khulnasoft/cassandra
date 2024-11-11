@@ -33,8 +33,8 @@ import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.FBUtilities;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.junit.Assert.assertEquals;
 
 
@@ -65,18 +65,18 @@ public class OneCompactionTest
         Set<String> inserted = new HashSet<>();
         for (int j = 0; j < insertsPerTable; j++) {
             String key = String.valueOf(j);
-                new RowUpdateBuilder(store.metadata(), j, key)
+            new RowUpdateBuilder(store.metadata(), j, key)
                 .clustering("0")
                 .add("val", ByteBufferUtil.EMPTY_BYTE_BUFFER)
                 .build()
                 .applyUnsafe();
 
-                inserted.add(key);
-            Util.flush(store);
+            inserted.add(key);
+            store.forceBlockingFlush(UNIT_TESTS);
             assertEquals(inserted.size(), Util.getAll(Util.cmd(store).build()).size());
         }
-        FBUtilities.waitOnFuture(Util.compactAll(store, FBUtilities.nowInSeconds()));
-        assertEquals(1, store.getLiveSSTables().size());
+        CompactionManager.instance.performMaximal(store, false);
+        Util.assertNoOverlap(store.getLiveSSTables());
     }
 
     @Test

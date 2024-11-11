@@ -22,7 +22,6 @@ package org.apache.cassandra.index;
 
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Iterator;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -44,11 +43,11 @@ import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.index.transactions.IndexTransaction;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.SSTableFlushObserver;
+import org.apache.cassandra.io.sstable.format.SSTableFlushObserver;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.service.ClientState;
 
 /**
  * The collection of all Index instances for a base table.
@@ -58,12 +57,12 @@ import org.apache.cassandra.service.ClientState;
  * i) subscribe to the stream of updates being applied to partitions in the base table
  * ii) provide searchers to support queries with the relevant search predicates
  */
-public interface IndexRegistry extends Iterable<Index>
+public interface IndexRegistry
 {
     /**
      * An empty {@code IndexRegistry}
      */
-    IndexRegistry EMPTY = new IndexRegistry()
+    public static final IndexRegistry EMPTY = new IndexRegistry()
     {
         @Override
         public void registerIndex(Index index, Index.Group.Key groupKey, Supplier<Index.Group> groupSupplier)
@@ -100,7 +99,7 @@ public interface IndexRegistry extends Iterable<Index>
         }
 
         @Override
-        public void validate(PartitionUpdate update, ClientState state)
+        public void validate(PartitionUpdate update)
         {
         }
     };
@@ -111,105 +110,85 @@ public interface IndexRegistry extends Iterable<Index>
      * but enables query validation and preparation to succeed. Useful for tools which need to prepare
      * CQL statements without instantiating the whole ColumnFamilyStore infrastructure.
      */
-    IndexRegistry NON_DAEMON = new IndexRegistry()
+    public static final IndexRegistry NON_DAEMON = new IndexRegistry()
     {
-        final Index index = new Index()
+        Index index = new Index()
         {
-            @Override
             public Callable<?> getInitializationTask()
             {
                 return null;
             }
 
-            @Override
             public IndexMetadata getIndexMetadata()
             {
                 return null;
             }
 
-            @Override
             public Callable<?> getMetadataReloadTask(IndexMetadata indexMetadata)
             {
                 return null;
             }
 
-            @Override
             public void register(IndexRegistry registry)
             {
+
             }
 
-            @Override
-            public void unregister(IndexRegistry registry)
-            {
-            }
-
-            @Override
             public Optional<ColumnFamilyStore> getBackingTable()
             {
                 return Optional.empty();
             }
 
-            @Override
             public Callable<?> getBlockingFlushTask()
             {
                 return null;
             }
 
-            @Override
             public Callable<?> getInvalidateTask()
             {
                 return null;
             }
 
-            @Override
             public Callable<?> getTruncateTask(long truncatedAt)
             {
                 return null;
             }
 
-            @Override
             public boolean shouldBuildBlocking()
             {
                 return false;
             }
 
-            @Override
             public boolean dependsOn(ColumnMetadata column)
             {
                 return false;
             }
 
-            @Override
             public boolean supportsExpression(ColumnMetadata column, Operator operator)
             {
                 return true;
             }
 
-            @Override
             public AbstractType<?> customExpressionValueType()
             {
                 return BytesType.instance;
             }
 
-            @Override
             public RowFilter getPostIndexQueryFilter(RowFilter filter)
             {
                 return null;
             }
 
-            @Override
             public long getEstimatedResultRows()
             {
                 return 0;
             }
 
-            @Override
-            public void validate(PartitionUpdate update, ClientState state) throws InvalidRequestException
+            public void validate(PartitionUpdate update) throws InvalidRequestException
             {
             }
 
-            @Override
-            public Indexer indexerFor(DecoratedKey key, RegularAndStaticColumns columns, long nowInSec, WriteContext ctx, IndexTransaction.Type transactionType, Memtable memtable)
+            public Indexer indexerFor(DecoratedKey key, RegularAndStaticColumns columns, int nowInSec, WriteContext ctx, IndexTransaction.Type transactionType, Memtable memtable)
             {
                 return null;
             }
@@ -220,12 +199,22 @@ public interface IndexRegistry extends Iterable<Index>
             }
         };
 
-        final Index.Group group = new Index.Group()
+        Index.Group group = new Index.Group()
         {
             @Override
             public Set<Index> getIndexes()
             {
                 return Collections.singleton(index);
+            }
+
+            @Override
+            public void addIndex(Index index)
+            {
+            }
+
+            @Override
+            public void removeIndex(Index index)
+            {
             }
 
             @Override
@@ -236,7 +225,7 @@ public interface IndexRegistry extends Iterable<Index>
 
             @Nullable
             @Override
-            public Index.Indexer indexerFor(Predicate<Index> indexSelector, DecoratedKey key, RegularAndStaticColumns columns, long nowInSec, WriteContext ctx, IndexTransaction.Type transactionType, Memtable memtable)
+            public Index.Indexer indexerFor(Predicate<Index> indexSelector, DecoratedKey key, RegularAndStaticColumns columns, int nowInSec, WriteContext ctx, IndexTransaction.Type transactionType, Memtable memtable)
             {
                 return null;
             }
@@ -250,35 +239,37 @@ public interface IndexRegistry extends Iterable<Index>
 
             @Nullable
             @Override
-            public SSTableFlushObserver getFlushObserver(Descriptor descriptor, LifecycleNewTracker tracker, TableMetadata tableMetadata)
+            public SSTableFlushObserver getFlushObserver(Descriptor descriptor, LifecycleNewTracker tracker, TableMetadata tableMetadata, long keyCount)
             {
                 return null;
             }
 
             @Override
-            public Set<Component> getComponents()
+            public Set<Component> componentsForNewSSTable()
+            {
+                return null;
+            }
+
+            @Override
+            public Set<Component> activeComponents(SSTableReader sstable)
             {
                 return null;
             }
         };
 
-        @Override
         public void registerIndex(Index index, Index.Group.Key groupKey, Supplier<Index.Group> groupSupplier)
         {
         }
 
-        @Override
         public void unregisterIndex(Index index, Index.Group.Key groupKey)
         {
         }
 
-        @Override
         public Index getIndex(IndexMetadata indexMetadata)
         {
             return index;
         }
 
-        @Override
         public Collection<Index> listIndexes()
         {
             return Collections.singletonList(index);
@@ -290,37 +281,27 @@ public interface IndexRegistry extends Iterable<Index>
             return Collections.singletonList(group);
         }
 
-        @Override
         public Optional<Index> getBestIndexFor(RowFilter.Expression expression)
         {
             return Optional.empty();
         }
 
-        @Override
-        public void validate(PartitionUpdate update, ClientState state)
+        public void validate(PartitionUpdate update)
         {
+
         }
     };
 
     default void registerIndex(Index index)
     {
-        registerIndex(index, new Index.Group.Key(index), () -> new SingletonIndexGroup(index));
+        registerIndex(index, new Index.Group.Key(index), () -> new SingletonIndexGroup());
     }
-
     void registerIndex(Index index, Index.Group.Key groupKey, Supplier<Index.Group> groupSupplier);
-
     void unregisterIndex(Index index, Index.Group.Key groupKey);
-
     Collection<Index.Group> listIndexGroups();
 
     Index getIndex(IndexMetadata indexMetadata);
     Collection<Index> listIndexes();
-
-    @Override
-    default Iterator<Index> iterator()
-    {
-        return listIndexes().iterator();
-    }
 
     Optional<Index> getBestIndexFor(RowFilter.Expression expression);
 
@@ -332,9 +313,8 @@ public interface IndexRegistry extends Iterable<Index>
      * implementations
      *
      * @param update PartitionUpdate containing the values to be validated by registered Index implementations
-     * @param state state related to the client connection
      */
-    void validate(PartitionUpdate update, ClientState state);
+    void validate(PartitionUpdate update);
 
     /**
      * Returns the {@code IndexRegistry} associated to the specified table.
@@ -342,7 +322,7 @@ public interface IndexRegistry extends Iterable<Index>
      * @param table the table metadata
      * @return the {@code IndexRegistry} associated to the specified table
      */
-    static IndexRegistry obtain(TableMetadata table)
+    public static IndexRegistry obtain(TableMetadata table)
     {
         if (!DatabaseDescriptor.isDaemonInitialized())
             return NON_DAEMON;

@@ -17,9 +17,8 @@
  */
 package org.apache.cassandra.cql3;
 
+import java.util.Locale;
 import java.util.Objects;
-
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 
 /**
  * Class for the names of the keyspace-prefixed elements (e.g. table, index, view names)
@@ -124,6 +123,6 @@ public class QualifiedName
      */
     private static String toInternalName(String name, boolean keepCase)
     {
-        return keepCase ? name : toLowerCaseLocalized(name);
+        return keepCase ? name : name.toLowerCase(Locale.US);
     }
 }

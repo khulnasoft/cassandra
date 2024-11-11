@@ -31,12 +31,9 @@ import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.IMutation;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.RegularAndStaticColumns;
-import org.apache.cassandra.db.commitlog.CommitLogSegment;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.virtual.VirtualMutation;
-import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.service.ClientState;
 
 /**
  * Utility class to collect updates.
@@ -83,7 +80,7 @@ final class SingleTableUpdatesCollector implements UpdatesCollector
         PartitionUpdate.Builder builder = puBuilders.get(dk.getKey());
         if (builder == null)
         {
-            builder = new PartitionUpdate.Builder(metadata, dk, updatedColumns, perPartitionKeyCounts.count(dk.getKey()));
+            builder = PartitionUpdate.builder(metadata, dk, updatedColumns, perPartitionKeyCounts.count(dk.getKey()));
             puBuilders.put(dk.getKey(), builder);
         }
         return builder;
@@ -93,8 +90,7 @@ final class SingleTableUpdatesCollector implements UpdatesCollector
      * Returns a collection containing all the mutations.
      * @return a collection containing all the mutations.
      */
-    @Override
-    public List<IMutation> toMutations(ClientState state)
+    public List<IMutation> toMutations()
     {
         List<IMutation> ms = new ArrayList<>(puBuilders.size());
         for (PartitionUpdate.Builder builder : puBuilders.values())
@@ -108,8 +104,7 @@ final class SingleTableUpdatesCollector implements UpdatesCollector
             else
                 mutation = new Mutation(builder.build());
 
-            mutation.validateIndexedColumns(state);
-            mutation.validateSize(MessagingService.current_version, CommitLogSegment.ENTRY_OVERHEAD_SIZE);
+            mutation.validateIndexedColumns();
             ms.add(mutation);
         }
 

@@ -19,13 +19,16 @@ package org.apache.cassandra.io.sstable.metadata;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
+import com.google.common.collect.ImmutableMap;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.builder.EqualsBuilder;
 import org.apache.commons.lang3.builder.HashCodeBuilder;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,11 +48,9 @@ import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.serializers.AbstractTypeSerializer;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.EstimatedHistogram;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.UUIDSerializer;
 import org.apache.cassandra.utils.streamhist.TombstoneHistogram;
-
-import static java.lang.Math.min;
 
 /**
  * SSTable metadata that always stay on heap.
@@ -64,8 +65,8 @@ public class StatsMetadata extends MetadataComponent
     public final IntervalSet<CommitLogPosition> commitLogIntervals;
     public final long minTimestamp;
     public final long maxTimestamp;
-    public final long minLocalDeletionTime;
-    public final long maxLocalDeletionTime;
+    public final int minLocalDeletionTime;
+    public final int maxLocalDeletionTime;
     public final int minTTL;
     public final int maxTTL;
     public final double compressionRatio;
@@ -74,11 +75,22 @@ public class StatsMetadata extends MetadataComponent
     public final Slice coveredClustering;
     public final boolean hasLegacyCounterShards;
     public final double tokenSpaceCoverage;
+    /**
+     * This boolean is used as an approximation of whether a given key can be guaranteed not to have partition
+     * deletions in this sstable. Obviously, this is pretty imprecise: a single partition deletion in the sstable
+     * means we have to assume _any_ key may have a partition deletion. This is still likely useful as workloads that
+     * does not use partition level deletions, or only very rarely, are probably not that rare.
+     *
+     * TODO we could replace this by a small bloom-filter instead; the only downside being that we'd have to care about
+     *  the size of this bloom filters not getting out of hands, and it's a tiny bit unclear if it's worth the added
+     *  complexity.
+     */
+    public final boolean hasPartitionLevelDeletions;
     public final long repairedAt;
     public final long totalColumnsSet;
     public final long totalRows;
     public final UUID originatingHostId;
-    public final TimeUUID pendingRepair;
+    public final UUID pendingRepair;
     public final boolean isTransient;
     // just holds the current encoding stats to avoid allocating - it is not serialized
     public final EncodingStats encodingStats;
@@ -86,27 +98,17 @@ public class StatsMetadata extends MetadataComponent
     // Used to serialize min/max clustering. Can be null if the metadata was deserialized from a legacy version
     private final List<AbstractType<?>> clusteringTypes;
 
-    /**
-     * This boolean is used as an approximation of whether a given key can be guaranteed not to have partition
-     * deletions in this sstable. Obviously, this is pretty imprecise: a single partition deletion in the sstable
-     * means we have to assume _any_ key may have a partition deletion. This is still likely useful as workloads that
-     * does not use partition level deletions, or only very rarely, are probably not that rare.
-     * TODO we could replace this by a small bloom-filter instead; the only downside being that we'd have to care about
-     *  the size of this bloom filters not getting out of hands, and it's a tiny bit unclear if it's worth the added
-     *  complexity.
-     */
-    public final boolean hasPartitionLevelDeletions;
+    private final ImmutableMap<ByteBuffer, Integer> maxColumnValueLengths;
 
-    public final ByteBuffer firstKey;
-    public final ByteBuffer lastKey;
+    public final ZeroCopyMetadata zeroCopyMetadata;
 
     public StatsMetadata(EstimatedHistogram estimatedPartitionSize,
                          EstimatedHistogram estimatedCellPerPartitionCount,
                          IntervalSet<CommitLogPosition> commitLogIntervals,
                          long minTimestamp,
                          long maxTimestamp,
-                         long minLocalDeletionTime,
-                         long maxLocalDeletionTime,
+                         int minLocalDeletionTime,
+                         int maxLocalDeletionTime,
                          int minTTL,
                          int maxTTL,
                          double compressionRatio,
@@ -115,16 +117,16 @@ public class StatsMetadata extends MetadataComponent
                          List<AbstractType<?>> clusteringTypes,
                          Slice coveredClustering,
                          boolean hasLegacyCounterShards,
+                         boolean hasPartitionLevelDeletions,
                          long repairedAt,
                          long totalColumnsSet,
                          long totalRows,
                          double tokenSpaceCoverage,
                          UUID originatingHostId,
-                         TimeUUID pendingRepair,
+                         UUID pendingRepair,
                          boolean isTransient,
-                         boolean hasPartitionLevelDeletions,
-                         ByteBuffer firstKey,
-                         ByteBuffer lastKey)
+                         Map<ByteBuffer, Integer> maxColumnValueLengths,
+                         ZeroCopyMetadata zeroCopyMetadata)
     {
         this.estimatedPartitionSize = estimatedPartitionSize;
         this.estimatedCellPerPartitionCount = estimatedCellPerPartitionCount;
@@ -141,6 +143,7 @@ public class StatsMetadata extends MetadataComponent
         this.clusteringTypes = clusteringTypes;
         this.coveredClustering = coveredClustering;
         this.hasLegacyCounterShards = hasLegacyCounterShards;
+        this.hasPartitionLevelDeletions = hasPartitionLevelDeletions;
         this.repairedAt = repairedAt;
         this.totalColumnsSet = totalColumnsSet;
         this.totalRows = totalRows;
@@ -149,9 +152,8 @@ public class StatsMetadata extends MetadataComponent
         this.pendingRepair = pendingRepair;
         this.isTransient = isTransient;
         this.encodingStats = new EncodingStats(minTimestamp, minLocalDeletionTime, minTTL);
-        this.hasPartitionLevelDeletions = hasPartitionLevelDeletions;
-        this.firstKey = firstKey;
-        this.lastKey = lastKey;
+        this.maxColumnValueLengths = ImmutableMap.copyOf(maxColumnValueLengths);
+        this.zeroCopyMetadata = zeroCopyMetadata;
     }
 
     public MetadataType getType()
@@ -163,7 +165,7 @@ public class StatsMetadata extends MetadataComponent
      * @param gcBefore gc time in seconds
      * @return estimated droppable tombstone ratio at given gcBefore time.
      */
-    public double getEstimatedDroppableTombstoneRatio(long gcBefore)
+    public double getEstimatedDroppableTombstoneRatio(int gcBefore)
     {
         long estimatedColumnCount = this.estimatedCellPerPartitionCount.mean() * this.estimatedCellPerPartitionCount.count();
         if (estimatedColumnCount > 0)
@@ -178,7 +180,7 @@ public class StatsMetadata extends MetadataComponent
      * @param gcBefore gc time in seconds
      * @return amount of droppable tombstones
      */
-    public double getDroppableTombstonesBefore(long gcBefore)
+    public double getDroppableTombstonesBefore(int gcBefore)
     {
         return estimatedTombstoneDropTime.sum(gcBefore);
     }
@@ -200,6 +202,7 @@ public class StatsMetadata extends MetadataComponent
                                  clusteringTypes,
                                  coveredClustering,
                                  hasLegacyCounterShards,
+                                 hasPartitionLevelDeletions,
                                  repairedAt,
                                  totalColumnsSet,
                                  totalRows,
@@ -207,12 +210,11 @@ public class StatsMetadata extends MetadataComponent
                                  originatingHostId,
                                  pendingRepair,
                                  isTransient,
-                                 hasPartitionLevelDeletions,
-                                 firstKey,
-                                 lastKey);
+                                 maxColumnValueLengths,
+                                 zeroCopyMetadata);
     }
 
-    public StatsMetadata mutateRepairedMetadata(long newRepairedAt, TimeUUID newPendingRepair, boolean newIsTransient)
+    public StatsMetadata mutateRepairedMetadata(long newRepairedAt, UUID newPendingRepair, boolean newIsTransient)
     {
         return new StatsMetadata(estimatedPartitionSize,
                                  estimatedCellPerPartitionCount,
@@ -229,6 +231,7 @@ public class StatsMetadata extends MetadataComponent
                                  clusteringTypes,
                                  coveredClustering,
                                  hasLegacyCounterShards,
+                                 hasPartitionLevelDeletions,
                                  newRepairedAt,
                                  totalColumnsSet,
                                  totalRows,
@@ -236,9 +239,8 @@ public class StatsMetadata extends MetadataComponent
                                  originatingHostId,
                                  newPendingRepair,
                                  newIsTransient,
-                                 hasPartitionLevelDeletions,
-                                 firstKey,
-                                 lastKey);
+                                 maxColumnValueLengths,
+                                 zeroCopyMetadata);
     }
 
     @Override
@@ -264,14 +266,14 @@ public class StatsMetadata extends MetadataComponent
                        .append(repairedAt, that.repairedAt)
                        .append(coveredClustering, that.coveredClustering)
                        .append(hasLegacyCounterShards, that.hasLegacyCounterShards)
+                       .append(hasPartitionLevelDeletions, that.hasPartitionLevelDeletions)
                        .append(totalColumnsSet, that.totalColumnsSet)
                        .append(totalRows, that.totalRows)
                        .append(tokenSpaceCoverage, that.tokenSpaceCoverage)
                        .append(originatingHostId, that.originatingHostId)
                        .append(pendingRepair, that.pendingRepair)
-                       .append(hasPartitionLevelDeletions, that.hasPartitionLevelDeletions)
-                       .append(firstKey, that.firstKey)
-                       .append(lastKey, that.lastKey)
+                       .append(maxColumnValueLengths, that.maxColumnValueLengths)
+                       .append(zeroCopyMetadata, that.zeroCopyMetadata)
                        .build();
     }
 
@@ -294,20 +296,21 @@ public class StatsMetadata extends MetadataComponent
                        .append(repairedAt)
                        .append(coveredClustering)
                        .append(hasLegacyCounterShards)
+                       .append(hasPartitionLevelDeletions)
                        .append(totalColumnsSet)
                        .append(totalRows)
                        .append(tokenSpaceCoverage)
                        .append(originatingHostId)
                        .append(pendingRepair)
-                       .append(hasPartitionLevelDeletions)
-                       .append(firstKey)
-                       .append(lastKey)
+                       .append(maxColumnValueLengths)
+                       .append(zeroCopyMetadata)
                        .build();
     }
 
     public static class StatsMetadataSerializer implements IMetadataComponentSerializer<StatsMetadata>
     {
         private static final Logger logger = LoggerFactory.getLogger(StatsMetadataSerializer.class);
+        private static final NoSpamLogger noSpamLogger = NoSpamLogger.getLogger(logger, 1L, TimeUnit.MINUTES);
 
         private final AbstractTypeSerializer typeSerializer = new AbstractTypeSerializer();
 
@@ -317,27 +320,27 @@ public class StatsMetadata extends MetadataComponent
             size += EstimatedHistogram.serializer.serializedSize(component.estimatedPartitionSize);
             size += EstimatedHistogram.serializer.serializedSize(component.estimatedCellPerPartitionCount);
             size += CommitLogPosition.serializer.serializedSize(component.commitLogIntervals.upperBound().orElse(CommitLogPosition.NONE));
-            size += 8 + 8; // mix/max timestamp(long)
-            size += 4 + 4;   //min/maxLocalDeletionTime(either int or uint depending on the sstable version)
-            size +=  4 + 4 + 8 + 8;// min/max TTL, compressionRatio(double), repairedAt (long)
-            size += TombstoneHistogram.getSerializer(version).serializedSize(component.estimatedTombstoneDropTime);
-
+            size += 8 + 8 + 4 + 4 + 4 + 4 + 8 + 8; // mix/max timestamp(long), min/maxLocalDeletionTime(int), min/max TTL, compressionRatio(double), repairedAt (long)
+            size += TombstoneHistogram.serializer.serializedSize(component.estimatedTombstoneDropTime);
             size += TypeSizes.sizeof(component.sstableLevel);
 
-            if (version.hasLegacyMinMax())
+            if (version.hasImprovedMinMax())
+            {
+                size += typeSerializer.serializedListSize(component.clusteringTypes);
+                size += Slice.serializer.serializedSize(component.coveredClustering,
+                                                        version.correspondingMessagingVersion(),
+                                                        component.clusteringTypes);
+            }
+            else
             {
                 // min column names
                 size += 4;
                 ClusteringBound<?> minClusteringValues = component.coveredClustering.start();
-                size += minClusteringValues.size() * 2 /* short length */ + minClusteringValues.dataSize();
+                size += countUntilNull(minClusteringValues.getBufferArray()) * 2 /* short length */ + minClusteringValues.dataSize();
                 // max column names
                 size += 4;
                 ClusteringBound<?> maxClusteringValues = component.coveredClustering.end();
-                size += maxClusteringValues.size() * 2 /* short length */ + maxClusteringValues.dataSize();
-            }
-            else if (version.hasImprovedMinMax())
-            {
-                size = improvedMinMaxSize(version, component, size);
+                size += countUntilNull(maxClusteringValues.getBufferArray()) * 2 /* short length */ + maxClusteringValues.dataSize();
             }
 
             size += TypeSizes.sizeof(component.hasLegacyCounterShards);
@@ -351,7 +354,28 @@ public class StatsMetadata extends MetadataComponent
             {
                 size += 1;
                 if (component.pendingRepair != null)
-                    size += TimeUUID.sizeInBytes();
+                    size += UUIDSerializer.serializer.serializedSize(component.pendingRepair, 0);
+            }
+
+            // we do not have zero copy metadata, but we need to support loading such sstables
+            if (version.hasZeroCopyMetadata())
+            {
+                size += 1;
+                if (component.zeroCopyMetadata.exists())
+                    size += ZeroCopyMetadata.serializer.serializedSize(component.zeroCopyMetadata);
+            }
+
+            // we do not have node sync metadata
+            if (version.hasIncrementalNodeSyncMetadata())
+            {
+                size += Long.BYTES;
+            }
+
+            if (version.hasMaxColumnValueLengths())
+            {
+                size += 4; // num columns
+                for (Map.Entry<ByteBuffer, Integer> entry : component.maxColumnValueLengths.entrySet())
+                    size += ByteBufferUtil.serializedSizeWithVIntLength(entry.getKey()) + 4; // column name, max value length
             }
 
             if (version.hasIsTransient())
@@ -359,27 +383,14 @@ public class StatsMetadata extends MetadataComponent
                 size += TypeSizes.sizeof(component.isTransient);
             }
 
+            if (version.hasPartitionLevelDeletionsPresenceMarker())
+                size += TypeSizes.sizeof(component.hasPartitionLevelDeletions);
+
             if (version.hasOriginatingHostId())
             {
                 size += 1; // boolean: is originatingHostId present
                 if (component.originatingHostId != null)
                     size += UUIDSerializer.serializer.serializedSize(component.originatingHostId, version.correspondingMessagingVersion());
-            }
-
-            if (version.hasPartitionLevelDeletionsPresenceMarker())
-            {
-                size += TypeSizes.sizeof(component.hasPartitionLevelDeletions);
-            }
-
-            if (version.hasImprovedMinMax() && version.hasLegacyMinMax())
-            {
-                size = improvedMinMaxSize(version, component, size);
-            }
-
-            if (version.hasKeyRange())
-            {
-                size += ByteBufferUtil.serializedSizeWithVIntLength(component.firstKey);
-                size += ByteBufferUtil.serializedSizeWithVIntLength(component.lastKey);
             }
 
             if (version.hasTokenSpaceCoverage())
@@ -390,15 +401,6 @@ public class StatsMetadata extends MetadataComponent
             return size;
         }
 
-        private int improvedMinMaxSize(Version version, StatsMetadata component, int size)
-        {
-            size += typeSerializer.serializedListSize(component.clusteringTypes);
-            size += Slice.serializer.serializedSize(component.coveredClustering,
-                                                    version.correspondingMessagingVersion(),
-                                                    component.clusteringTypes);
-            return size;
-        }
-
         public void serialize(Version version, StatsMetadata component, DataOutputPlus out) throws IOException
         {
             EstimatedHistogram.serializer.serialize(component.estimatedPartitionSize, out);
@@ -406,26 +408,25 @@ public class StatsMetadata extends MetadataComponent
             CommitLogPosition.serializer.serialize(component.commitLogIntervals.upperBound().orElse(CommitLogPosition.NONE), out);
             out.writeLong(component.minTimestamp);
             out.writeLong(component.maxTimestamp);
-            if (version.hasUIntDeletionTime())
-            {
-                out.writeInt(Cell.deletionTimeLongToUnsignedInteger(component.minLocalDeletionTime));
-                out.writeInt(Cell.deletionTimeLongToUnsignedInteger(component.maxLocalDeletionTime));
-            }
-            else
-            {
-                int mld = component.minLocalDeletionTime == Long.MAX_VALUE ? Integer.MAX_VALUE : (int)min(component.minLocalDeletionTime, (long)Integer.MAX_VALUE - 1);
-                out.writeInt(mld);
-                mld = component.maxLocalDeletionTime == Long.MAX_VALUE ? Integer.MAX_VALUE : (int)min(component.maxLocalDeletionTime, (long)Integer.MAX_VALUE - 1);
-                out.writeInt(mld);
-            }
+            out.writeInt(component.minLocalDeletionTime);
+            out.writeInt(component.maxLocalDeletionTime);
             out.writeInt(component.minTTL);
             out.writeInt(component.maxTTL);
             out.writeDouble(component.compressionRatio);
-            TombstoneHistogram.getSerializer(version).serialize(component.estimatedTombstoneDropTime, out);
+            TombstoneHistogram.serializer.serialize(component.estimatedTombstoneDropTime, out);
             out.writeInt(component.sstableLevel);
             out.writeLong(component.repairedAt);
 
-            if (version.hasLegacyMinMax())
+            if (version.hasImprovedMinMax())
+            {
+                assert component.clusteringTypes != null;
+                typeSerializer.serializeList(component.clusteringTypes, out);
+                Slice.serializer.serialize(component.coveredClustering,
+                                           out,
+                                           version.correspondingMessagingVersion(),
+                                           component.clusteringTypes);
+            }
+            else
             {
                 ClusteringBound<?> minClusteringValues = component.coveredClustering.start();
                 out.writeInt(countUntilNull(minClusteringValues.getBufferArray()));
@@ -444,10 +445,6 @@ public class StatsMetadata extends MetadataComponent
                     ByteBufferUtil.writeWithShortLength(value, out);
                 }
             }
-            else if (version.hasImprovedMinMax())
-            {
-                serializeImprovedMinMax(version, component, out);
-            }
 
             out.writeBoolean(component.hasLegacyCounterShards);
 
@@ -464,7 +461,7 @@ public class StatsMetadata extends MetadataComponent
                 if (component.pendingRepair != null)
                 {
                     out.writeByte(1);
-                    component.pendingRepair.serialize(out);
+                    UUIDSerializer.serializer.serialize(component.pendingRepair, out, 0);
                 }
                 else
                 {
@@ -472,10 +469,44 @@ public class StatsMetadata extends MetadataComponent
                 }
             }
 
+            // we do not produce such sstables, but we need to be able to rewrite the metadata
+            if (version.hasZeroCopyMetadata())
+            {
+                if (component.zeroCopyMetadata != null && component.zeroCopyMetadata.exists())
+                {
+                    out.writeByte(1);
+                    ZeroCopyMetadata.serializer.serialize(component.zeroCopyMetadata, out);
+                }
+                else
+                {
+                    out.writeByte(0);
+                }
+            }
+
+            // we do not have node sync metadata
+            if (version.hasIncrementalNodeSyncMetadata())
+            {
+                out.writeLong(Long.MAX_VALUE);
+            }
+
+            // left for being able to import DSE sstables, not used
+            if (version.hasMaxColumnValueLengths())
+            {
+                out.writeInt(component.maxColumnValueLengths.size());
+                for (Map.Entry<ByteBuffer, Integer> entry : component.maxColumnValueLengths.entrySet())
+                {
+                    ByteBufferUtil.writeWithVIntLength(entry.getKey(), out);
+                    out.writeInt(entry.getValue());
+                }
+            }
+
             if (version.hasIsTransient())
             {
                 out.writeBoolean(component.isTransient);
             }
+
+            if (version.hasPartitionLevelDeletionsPresenceMarker())
+                out.writeBoolean(component.hasPartitionLevelDeletions);
 
             if (version.hasOriginatingHostId())
             {
@@ -490,36 +521,10 @@ public class StatsMetadata extends MetadataComponent
                 }
             }
 
-            if (version.hasPartitionLevelDeletionsPresenceMarker())
-            {
-                out.writeBoolean(component.hasPartitionLevelDeletions);
-            }
-
-            if (version.hasImprovedMinMax() && version.hasLegacyMinMax())
-            {
-                serializeImprovedMinMax(version, component, out);
-            }
-
-            if (version.hasKeyRange())
-            {
-                ByteBufferUtil.writeWithVIntLength(component.firstKey, out);
-                ByteBufferUtil.writeWithVIntLength(component.lastKey, out);
-            }
-
             if (version.hasTokenSpaceCoverage())
             {
                 out.writeDouble(component.tokenSpaceCoverage);
             }
-        }
-
-        private void serializeImprovedMinMax(Version version, StatsMetadata component, DataOutputPlus out) throws IOException
-        {
-            assert component.clusteringTypes != null;
-            typeSerializer.serializeList(component.clusteringTypes, out);
-            Slice.serializer.serialize(component.coveredClustering,
-                                       out,
-                                       version.correspondingMessagingVersion(),
-                                       component.clusteringTypes);
         }
 
         public StatsMetadata deserialize(Version version, DataInputPlus in) throws IOException
@@ -550,36 +555,26 @@ public class StatsMetadata extends MetadataComponent
             commitLogUpperBound = CommitLogPosition.serializer.deserialize(in);
             long minTimestamp = in.readLong();
             long maxTimestamp = in.readLong();
-            long minLocalDeletionTime;
-            long maxLocalDeletionTime;
-            if (version.hasUIntDeletionTime())
-            {
-                minLocalDeletionTime = Cell.deletionTimeUnsignedIntegerToLong(in.readInt());
-                maxLocalDeletionTime = Cell.deletionTimeUnsignedIntegerToLong(in.readInt());
-            }
-            else
-            {
-                minLocalDeletionTime = in.readInt();
-                if (minLocalDeletionTime == Integer.MAX_VALUE)
-                    minLocalDeletionTime = Cell.NO_DELETION_TIME;
-
-                maxLocalDeletionTime = in.readInt();
-                if (maxLocalDeletionTime == Integer.MAX_VALUE)
-                    maxLocalDeletionTime = Cell.NO_DELETION_TIME;
-            }
+            int minLocalDeletionTime = in.readInt();
+            int maxLocalDeletionTime = in.readInt();
             int minTTL = in.readInt();
             int maxTTL = in.readInt();
             double compressionRatio = in.readDouble();
-            TombstoneHistogram tombstoneHistogram = TombstoneHistogram.getSerializer(version).deserialize(in);
+            TombstoneHistogram tombstoneHistogram = TombstoneHistogram.serializer.deserialize(in);
             int sstableLevel = in.readInt();
             long repairedAt = in.readLong();
 
             List<AbstractType<?>> clusteringTypes = null;
             Slice coveredClustering = Slice.ALL;
-            if (version.hasLegacyMinMax())
+            if (version.hasImprovedMinMax())
             {
-                // We always deserialize the min/max clustering values if they are there, but we ignore them for
-                // legacy sstables where !hasAccurateMinMax due to CASSANDRA-14861.
+                clusteringTypes = typeSerializer.deserializeList(in);
+                coveredClustering = Slice.serializer.deserialize(in, version.correspondingMessagingVersion(), clusteringTypes);
+            }
+            else
+            {
+                // for legacy sstables, we skip deserializing the min and max clustering value
+                // to prevent erroneously excluding sstables from reads (see CASSANDRA-14861)
                 int colCount = in.readInt();
                 ByteBuffer[] minClusteringValues = new ByteBuffer[colCount];
                 for (int i = 0; i < colCount; i++)
@@ -593,12 +588,7 @@ public class StatsMetadata extends MetadataComponent
                 if (version.hasAccurateMinMax())
                     coveredClustering = Slice.make(BufferClusteringBound.inclusiveStartOf(minClusteringValues),
                                                    BufferClusteringBound.inclusiveEndOf(maxClusteringValues));
-            }
-            else if (version.hasImprovedMinMax())
-            {
-                // improvedMinMax will be in this place when legacyMinMax is removed
-                clusteringTypes = typeSerializer.deserializeList(in);
-                coveredClustering = Slice.serializer.deserialize(in, version.correspondingMessagingVersion(), clusteringTypes);
+
             }
 
             boolean hasLegacyCounterShards = in.readBoolean();
@@ -614,40 +604,51 @@ public class StatsMetadata extends MetadataComponent
             else
                 commitLogIntervals = new IntervalSet<>(commitLogLowerBound, commitLogUpperBound);
 
-            TimeUUID pendingRepair = null;
+            UUID pendingRepair = null;
             if (version.hasPendingRepair() && in.readByte() != 0)
             {
-                pendingRepair = TimeUUID.deserialize(in);
+                pendingRepair = UUIDSerializer.serializer.deserialize(in, 0);
+            }
+
+            ZeroCopyMetadata zeroCopyMetadata = ZeroCopyMetadata.EMPTY;
+            if (version.hasZeroCopyMetadata() && in.readByte() != 0)
+            {
+                zeroCopyMetadata = ZeroCopyMetadata.serializer.deserialize(in);
+            }
+
+            if (version.hasIncrementalNodeSyncMetadata())
+            {
+                noSpamLogger.warn("Ignoring incremental node sync metadata from {} as it is not supported", in);
+                in.readLong();
+            }
+
+            // left for being able to import DSE sstables, not used
+            final Map<ByteBuffer, Integer> maxColumnValueLengths;
+            if (version.hasMaxColumnValueLengths())
+            {
+                int colCount = in.readInt();
+                ImmutableMap.Builder<ByteBuffer, Integer> builder = ImmutableMap.builderWithExpectedSize(colCount);
+
+                for (int i = 0; i < colCount; i++)
+                    builder.put(ByteBufferUtil.readWithVIntLength(in), in.readInt());
+                maxColumnValueLengths = builder.build();
+            }
+            else
+            {
+                maxColumnValueLengths = Collections.emptyMap();
             }
 
             boolean isTransient = version.hasIsTransient() && in.readBoolean();
 
+            // If not recorded, the only time we can guarantee there is no partition level deletion is if there is no
+            // deletion at all. Otherwise, we have to assume there may be some.
+            boolean hasPartitionLevelDeletions = version.hasPartitionLevelDeletionsPresenceMarker()
+                                                 ? in.readBoolean()
+                                                 : minLocalDeletionTime != Cell.NO_DELETION_TIME;
+
             UUID originatingHostId = null;
             if (version.hasOriginatingHostId() && in.readByte() != 0)
                 originatingHostId = UUIDSerializer.serializer.deserialize(in, 0);
-
-            // If not recorded, the only time we can guarantee there is no partition level deletion is if there is no
-            // deletion at all. Otherwise, we have to assume there may be some.
-            boolean hasPartitionLevelDeletions = minLocalDeletionTime != Cell.NO_DELETION_TIME;
-            if (version.hasPartitionLevelDeletionsPresenceMarker())
-            {
-                hasPartitionLevelDeletions = in.readBoolean();
-            }
-
-            if (version.hasImprovedMinMax() && version.hasLegacyMinMax())
-            {
-                // improvedMinMax will be in this place until legacyMinMax is removed
-                clusteringTypes = typeSerializer.deserializeList(in);
-                coveredClustering = Slice.serializer.deserialize(in, version.correspondingMessagingVersion(), clusteringTypes);
-            }
-
-            ByteBuffer firstKey = null;
-            ByteBuffer lastKey = null;
-            if (version.hasKeyRange())
-            {
-                firstKey = ByteBufferUtil.readWithVIntLength(in);
-                lastKey = ByteBufferUtil.readWithVIntLength(in);
-            }
 
             double tokenSpaceCoverage = Double.NaN;
             if (version.hasTokenSpaceCoverage())
@@ -670,6 +671,7 @@ public class StatsMetadata extends MetadataComponent
                                      clusteringTypes,
                                      coveredClustering,
                                      hasLegacyCounterShards,
+                                     hasPartitionLevelDeletions,
                                      repairedAt,
                                      totalColumnsSet,
                                      totalRows,
@@ -677,9 +679,8 @@ public class StatsMetadata extends MetadataComponent
                                      originatingHostId,
                                      pendingRepair,
                                      isTransient,
-                                     hasPartitionLevelDeletions,
-                                     firstKey,
-                                     lastKey);
+                                     maxColumnValueLengths,
+                                     zeroCopyMetadata);
         }
 
         private int countUntilNull(ByteBuffer[] bufferArray)

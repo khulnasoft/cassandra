@@ -23,7 +23,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 
-import com.datastax.driver.core.BatchStatement;
+import com.khulnasoft.driver.core.BatchStatement;
 import io.netty.buffer.Unpooled;
 import net.openhft.chronicle.core.io.IORuntimeException;
 import net.openhft.chronicle.wire.ReadMarshallable;
@@ -61,7 +61,7 @@ public class FQLQueryReader implements ReadMarshallable
         int protocolVersion = wireIn.read(PROTOCOL_VERSION).int32();
         QueryOptions queryOptions = QueryOptions.codec.decode(Unpooled.wrappedBuffer(wireIn.read(QUERY_OPTIONS).bytes()), ProtocolVersion.decode(protocolVersion, true));
         long generatedTimestamp = wireIn.read(GENERATED_TIMESTAMP).int64();
-        long generatedNowInSeconds = wireIn.read(GENERATED_NOW_IN_SECONDS).int64();
+        int generatedNowInSeconds = wireIn.read(GENERATED_NOW_IN_SECONDS).int32();
         String keyspace = wireIn.read(KEYSPACE).text();
 
         switch (type)

@@ -19,13 +19,18 @@ package org.apache.cassandra.db.compaction.writers;
 
 import java.util.Set;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Directories;
+import org.apache.cassandra.db.compaction.CompactionRealm;
+import org.apache.cassandra.db.compaction.CompactionSSTable;
+import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.db.compaction.LeveledManifest;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
-import org.apache.cassandra.db.rows.UnfilteredRowIterator;
-import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.SSTableWriter;
+import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 
 public class MajorLeveledCompactionWriter extends CompactionAwareWriter
 {
@@ -38,34 +43,35 @@ public class MajorLeveledCompactionWriter extends CompactionAwareWriter
     private final long keysPerSSTable;
     private final int levelFanoutSize;
 
-    public MajorLeveledCompactionWriter(ColumnFamilyStore cfs,
+    public MajorLeveledCompactionWriter(CompactionRealm realm,
                                         Directories directories,
                                         LifecycleTransaction txn,
                                         Set<SSTableReader> nonExpiredSSTables,
                                         long maxSSTableSize)
     {
-        this(cfs, directories, txn, nonExpiredSSTables, maxSSTableSize, false);
+        this(realm, directories, txn, nonExpiredSSTables, maxSSTableSize, false);
     }
 
-    public MajorLeveledCompactionWriter(ColumnFamilyStore cfs,
+    @SuppressWarnings("resource")
+    public MajorLeveledCompactionWriter(CompactionRealm realm,
                                         Directories directories,
                                         LifecycleTransaction txn,
                                         Set<SSTableReader> nonExpiredSSTables,
                                         long maxSSTableSize,
                                         boolean keepOriginals)
     {
-        super(cfs, directories, txn, nonExpiredSSTables, keepOriginals);
+        super(realm, directories, txn, nonExpiredSSTables, keepOriginals);
         this.maxSSTableSize = maxSSTableSize;
-        this.levelFanoutSize = cfs.getLevelFanoutSize();
-        long estimatedSSTables = Math.max(1, SSTableReader.getTotalBytes(nonExpiredSSTables) / maxSSTableSize);
+        this.levelFanoutSize = realm.getLevelFanoutSize();
+        long estimatedSSTables = Math.max(1, CompactionSSTable.getTotalBytes(nonExpiredSSTables) / maxSSTableSize);
         keysPerSSTable = estimatedTotalKeys / estimatedSSTables;
     }
 
     @Override
-    public boolean realAppend(UnfilteredRowIterator partition)
+    public boolean append(UnfilteredRowIterator partition)
     {
         partitionsWritten++;
-        return super.realAppend(partition);
+        return super.append(partition);
     }
 
     @Override
@@ -95,14 +101,20 @@ public class MajorLeveledCompactionWriter extends CompactionAwareWriter
         super.switchCompactionWriter(location, nextKey);
     }
 
-    protected int sstableLevel()
+    @Override
+    @SuppressWarnings("resource")
+    protected SSTableWriter sstableWriter(Directories.DataDirectory directory, Token diskBoundary)
     {
-        return currentLevel;
-    }
-
-    protected long sstableKeyCount()
-    {
-        return keysPerSSTable;
+        return SSTableWriter.create(realm.newSSTableDescriptor(getDirectories().getLocationForDisk(directory)),
+                                    keysPerSSTable,
+                                    minRepairedAt,
+                                    pendingRepair,
+                                    isTransient,
+                                    realm.metadataRef(),
+                                    new MetadataCollector(txn.originals(), realm.metadata().comparator, currentLevel),
+                                    SerializationHeader.make(realm.metadata(), txn.originals()),
+                                    realm.getIndexManager().listIndexGroups(),
+                                    txn);
     }
 
     @Override

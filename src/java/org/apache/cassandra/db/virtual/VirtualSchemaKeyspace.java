@@ -29,7 +29,6 @@ import org.apache.cassandra.schema.TableMetadata;
 
 import static org.apache.cassandra.schema.SchemaConstants.VIRTUAL_SCHEMA;
 import static org.apache.cassandra.schema.TableMetadata.builder;
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 
 public final class VirtualSchemaKeyspace extends VirtualKeyspace
 {
@@ -137,9 +136,9 @@ public final class VirtualSchemaKeyspace extends VirtualKeyspace
                     for (ColumnMetadata column : table.columns())
                     {
                         result.row(column.ksName, column.cfName, column.name.toString())
-                              .column(CLUSTERING_ORDER, toLowerCaseLocalized(column.clusteringOrder().toString()))
+                              .column(CLUSTERING_ORDER, column.clusteringOrder().toString().toLowerCase())
                               .column(COLUMN_NAME_BYTES, column.name.bytes)
-                              .column(KIND, toLowerCaseLocalized(column.kind.toString()))
+                              .column(KIND, column.kind.toString().toLowerCase())
                               .column(POSITION, column.position())
                               .column(TYPE, column.type.asCQL3Type().toString());
                     }

@@ -222,7 +222,7 @@ public class ErrorMessage extends Message.Response
                         {
                             for (Map.Entry<InetAddressAndPort, RequestFailureReason> entry : rfe.failureReasonByEndpoint.entrySet())
                             {
-                                CBUtil.writeInetAddr(entry.getKey().getAddress(), dest);
+                                CBUtil.writeInetAddr(entry.getKey().address, dest);
                                 dest.writeShort(entry.getValue().code);
                             }
                         }
@@ -302,7 +302,7 @@ public class ErrorMessage extends Message.Response
                         {
                             for (Map.Entry<InetAddressAndPort, RequestFailureReason> entry : rfe.failureReasonByEndpoint.entrySet())
                             {
-                                size += CBUtil.sizeOfInetAddr(entry.getKey().getAddress());
+                                size += CBUtil.sizeOfInetAddr(entry.getKey().address);
                                 size += 2; // RequestFailureReason code
                             }
                         }

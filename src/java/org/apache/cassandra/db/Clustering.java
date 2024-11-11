@@ -22,7 +22,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
 
-import org.apache.cassandra.cache.IMeasurableMemory;
 import org.apache.cassandra.db.marshal.ByteArrayAccessor;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
@@ -35,7 +34,7 @@ import org.apache.cassandra.utils.memory.ByteBufferCloner;
 
 import static org.apache.cassandra.db.AbstractBufferClusteringPrefix.EMPTY_VALUES_ARRAY;
 
-public interface Clustering<V> extends ClusteringPrefix<V>, IMeasurableMemory
+public interface Clustering<V> extends ClusteringPrefix<V>
 {
     public static final Serializer serializer = new Serializer();
 
@@ -85,7 +84,7 @@ public interface Clustering<V> extends ClusteringPrefix<V>, IMeasurableMemory
         for (int i = 0; i < size(); i++)
         {
             ColumnMetadata c = metadata.clusteringColumns().get(i);
-            sb.append(i == 0 ? "" : ", ").append(c.type.toCQLString(bufferAt(i)));
+            sb.append(i == 0 ? "" : ", ").append(c.type.getString(get(i), accessor()));
         }
         return sb.toString();
     }

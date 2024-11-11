@@ -155,7 +155,6 @@ public class NativeClustering implements Clustering<ByteBuffer>
         return ClusteringPrefix.equals(this, o);
     }
 
-    @Override
     public ClusteringPrefix<ByteBuffer> retainable()
     {
         assert kind() == Kind.CLUSTERING; // tombstones are never stored natively

@@ -23,17 +23,21 @@ import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Directories;
+import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.compaction.CompactionRealm;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.SSTableWriter;
+import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 
 /**
  * CompactionAwareWriter that splits input in differently sized sstables
  *
  * Biggest sstable will be total_compaction_size / 2, second biggest total_compaction_size / 4 etc until
- * the result would be sub 50MiB, all those are put in the same
+ * the result would be sub 50MB, all those are put in the same
  */
 public class SplittingSizeTieredCompactionWriter extends CompactionAwareWriter
 {
@@ -46,16 +50,16 @@ public class SplittingSizeTieredCompactionWriter extends CompactionAwareWriter
     private long currentBytesToWrite;
     private int currentRatioIndex = 0;
 
-    public SplittingSizeTieredCompactionWriter(ColumnFamilyStore cfs, Directories directories, LifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables)
+    public SplittingSizeTieredCompactionWriter(CompactionRealm realm, Directories directories, LifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables)
     {
-        this(cfs, directories, txn, nonExpiredSSTables, DEFAULT_SMALLEST_SSTABLE_BYTES);
+        this(realm, directories, txn, nonExpiredSSTables, DEFAULT_SMALLEST_SSTABLE_BYTES);
     }
 
-    public SplittingSizeTieredCompactionWriter(ColumnFamilyStore cfs, Directories directories, LifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables, long smallestSSTable)
+    public SplittingSizeTieredCompactionWriter(CompactionRealm realm, Directories directories, LifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables, long smallestSSTable)
     {
-        super(cfs, directories, txn, nonExpiredSSTables, false);
+        super(realm, directories, txn, nonExpiredSSTables, false);
         this.allSSTables = txn.originals();
-        totalSize = cfs.getExpectedCompactedFileSize(nonExpiredSSTables, txn.opType());
+        totalSize = realm.getExpectedCompactedFileSize(nonExpiredSSTables, txn.opType());
         double[] potentialRatios = new double[20];
         double currentRatio = 1;
         for (int i = 0; i < potentialRatios.length; i++)
@@ -65,7 +69,7 @@ public class SplittingSizeTieredCompactionWriter extends CompactionAwareWriter
         }
 
         int noPointIndex = 0;
-        // find how many sstables we should create - 50MiB min sstable size
+        // find how many sstables we should create - 50MB min sstable size
         for (double ratio : potentialRatios)
         {
             noPointIndex++;
@@ -91,16 +95,22 @@ public class SplittingSizeTieredCompactionWriter extends CompactionAwareWriter
         return false;
     }
 
-    protected int sstableLevel()
-    {
-        return 0;
-    }
-
-    protected long sstableKeyCount()
+    @Override
+    protected SSTableWriter sstableWriter(Directories.DataDirectory directory, Token diskBoundary)
     {
         long currentPartitionsToWrite = Math.round(ratios[currentRatioIndex] * estimatedTotalKeys);
         logger.trace("Switching writer, currentPartitionsToWrite = {}", currentPartitionsToWrite);
-        return currentPartitionsToWrite;
+
+        return SSTableWriter.create(realm.newSSTableDescriptor(getDirectories().getLocationForDisk(directory)),
+                                    currentPartitionsToWrite,
+                                    minRepairedAt,
+                                    pendingRepair,
+                                    isTransient,
+                                    realm.metadataRef(),
+                                    new MetadataCollector(allSSTables, realm.metadata().comparator, 0),
+                                    SerializationHeader.make(realm.metadata(), nonExpiredSSTables),
+                                    realm.getIndexManager().listIndexGroups(),
+                                    txn);
     }
 
     @Override

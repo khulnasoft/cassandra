@@ -62,16 +62,15 @@ import com.google.common.collect.Sets;
 import com.google.common.collect.Sets.SetView;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.airlift.airline.Arguments;
 import io.airlift.airline.Cli;
 import io.airlift.airline.Command;
 import io.airlift.airline.Help;
 import io.airlift.airline.HelpOption;
 import io.airlift.airline.Option;
-import org.apache.cassandra.config.YamlConfigurationLoader;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileInputStreamPlus;
-import org.apache.cassandra.utils.JsonUtils;
 import org.yaml.snakeyaml.DumperOptions;
 import org.yaml.snakeyaml.TypeDescription;
 import org.yaml.snakeyaml.Yaml;
@@ -134,6 +133,7 @@ public class JMXTool
             {
                 void dump(OutputStream output, Map<String, Info> map)
                 {
+                    @SuppressWarnings("resource")
                     // output should be released by caller
                     PrintStream out = toPrintStream(output);
                     for (Map.Entry<String, Info> e : map.entrySet())
@@ -158,14 +158,15 @@ public class JMXTool
             {
                 void dump(OutputStream output, Map<String, Info> map) throws IOException
                 {
-                    JsonUtils.JSON_OBJECT_PRETTY_WRITER.writeValue(output, map);
+                    ObjectMapper mapper = new ObjectMapper();
+                    mapper.writeValue(output, map);
                 }
             },
             yaml
             {
                 void dump(OutputStream output, Map<String, Info> map) throws IOException
                 {
-                    Representer representer = new Representer(new DumperOptions());
+                    Representer representer = new Representer();
                     representer.addClassTag(Info.class, Tag.MAP); // avoid the auto added tag
                     Yaml yaml = new Yaml(representer);
                     yaml.dump(map, new OutputStreamWriter(output));
@@ -303,8 +304,7 @@ public class JMXTool
                 DiffResult<Operation> operations = diff(leftInfo.operationSet(), rightInfo.operationSet(), operation -> {
                     for (CliPattern p : excludeOperations)
                     {
-                        if (p.pattern.matcher(operation.name).matches() ||
-                            p.pattern.matcher(operation.toString().replaceAll(" +", "")).matches())
+                        if (p.pattern.matcher(operation.name).matches())
                             return false;
                     }
                     return true;
@@ -368,20 +368,27 @@ public class JMXTool
             }
         }
 
+        private static final org.yaml.snakeyaml.LoaderOptions LOADER_CONFIG = new org.yaml.snakeyaml.LoaderOptions();
+        {
+            // Set the max yaml file size to 30 mb.
+            LOADER_CONFIG.setCodePointLimit(31_457_280);
+        }
+
         public enum Format
         {
             json
             {
                 Map<String, Info> load(InputStream input) throws IOException
                 {
-                    return JsonUtils.JSON_OBJECT_MAPPER.readValue(input, new TypeReference<Map<String, Info>>() {});
+                    ObjectMapper mapper = new ObjectMapper();
+                    return mapper.readValue(input, new TypeReference<Map<String, Info>>() {});
                 }
             },
             yaml
             {
                 Map<String, Info> load(InputStream input) throws IOException
                 {
-                    Yaml yaml = new Yaml(new CustomConstructor());
+                    Yaml yaml = new Yaml(new CustomConstructor(), new Representer(), new DumperOptions(), LOADER_CONFIG);
                     return (Map<String, Info>) yaml.load(input);
                 }
             };
@@ -396,7 +403,8 @@ public class JMXTool
 
             public CustomConstructor()
             {
-                super(YamlConfigurationLoader.getDefaultLoaderOptions());
+                super(LOADER_CONFIG);
+
                 this.rootTag = new Tag(ROOT);
                 this.addTypeDescription(INFO_TYPE);
             }

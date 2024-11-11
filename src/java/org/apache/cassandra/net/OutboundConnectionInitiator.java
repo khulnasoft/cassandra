@@ -21,16 +21,8 @@ package org.apache.cassandra.net;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.channels.ClosedChannelException;
-import java.security.cert.Certificate;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
-
-import com.google.common.annotations.VisibleForTesting;
-
-import io.netty.util.concurrent.Future; //checkstyle: permit this import
-import io.netty.util.concurrent.Promise; //checkstyle: permit this import
-import org.apache.cassandra.config.EncryptionOptions;
-import org.apache.cassandra.utils.concurrent.AsyncPromise;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,30 +45,25 @@ import io.netty.handler.logging.LoggingHandler;
 import io.netty.handler.ssl.SslClosedEngineException;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslHandler;
+import io.netty.util.concurrent.FailedFuture;
+import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.Promise;
 import io.netty.util.concurrent.ScheduledFuture;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.net.HandshakeProtocol.Initiate;
 import org.apache.cassandra.net.OutboundConnectionInitiator.Result.MessagingSuccess;
 import org.apache.cassandra.net.OutboundConnectionInitiator.Result.StreamingSuccess;
-import org.apache.cassandra.security.ISslContextFactory;
 import org.apache.cassandra.security.SSLFactory;
 import org.apache.cassandra.utils.JVMStabilityInspector;
-import org.apache.cassandra.utils.concurrent.ImmediateFuture;
 import org.apache.cassandra.utils.memory.BufferPools;
 
 import static java.util.concurrent.TimeUnit.*;
-import static org.apache.cassandra.auth.IInternodeAuthenticator.InternodeConnectionDirection.OUTBOUND;
-import static org.apache.cassandra.auth.IInternodeAuthenticator.InternodeConnectionDirection.OUTBOUND_PRECONNECT;
-import static org.apache.cassandra.config.EncryptionOptions.ClientAuth.NOT_REQUIRED;
-import static org.apache.cassandra.config.EncryptionOptions.ClientAuth.OPTIONAL;
-import static org.apache.cassandra.config.EncryptionOptions.ClientAuth.REQUIRED;
-import static org.apache.cassandra.net.InternodeConnectionUtils.DISCARD_HANDLER_NAME;
-import static org.apache.cassandra.net.InternodeConnectionUtils.SSL_FACTORY_CONTEXT_DESCRIPTION;
-import static org.apache.cassandra.net.InternodeConnectionUtils.SSL_HANDLER_NAME;
-import static org.apache.cassandra.net.InternodeConnectionUtils.certificates;
+import static org.apache.cassandra.net.MessagingService.VERSION_40;
 import static org.apache.cassandra.net.HandshakeProtocol.*;
 import static org.apache.cassandra.net.ConnectionType.STREAMING;
 import static org.apache.cassandra.net.OutboundConnectionInitiator.Result.incompatible;
 import static org.apache.cassandra.net.OutboundConnectionInitiator.Result.messagingSuccess;
+import static org.apache.cassandra.net.OutboundConnectionInitiator.Result.retry;
 import static org.apache.cassandra.net.OutboundConnectionInitiator.Result.streamingSuccess;
 import static org.apache.cassandra.net.SocketFactory.*;
 
@@ -97,17 +84,16 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
     private static final Logger logger = LoggerFactory.getLogger(OutboundConnectionInitiator.class);
 
     private final ConnectionType type;
-    private final SslFallbackConnectionType sslConnectionType;
     private final OutboundConnectionSettings settings;
+    private final int requestMessagingVersion; // for pre40 nodes
     private final Promise<Result<SuccessType>> resultPromise;
     private boolean isClosed;
 
-    private OutboundConnectionInitiator(ConnectionType type, SslFallbackConnectionType sslConnectionType, OutboundConnectionSettings settings,
-                                        Promise<Result<SuccessType>> resultPromise)
+    private OutboundConnectionInitiator(ConnectionType type, OutboundConnectionSettings settings,
+                                        int requestMessagingVersion, Promise<Result<SuccessType>> resultPromise)
     {
         this.type = type;
-        this.sslConnectionType = sslConnectionType;
-
+        this.requestMessagingVersion = requestMessagingVersion;
         this.settings = settings;
         this.resultPromise = resultPromise;
     }
@@ -119,10 +105,9 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
      *
      * The returned {@code Future} is guaranteed to be completed on the supplied eventLoop.
      */
-    public static Future<Result<StreamingSuccess>> initiateStreaming(EventLoop eventLoop, OutboundConnectionSettings settings,
-                                                                     SslFallbackConnectionType sslConnectionType)
+    public static Future<Result<StreamingSuccess>> initiateStreaming(EventLoop eventLoop, OutboundConnectionSettings settings, int requestMessagingVersion)
     {
-        return new OutboundConnectionInitiator<StreamingSuccess>(STREAMING, sslConnectionType, settings, AsyncPromise.withExecutor(eventLoop))
+        return new OutboundConnectionInitiator<StreamingSuccess>(STREAMING, settings, requestMessagingVersion, new AsyncPromise<>(eventLoop))
                .initiate(eventLoop);
     }
 
@@ -133,30 +118,28 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
      *
      * The returned {@code Future} is guaranteed to be completed on the supplied eventLoop.
      */
-    static Future<Result<MessagingSuccess>> initiateMessaging(EventLoop eventLoop, ConnectionType type, SslFallbackConnectionType sslConnectionType,
-                                                              OutboundConnectionSettings settings, Promise<Result<MessagingSuccess>> result)
+    static Future<Result<MessagingSuccess>> initiateMessaging(EventLoop eventLoop, ConnectionType type, OutboundConnectionSettings settings, int requestMessagingVersion, Promise<Result<MessagingSuccess>> result)
     {
-        return new OutboundConnectionInitiator<>(type, sslConnectionType, settings, result)
+        return new OutboundConnectionInitiator<>(type, settings, requestMessagingVersion, result)
                .initiate(eventLoop);
     }
 
     private Future<Result<SuccessType>> initiate(EventLoop eventLoop)
     {
-        logger.trace("creating outbound bootstrap to {}", settings);
+        if (logger.isTraceEnabled())
+                logger.trace("creating outbound bootstrap to {}, requestVersion: {}", settings, requestMessagingVersion);
 
-        if (!settings.authenticator.authenticate(settings.to.getAddress(), settings.to.getPort(), null, OUTBOUND_PRECONNECT))
+        if (!settings.authenticate())
         {
             // interrupt other connections, so they must attempt to re-authenticate
             MessagingService.instance().interruptOutbound(settings.to);
-            logger.error("Authentication failed to " + settings.connectToId());
-            return ImmediateFuture.failure(new IOException("Authentication failed to " + settings.connectToId()));
+            return new FailedFuture<>(eventLoop, new IOException("authentication failed to " + settings.connectToId()));
         }
-
 
         // this is a bit ugly, but is the easiest way to ensure that if we timeout we can propagate a suitable error message
         // and still guarantee that, if on timing out we raced with success, the successfully created channel is handled
         AtomicBoolean timedout = new AtomicBoolean();
-        io.netty.util.concurrent.Future<Void> bootstrap = createBootstrap(eventLoop)
+        Future<Void> bootstrap = createBootstrap(eventLoop)
                                  .connect()
                                  .addListener(future -> {
                                      eventLoop.execute(() -> {
@@ -164,8 +147,7 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
                                          {
                                              if (future.isCancelled() && !timedout.get())
                                                  resultPromise.cancel(true);
-                                             else if (future.isCancelled())
-                                                 resultPromise.tryFailure(new IOException("Timeout handshaking with " + settings.connectToId()));
+                                             else if (future.isCancelled()) resultPromise.tryFailure(new IOException("Timeout handshaking with " + settings.connectToId()));
                                              else
                                                  resultPromise.tryFailure(future.cause());
                                          }
@@ -204,16 +186,8 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
             bootstrap.option(ChannelOption.SO_SNDBUF, settings.socketSendBufferSizeInBytes);
 
         InetAddressAndPort remoteAddress = settings.connectTo;
-        bootstrap.remoteAddress(new InetSocketAddress(remoteAddress.getAddress(), remoteAddress.getPort()));
+        bootstrap.remoteAddress(new InetSocketAddress(remoteAddress.address, remoteAddress.port));
         return bootstrap;
-    }
-
-    public enum SslFallbackConnectionType
-    {
-        SERVER_CONFIG, // Original configuration of the server
-        MTLS,
-        SSL,
-        NO_SSL
     }
 
     private class Initializer extends ChannelInitializer<SocketChannel>
@@ -222,20 +196,18 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
         {
             ChannelPipeline pipeline = channel.pipeline();
 
-            // order of handlers: ssl -> server-authentication -> logger -> handshakeHandler
-            if ((sslConnectionType == SslFallbackConnectionType.SERVER_CONFIG && settings.withEncryption())
-                || sslConnectionType == SslFallbackConnectionType.SSL || sslConnectionType == SslFallbackConnectionType.MTLS)
+            // order of handlers: ssl -> logger -> handshakeHandler
+            if (settings.withEncryption())
             {
-                SslContext sslContext = getSslContext(sslConnectionType);
+                // check if we should actually encrypt this connection
+                SslContext sslContext = SSLFactory.getOrCreateSslContext(settings.encryption, true, SSLFactory.SocketType.CLIENT);
                 // for some reason channel.remoteAddress() will return null
                 InetAddressAndPort address = settings.to;
-                InetSocketAddress peer = settings.encryption.require_endpoint_verification ? new InetSocketAddress(address.getAddress(), address.getPort()) : null;
+                InetSocketAddress peer = settings.encryption.require_endpoint_verification ? new InetSocketAddress(address.address, address.port) : null;
                 SslHandler sslHandler = newSslHandler(channel, sslContext, peer);
-                if (logger.isTraceEnabled())
-                    logger.trace("creating outbound netty SslContext: context={}, engine={}", sslContext.getClass().getName(), sslHandler.engine().getClass().getName());
-                pipeline.addFirst(SSL_HANDLER_NAME, sslHandler);
+                logger.trace("creating outbound netty SslContext: context={}, engine={}", sslContext.getClass().getName(), sslHandler.engine().getClass().getName());
+                pipeline.addFirst("ssl", sslHandler);
             }
-            pipeline.addLast("server-authentication", new ServerAuthenticationHandler(settings));
 
             if (WIRETRACE)
                 pipeline.addLast("logger", new LoggingHandler(LogLevel.INFO));
@@ -243,63 +215,6 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
             pipeline.addLast("handshake", new Handler());
         }
 
-        private SslContext getSslContext(SslFallbackConnectionType connectionType) throws IOException
-        {
-            EncryptionOptions.ClientAuth requireClientAuth = NOT_REQUIRED;
-            if (connectionType == SslFallbackConnectionType.MTLS )
-            {
-                requireClientAuth = REQUIRED;
-            }
-            else if(connectionType == SslFallbackConnectionType.SSL)
-            {
-                requireClientAuth = OPTIONAL;
-            }
-            else if (connectionType == SslFallbackConnectionType.SERVER_CONFIG)
-            {
-                requireClientAuth = settings.withEncryption() ? REQUIRED: NOT_REQUIRED;
-            }
-            return SSLFactory.getOrCreateSslContext(settings.encryption, requireClientAuth, ISslContextFactory.SocketType.CLIENT, SSL_FACTORY_CONTEXT_DESCRIPTION);
-        }
-
-    }
-
-    /**
-     * Authenticates the server before an outbound connection is established. If a connection is SSL based connection
-     * Server's identity is verified during ssl handshake using root certificate in truststore. One may choose to ignore
-     * outbound authentication or perform required authentication for outbound connections in the implementation
-     * of IInternodeAuthenticator interface.
-     */
-    @VisibleForTesting
-    static class ServerAuthenticationHandler extends ByteToMessageDecoder
-    {
-        final OutboundConnectionSettings settings;
-
-        ServerAuthenticationHandler(OutboundConnectionSettings settings)
-        {
-            this.settings = settings;
-        }
-
-        @Override
-        protected void decode(ChannelHandlerContext channelHandlerContext, ByteBuf byteBuf, List<Object> list) throws Exception
-        {
-            // Extract certificates from SSL handler(handler with name "ssl").
-            final Certificate[] certificates = certificates(channelHandlerContext.channel());
-            if (!settings.authenticator.authenticate(settings.to.getAddress(), settings.to.getPort(), certificates, OUTBOUND))
-            {
-                // interrupt other connections, so they must attempt to re-authenticate
-                MessagingService.instance().interruptOutbound(settings.to);
-                logger.error("Authentication failed to " + settings.connectToId());
-
-                // To release all the pending buffered data, replace authentication handler with discard handler.
-                // This avoids pending inbound data to be fired through the pipeline
-                channelHandlerContext.pipeline().replace(this, DISCARD_HANDLER_NAME, new InternodeConnectionUtils.ByteBufDiscardHandler());
-                channelHandlerContext.pipeline().close();
-            }
-            else
-            {
-                channelHandlerContext.pipeline().remove(this);
-            }
-        }
     }
 
     private class Handler extends ByteToMessageDecoder
@@ -312,13 +227,15 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
          * containing the streaming protocol version, is all that is required.
          */
         @Override
-        public void channelActive(final ChannelHandlerContext ctx) throws Exception
+        public void channelActive(final ChannelHandlerContext ctx)
         {
-            Initiate msg = new Initiate(settings.acceptVersions, type, settings.framing, settings.from);
+            Initiate msg = new Initiate(requestMessagingVersion, settings.acceptVersions, type, settings.framing, settings.from);
             logger.trace("starting handshake with peer {}, msg = {}", settings.connectToId(), msg);
-
             AsyncChannelPromise.writeAndFlush(ctx, msg.encode(),
-                      future -> { if (!future.isSuccess()) exceptionCaught(ctx, future.cause()); });
+                  future -> { if (!future.isSuccess()) exceptionCaught(ctx, future.cause()); });
+
+            if (type.isStreaming() && requestMessagingVersion < VERSION_40)
+                ctx.pipeline().remove(this);
 
             ctx.fireChannelActive();
         }
@@ -339,13 +256,12 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
          * do *not* send out the third message of the internode messaging handshake.
          * We will reconnect on the appropriate protocol version.
          */
-        @SuppressWarnings("unchecked")
         @Override
         protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out)
         {
             try
             {
-                Accept msg = Accept.maybeDecode(in);
+                Accept msg = Accept.maybeDecode(in, requestMessagingVersion);
                 if (msg == null)
                     return;
 
@@ -355,35 +271,70 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
 
                 FrameEncoder frameEncoder = null;
                 Result<SuccessType> result;
-                assert useMessagingVersion > 0;
-
-                if (useMessagingVersion < settings.acceptVersions.min || useMessagingVersion > settings.acceptVersions.max)
+                if (useMessagingVersion > 0)
                 {
-                    result = incompatible(useMessagingVersion, peerMessagingVersion);
-                }
-                else
-                {
-                    // This is a bit ugly
-                    if (type.isMessaging())
+                    if (useMessagingVersion < settings.acceptVersions.min || useMessagingVersion > settings.acceptVersions.max)
                     {
-                        switch (settings.framing)
-                        {
-                            case LZ4:
-                                frameEncoder = FrameEncoderLZ4.fastInstance;
-                                break;
-                            case CRC:
-                                frameEncoder = FrameEncoderCrc.instance;
-                                break;
-                            case UNPROTECTED:
-                                frameEncoder = FrameEncoderUnprotected.instance;
-                                break;
-                        }
-
-                        result = (Result<SuccessType>) messagingSuccess(ctx.channel(), useMessagingVersion, frameEncoder.allocator());
+                        result = incompatible(useMessagingVersion, peerMessagingVersion);
                     }
                     else
                     {
-                        result = (Result<SuccessType>) streamingSuccess(ctx.channel(), useMessagingVersion);
+                        // This is a bit ugly
+                        if (type.isMessaging())
+                        {
+                            switch (settings.framing)
+                            {
+                                case LZ4:
+                                    frameEncoder = FrameEncoderLZ4.fastInstance;
+                                    break;
+                                case CRC:
+                                    frameEncoder = FrameEncoderCrc.instance;
+                                    break;
+                                case UNPROTECTED:
+                                    frameEncoder = FrameEncoderUnprotected.instance;
+                                    break;
+                            }
+
+                            result = (Result<SuccessType>) messagingSuccess(ctx.channel(), useMessagingVersion, frameEncoder.allocator());
+                        }
+                        else
+                        {
+                            result = (Result<SuccessType>) streamingSuccess(ctx.channel(), useMessagingVersion);
+                        }
+                    }
+                }
+                else
+                {
+                    assert type.isMessaging();
+
+                    // pre40 handshake responses only (can be a post40 node)
+                    if (peerMessagingVersion == requestMessagingVersion
+                        || peerMessagingVersion > settings.acceptVersions.max) // this clause is for impersonating 3.0 node in testing only
+                    {
+                        switch (settings.framing)
+                        {
+                            case CRC:
+                            case UNPROTECTED:
+                                frameEncoder = FrameEncoderLegacy.instance;
+                                break;
+                            case LZ4:
+                                frameEncoder = FrameEncoderLegacyLZ4.instance;
+                                break;
+                        }
+
+                        result = (Result<SuccessType>) messagingSuccess(ctx.channel(), requestMessagingVersion, frameEncoder.allocator());
+                    }
+                    else if (peerMessagingVersion < settings.acceptVersions.min)
+                        result = incompatible(-1, peerMessagingVersion);
+                    else
+                        result = retry(peerMessagingVersion);
+
+                    if (result.isSuccess())
+                    {
+                        // Third handshake message carries PV 10 rather than PV 100.
+                        // Note that CC -> CC handshake doesn't use thrid message at all.
+                        ConfirmOutboundPre40 message = new ConfirmOutboundPre40(settings.acceptVersions.min, settings.from);
+                        AsyncChannelPromise.writeAndFlush(ctx, message.encode());
                     }
                 }
 

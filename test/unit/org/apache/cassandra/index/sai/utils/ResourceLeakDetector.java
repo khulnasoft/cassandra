@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.index.sai.utils;
 
+import java.lang.annotation.Annotation;
 import java.util.List;
 
 import org.junit.rules.TestRule;
@@ -25,6 +26,7 @@ import org.junit.runner.Description;
 import org.junit.runners.model.Statement;
 
 import com.carrotsearch.randomizedtesting.rules.StatementAdapter;
+import com.carrotsearch.randomizedtesting.rules.TestRuleAdapter;
 import org.apache.cassandra.inject.Injections;
 import org.apache.cassandra.inject.InvokePointBuilder;
 
@@ -41,26 +43,30 @@ public class ResourceLeakDetector implements TestRule
     @Override
     public Statement apply(Statement statement, Description description)
     {
-        return new StatementAdapter(statement)
+        if (isResourceLeakCheckEnabled(description))
         {
-            @Override
-            protected void before() throws Throwable
+            return new StatementAdapter(statement)
             {
-                ResourceLeakDetector.this.before();
-            }
+                @Override
+                protected void before() throws Throwable
+                {
+                    ResourceLeakDetector.this.before();
+                }
 
-            @Override
-            protected void afterAlways(List<Throwable> errors)
-            {
-                ResourceLeakDetector.this.afterAlways();
-            }
+                @Override
+                protected void afterAlways(List<Throwable> errors) throws Throwable
+                {
+                    ResourceLeakDetector.this.afterAlways(errors);
+                }
 
-            @Override
-            protected void afterIfSuccessful()
-            {
-                ResourceLeakDetector.this.afterIfSuccessful();
-            }
-        };
+                @Override
+                protected void afterIfSuccessful() throws Throwable
+                {
+                    ResourceLeakDetector.this.afterIfSuccessful();
+                }
+            };
+        }
+        return statement;
     }
 
     protected void before() throws Throwable
@@ -68,14 +74,25 @@ public class ResourceLeakDetector implements TestRule
         Injections.inject(RESOURCE_LEAK_COUNTER);
     }
 
-    protected void afterIfSuccessful()
+    protected void afterIfSuccessful() throws Throwable
     {
         assertEquals("Resource leaks were detected during this test. Add -Dcassandra.debugrefcount=true to analyze the leaks", 0, RESOURCE_LEAK_COUNTER.get());
     }
 
-    protected void afterAlways()
+    protected void afterAlways(List<Throwable> errors) throws Throwable
     {
         Injections.deleteAll();
         RESOURCE_LEAK_COUNTER.reset();
+    }
+
+    private boolean isResourceLeakCheckEnabled(Description description)
+    {
+        return !hasAnnotation(description, SuppressLeakCheck.class);
+    }
+
+    private boolean hasAnnotation(Description description, Class<? extends Annotation> annotation)
+    {
+        return ((description.getAnnotation(annotation) != null) ||
+                (description.getTestClass().getAnnotation(annotation) != null));
     }
 }

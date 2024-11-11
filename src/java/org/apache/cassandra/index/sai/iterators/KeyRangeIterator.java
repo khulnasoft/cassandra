@@ -18,63 +18,46 @@
 package org.apache.cassandra.index.sai.iterators;
 
 import java.io.Closeable;
+import java.util.Collection;
+import java.util.List;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Iterables;
 
 import org.apache.cassandra.index.sai.utils.PrimaryKey;
 import org.apache.cassandra.utils.AbstractGuavaIterator;
 
-import javax.annotation.concurrent.NotThreadSafe;
-
 /**
- * An abstract implementation of {@link AbstractGuavaIterator} that supports the building and management of
- * concatanation, union and intersection iterators.
- * <p>
  * Range iterators contain primary keys, in sorted order, with no duplicates.  They also
  * know their minimum and maximum keys, and an upper bound on the number of keys they contain.
- * <p>
- * Only certain methods are designed to be overriden.  The others are marked private or final.
  */
-@NotThreadSafe
 public abstract class KeyRangeIterator extends AbstractGuavaIterator<PrimaryKey> implements Closeable
 {
+    private static final Builder.EmptyRangeIterator EMPTY = new Builder.EmptyRangeIterator();
+
     private final PrimaryKey min, max;
     private final long count;
-    private Runnable onClose;
 
-    protected KeyRangeIterator(Builder.Statistics statistics, Runnable onClose)
+    protected KeyRangeIterator(Builder.Statistics statistics)
     {
-        this(statistics.min, statistics.max, statistics.count, onClose);
+        this(statistics.min, statistics.max, statistics.tokenCount);
     }
 
-    public KeyRangeIterator(KeyRangeIterator range, Runnable onClose)
+    public KeyRangeIterator(KeyRangeIterator range)
     {
-        this(range == null ? null : range.min,
-             range == null ? null : range.max,
-             range == null ? -1 : range.count,
-             onClose);
+        this(range == null ? null : range.min, range == null ? null : range.max, range == null ? -1 : range.count);
     }
 
     public KeyRangeIterator(PrimaryKey min, PrimaryKey max, long count)
     {
-        this(min, max, count, () -> {});
-    }
-
-    public KeyRangeIterator(PrimaryKey min, PrimaryKey max, long count, Runnable onClose)
-    {
-        boolean isComplete = min != null && max != null && count != 0;
-        boolean isEmpty = min == null && max == null && (count == 0 || count == -1);
-        Preconditions.checkArgument(isComplete || isEmpty, "Range: [%s,%s], Count: %d", min, max, count);
-
-        if (isEmpty)
-          endOfData();
+        if (min == null || max == null || count == 0)
+        {
+            assert min == null && max == null && (count == 0 || count == -1) : min + " - " + max + " " + count;
+            endOfData();
+        }
 
         this.min = min;
         this.max = max;
         this.count = count;
-        this.onClose = onClose;
     }
 
     public final PrimaryKey getMinimum()
@@ -95,76 +78,58 @@ public abstract class KeyRangeIterator extends AbstractGuavaIterator<PrimaryKey>
         return count;
     }
 
+    public final PrimaryKey nextOrNull()
+    {
+        return hasNext() ? next() : null;
+    }
+
     /**
-     * When called, this iterator's current position will
+     * When called, this iterators current position will
      * be skipped forwards until finding either:
-     *   1) an element equal to or bigger than nextKey
+     *   1) an element equal to or bigger than next
      *   2) the end of the iterator
      *
-     * @param nextKey value to skip the iterator forward until matching
+     * @param nextToken value to skip the iterator forward until matching
      */
-    public final void skipTo(PrimaryKey nextKey)
+    public final void skipTo(PrimaryKey nextToken)
     {
         if (state == State.DONE)
             return;
 
-        if (state == State.READY && next.compareTo(nextKey) >= 0)
+        if (state == State.READY && next.compareTo(nextToken) >= 0)
             return;
 
-        if (max.compareTo(nextKey) < 0)
-        {
-            endOfData();
-            return;
-        }
-
-        performSkipTo(nextKey);
+        performSkipTo(nextToken);
         state = State.NOT_READY;
     }
 
     /**
-     * Skip to nextKey.
-     * <p>
-     * That is, implementations should set up the iterator state such that
-     * calling computeNext() will return nextKey if present,
-     * or the first one after it if not present.
+     * Skip up to nextKey, but leave the internal state in a position where
+     * calling computeNext() will return nextKey or the first one after it.
      */
     protected abstract void performSkipTo(PrimaryKey nextKey);
 
-    public void setOnClose(Runnable onClose)
-    {
-        this.onClose = onClose;
-    }
-
-    @Override
-    public void close()
-    {
-        onClose.run();
-    }
-
     public static KeyRangeIterator empty()
     {
-        return EmptyRangeIterator.instance;
+        return EMPTY;
     }
 
-    private static class EmptyRangeIterator extends KeyRangeIterator
-    {
-        static final KeyRangeIterator instance = new EmptyRangeIterator();
-        EmptyRangeIterator() { super(null, null, 0, () -> {}); }
-        public PrimaryKey computeNext() { return endOfData(); }
-        protected void performSkipTo(PrimaryKey nextKey) { }
-        public void close() { }
-    }
-
-    @VisibleForTesting
     public static abstract class Builder
     {
-        protected final Statistics statistics;
-        protected final Runnable onClose;
-
-        public Builder(Statistics statistics, Runnable onClose)
+        public enum IteratorType
         {
-            this.statistics = statistics;
-            this.onClose = onClose;
+            CONCAT,
+            UNION,
+            INTERSECTION
+        }
+
+        @VisibleForTesting
+        protected final Statistics statistics;
+
+
+        public Builder(IteratorType type)
+        {
+            statistics = new Statistics(type);
         }
 
         public PrimaryKey getMinimum()
@@ -177,66 +142,189 @@ public abstract class KeyRangeIterator extends AbstractGuavaIterator<PrimaryKey>
             return statistics.max;
         }
 
-        public long getCount()
+        public long getTokenCount()
         {
-            return statistics.count;
+            return statistics.tokenCount;
         }
 
-        public Builder add(Iterable<KeyRangeIterator> ranges)
-        {
-            if (ranges == null || Iterables.isEmpty(ranges))
-                return this;
+        public abstract int rangeCount();
 
-            ranges.forEach(this::add);
-            return this;
-        }
+        public abstract Collection<KeyRangeIterator> ranges();
+
+        // Implementation takes ownership of the range iterator. If the implementation decides not to include it, such
+        // that `rangeCount` may return 0, it must close the range iterator.
+        public abstract Builder add(KeyRangeIterator range);
+
+        public abstract Builder add(List<KeyRangeIterator> ranges);
 
         public final KeyRangeIterator build()
         {
             if (rangeCount() == 0)
-            {
-                onClose.run();
-                return empty();
-            }
+                return new Builder.EmptyRangeIterator();
             else
-            {
                 return buildIterator();
-            }
         }
 
-        public abstract Builder add(KeyRangeIterator range);
-
-        public abstract int rangeCount();
-
-        public void cleanup()
+        public static class EmptyRangeIterator extends KeyRangeIterator
         {
-            onClose.run();
+            EmptyRangeIterator() { super(null, null, 0); }
+            public org.apache.cassandra.index.sai.utils.PrimaryKey computeNext() { return endOfData(); }
+            protected void performSkipTo(org.apache.cassandra.index.sai.utils.PrimaryKey nextToken) { }
+            public void close() { }
         }
 
         protected abstract KeyRangeIterator buildIterator();
 
-        public static abstract class Statistics
+        public static class Statistics
         {
-            protected PrimaryKey min, max;
-            protected long count;
+            protected final IteratorType iteratorType;
 
-            public abstract void update(KeyRangeIterator range);
+            protected org.apache.cassandra.index.sai.utils.PrimaryKey min, max;
+            protected long tokenCount;
+
+            // iterator with the least number of items
+            protected KeyRangeIterator minRange;
+            // iterator with the most number of items
+            protected KeyRangeIterator maxRange;
+
+
+            private boolean hasRange = false;
+
+            public Statistics(IteratorType iteratorType)
+            {
+                this.iteratorType = iteratorType;
+            }
+
+            /**
+             * Update statistics information with the given range.
+             *
+             * Updates min/max of the combined range, token count and
+             * tracks range with the least/most number of tokens.
+             *
+             * @param range The range to update statistics with.
+             */
+            public void update(KeyRangeIterator range)
+            {
+                switch (iteratorType)
+                {
+                    case CONCAT:
+                        // range iterators should be sorted, but previous max must not be greater than next min.
+                        if (range.getMaxKeys() > 0)
+                        {
+                            if (tokenCount == 0)
+                            {
+                                min = range.getMinimum();
+                            }
+                            else if (tokenCount > 0 && max.compareTo(range.getMinimum()) > 0)
+                            {
+                                throw new IllegalArgumentException("KeyRangeIterator must be sorted, previous max: " + max + ", next min: " + range.getMinimum());
+                            }
+
+                            max = range.getMaximum();
+                        }
+                        tokenCount += range.getMaxKeys();
+                        break;
+
+                    case UNION:
+                        min = nullSafeMin(min, range.getMinimum());
+                        max = nullSafeMax(max, range.getMaximum());
+                        tokenCount += range.getMaxKeys();
+                        break;
+
+                    case INTERSECTION:
+                        // minimum of the intersection is the biggest minimum of individual iterators
+                        min = nullSafeMax(min, range.getMinimum());
+                        // maximum of the intersection is the smallest maximum of individual iterators
+                        max = nullSafeMin(max, range.getMaximum());
+                        if (hasRange)
+                            tokenCount = Math.min(tokenCount, range.getMaxKeys());
+                        else
+                            tokenCount = range.getMaxKeys();
+
+                        break;
+
+                    default:
+                        throw new IllegalStateException("Unknown iterator type: " + iteratorType);
+                }
+
+                minRange = minRange == null ? range : min(minRange, range);
+                maxRange = maxRange == null ? range : max(maxRange, range);
+
+                hasRange = true;
+            }
+
+            private KeyRangeIterator min(KeyRangeIterator a, KeyRangeIterator b)
+            {
+                return a.getMaxKeys() > b.getMaxKeys() ? b : a;
+            }
+
+            private KeyRangeIterator max(KeyRangeIterator a, KeyRangeIterator b)
+            {
+                return a.getMaxKeys() > b.getMaxKeys() ? a : b;
+            }
+
+            /**
+             * Returns true if the final range is not going to produce any results,
+             * so we can cleanup range storage and never added anything to it.
+             */
+            public boolean isEmptyOrDisjoint()
+            {
+                // max < min if intersected ranges are disjoint
+                return tokenCount == 0 || min.compareTo(max) > 0;
+            }
+
+            public double sizeRatio()
+            {
+                return minRange.getMaxKeys() * 1d / maxRange.getMaxKeys();
+            }
         }
     }
 
-    protected static PrimaryKey nullSafeMin(PrimaryKey a, PrimaryKey b)
+    @VisibleForTesting
+    protected static <U extends Comparable<U>> boolean isOverlapping(KeyRangeIterator a, KeyRangeIterator b)
     {
-        if (a == null) return b;
-        if (b == null) return a;
-
-        return a.compareToStrict(b) > 0 ? b : a;
+        return isOverlapping(a.peek(), a.getMaximum(), b);
     }
 
-    protected static PrimaryKey nullSafeMax(PrimaryKey a, PrimaryKey b)
+    /**
+     * Ranges are overlapping the following cases:
+     *
+     *   * When they have a common subrange:
+     *
+     *   min       b.current      max          b.max
+     *   +---------|--------------+------------|
+     *
+     *   b.current      min       max          b.max
+     *   |--------------+---------+------------|
+     *
+     *   min        b.current     b.max        max
+     *   +----------|-------------|------------+
+     *
+     *
+     *  If either range is empty, they're disjoint.
+     */
+    @VisibleForTesting
+    protected static boolean isOverlapping(PrimaryKey min, PrimaryKey max, KeyRangeIterator b)
+    {
+        return (min != null && max != null) &&
+               b.hasNext() && min.compareTo(b.getMaximum()) <= 0 && b.peek().compareTo(max) <= 0;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T extends Comparable> T nullSafeMin(T a, T b)
     {
         if (a == null) return b;
         if (b == null) return a;
 
-        return a.compareToStrict(b) > 0 ? a : b;
+        return a.compareTo(b) > 0 ? b : a;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T extends Comparable> T nullSafeMax(T a, T b)
+    {
+        if (a == null) return b;
+        if (b == null) return a;
+
+        return a.compareTo(b) > 0 ? a : b;
     }
 }

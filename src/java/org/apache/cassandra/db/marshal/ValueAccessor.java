@@ -37,8 +37,6 @@ import org.apache.cassandra.db.rows.CellPath;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.service.paxos.Ballot;
-import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.vint.VIntCoding;
 
 import static org.apache.cassandra.db.ClusteringPrefix.Kind.*;
@@ -66,10 +64,10 @@ public interface ValueAccessor<V>
      */
     public interface ObjectFactory<V>
     {
-        Cell<V> cell(ColumnMetadata column, long timestamp, int ttl, long localDeletionTime, V value, CellPath path);
+        Cell<V> cell(ColumnMetadata column, long timestamp, int ttl, int localDeletionTime, V value, CellPath path);
         Clustering<V> clustering(V... values);
         Clustering<V> clustering();
-        Clustering<V> staticClustering();
+        // Note: the static clustering is always Clustering.STATIC_CLUSTERING (of ByteBuffer accessor).
         ClusteringBound<V> bound(ClusteringPrefix.Kind kind, V... values);
         ClusteringBound<V> bound(ClusteringPrefix.Kind kind);
         ClusteringBoundary<V> boundary(ClusteringPrefix.Kind kind, V... values);
@@ -170,7 +168,7 @@ public interface ValueAccessor<V>
 
     default void writeWithVIntLength(V value, DataOutputPlus out) throws IOException
     {
-        out.writeUnsignedVInt32(size(value));
+        out.writeUnsignedVInt(size(value));
         write(value, out);
     }
 
@@ -319,35 +317,17 @@ public interface ValueAccessor<V>
     int toInt(V value);
     /** returns an int from offset {@param offset} */
     int getInt(V value, int offset);
-
-    default long getUnsignedVInt(V value, int offset)
-    {
-        return VIntCoding.getUnsignedVInt(value, this, offset);
-    }
-
     default int getUnsignedVInt32(V value, int offset)
     {
         return VIntCoding.getUnsignedVInt32(value, this, offset);
     }
-
-    default long getVInt(V value, int offset)
-    {
-        return VIntCoding.getVInt(value, this, offset);
-    }
-
-    default int getVInt32(V value, int offset)
-    {
-        return VIntCoding.getVInt32(value, this, offset);
-    }
-
-    float getFloat(V value, int offset);
-    double getDouble(V value, int offset);
     /** returns a long from offset 0 */
     long toLong(V value);
     /** returns a long from offset {@param offset} */
     long getLong(V value, int offset);
     /** returns a float from offset 0 */
     float toFloat(V value);
+    float getFloat(V value, int offset);
 
     /** returns a double from offset 0 */
     double toDouble(V value);
@@ -355,20 +335,16 @@ public interface ValueAccessor<V>
     /** returns a UUID from offset 0 */
     UUID toUUID(V value);
 
-    /** returns a TimeUUID from offset 0 */
-    TimeUUID toTimeUUID(V value);
-
-    /** returns a TimeUUID from offset 0 */
-    Ballot toBallot(V value);
-
-    /** returns a float[] from offset 0 */
-    float[] toFloatArray(V value, int dimension);
-
     /**
      * writes the byte value {@param value} to {@param dst} at offset {@param offset}
      * @return the number of bytes written to {@param value}
      */
     int putByte(V dst, int offset, byte value);
+
+    default int putBytes(V dst, int offset, byte[] src, int srcOffset, int length)
+    {
+        return ByteArrayAccessor.instance.copyTo(src, srcOffset, dst, this, offset, length);
+    }
 
     /**
      * writes the short value {@param value} to {@param dst} at offset {@param offset}
@@ -388,40 +364,9 @@ public interface ValueAccessor<V>
      */
     int putLong(V dst, int offset, long value);
 
-    /**
-     * writes the float value {@param value} to {@param dst} at offset {@param offset}
-     * @return the number of bytes written to {@param value}
-     */
-    int putFloat(V dst, int offset, float value);
-
-    default int putBytes(V dst, int offset, byte[] src, int srcOffset, int length)
-    {
-        return ByteArrayAccessor.instance.copyTo(src, srcOffset, dst, this, offset, length);
-    }
-
-    default int putBytes(V dst, int offset, byte[] src)
-    {
-        return putBytes(dst, offset, src, 0, src.length);
-    }
-
-    default int putUnsignedVInt(V dst, int offset, long value)
-    {
-        return VIntCoding.writeUnsignedVInt(value, dst, offset, this);
-    }
-
     default int putUnsignedVInt32(V dst, int offset, int value)
     {
         return VIntCoding.writeUnsignedVInt32(value, dst, offset, this);
-    }
-
-    default int putVInt(V dst, int offset, long value)
-    {
-        return VIntCoding.writeVInt(value, dst, offset, this);
-    }
-
-    default int putVInt32(V dst, int offset, int value)
-    {
-        return VIntCoding.writeVInt32(value, dst, offset, this);
     }
 
     /** return a value with a length of 0 */

@@ -20,7 +20,9 @@ package org.apache.cassandra.index.sai.cql;
 
 import java.util.Collections;
 
-import com.datastax.driver.core.exceptions.InvalidQueryException;
+import org.junit.BeforeClass;
+import org.junit.Test;
+
 import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
@@ -30,16 +32,10 @@ import org.apache.cassandra.cql3.statements.SelectStatement;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.index.sai.SAITester;
-import org.apache.cassandra.index.sai.StorageAttachedIndex;
-import org.apache.cassandra.index.sai.disk.v1.IndexWriterConfig;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.ClientWarn;
 import org.apache.cassandra.service.QueryState;
-import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.messages.ResultMessage;
-
-import org.junit.BeforeClass;
-import org.junit.Test;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.Assert.assertEquals;
@@ -63,21 +59,21 @@ public class VectorInvalidQueryTest extends SAITester
     }
 
     @Test
-    public void cannotQueryEmptyVectorColumn()
+    public void cannotIndex1DWithCosine()
+    {
+        createTable("CREATE TABLE %s (pk int, v vector<float, 1>, PRIMARY KEY(pk))");
+        assertThatThrownBy(() -> createIndex("CREATE CUSTOM INDEX ON %s(v) USING 'StorageAttachedIndex' WITH OPTIONS = {'similarity_function' : 'cosine'}"))
+                .isInstanceOf(InvalidRequestException.class)
+                .hasMessage("Cosine similarity is not supported for single-dimension vectors");
+    }
+
+    @Test
+    public void cannotQueryEmptyVectorColumn() throws Throwable
     {
         createTable("CREATE TABLE %s (pk int, str_val text, val vector<float, 3>, PRIMARY KEY(pk))");
         assertThatThrownBy(() -> execute("SELECT similarity_cosine((vector<float, 0>) [], []) FROM %s"))
         .isInstanceOf(InvalidRequestException.class)
         .hasMessage("vectors may only have positive dimensions; given 0");
-    }
-
-    @Test
-    public void cannotIndex1DWithCosine()
-    {
-        createTable("CREATE TABLE %s (pk int, v vector<float, 1>, PRIMARY KEY(pk))");
-        assertThatThrownBy(() -> createIndex("CREATE CUSTOM INDEX ON %s(v) USING 'StorageAttachedIndex' WITH OPTIONS = {'similarity_function' : 'cosine'}"))
-        .isInstanceOf(InvalidRequestException.class)
-        .hasRootCauseMessage(StorageAttachedIndex.VECTOR_1_DIMENSION_COSINE_ERROR);
     }
 
     @Test
@@ -107,19 +103,19 @@ public class VectorInvalidQueryTest extends SAITester
     }
 
     @Test
-    public void testMultiVectorOrderingsNotAllowed() throws Throwable
+    public void testMultiVectorOrderingsNotAllowed()
     {
         createTable("CREATE TABLE %s (pk int, str_val text, val1 vector<float, 3>, val2 vector<float, 3>, PRIMARY KEY(pk))");
         createIndex("CREATE CUSTOM INDEX ON %s(str_val) USING 'StorageAttachedIndex'");
         createIndex("CREATE CUSTOM INDEX ON %s(val1) USING 'StorageAttachedIndex'");
         createIndex("CREATE CUSTOM INDEX ON %s(val2) USING 'StorageAttachedIndex'");
 
-        assertInvalidMessage("Cannot specify more than one ANN ordering",
+        assertInvalidMessage("Cannot specify more than one ordering column when using SAI indexes",
                              "SELECT * FROM %s ORDER BY val1 ann of [2.5, 3.5, 4.5], val2 ann of [2.1, 3.2, 4.0] LIMIT 2");
     }
 
     @Test
-    public void testDescendingVectorOrderingIsNotAllowed() throws Throwable
+    public void testDescendingVectorOrderingIsNotAllowed()
     {
         createTable("CREATE TABLE %s (pk int, val vector<float, 3>, PRIMARY KEY(pk))");
         createIndex("CREATE CUSTOM INDEX ON %s(val) USING 'StorageAttachedIndex'");
@@ -129,53 +125,57 @@ public class VectorInvalidQueryTest extends SAITester
     }
 
     @Test
-    public void testVectorOrderingIsNotAllowedWithClusteringOrdering() throws Throwable
+    public void testVectorOrderingIsNotAllowedWithClusteringOrdering()
     {
         createTable("CREATE TABLE %s (pk int, ck int, val vector<float, 3>, PRIMARY KEY(pk, ck))");
         createIndex("CREATE CUSTOM INDEX ON %s(val) USING 'StorageAttachedIndex'");
 
-        assertInvalidMessage("ANN ordering does not support any other ordering",
+        assertInvalidMessage("Cannot combine clustering column ordering with non-clustering column ordering",
                              "SELECT * FROM %s ORDER BY val ann of [2.5, 3.5, 4.5], ck ASC LIMIT 2");
     }
 
     @Test
-    public void testVectorOrderingIsNotAllowedWithoutIndex() throws Throwable
+    public void testVectorOrderingIsNotAllowedWithoutIndex()
     {
         createTable("CREATE TABLE %s (pk int, str_val text, val vector<float, 3>, PRIMARY KEY(pk))");
 
-        assertInvalidMessage(StatementRestrictions.ANN_REQUIRES_INDEX_MESSAGE,
+        assertInvalidMessage(String.format(StatementRestrictions.NON_CLUSTER_ORDERING_REQUIRES_INDEX_MESSAGE, "val"),
                              "SELECT * FROM %s ORDER BY val ann of [2.5, 3.5, 4.5] LIMIT 5");
 
-        assertInvalidMessage(StatementRestrictions.ANN_REQUIRES_INDEX_MESSAGE,
+        assertInvalidMessage(String.format(StatementRestrictions.NON_CLUSTER_ORDERING_REQUIRES_INDEX_MESSAGE, "val"),
                              "SELECT * FROM %s ORDER BY val ann of [2.5, 3.5, 4.5] LIMIT 5 ALLOW FILTERING");
     }
 
     @Test
-    public void testInvalidColumnNameWithAnn() throws Throwable
+    public void testVectorEqualityIsNotAllowed()
     {
-        String table = createTable(KEYSPACE, "CREATE TABLE %s (k int, c int, v int, primary key (k, c))");
-        assertInvalidMessage(String.format("Undefined column name bad_col in table %s", KEYSPACE + '.' + table),
-                             "SELECT k from %s ORDER BY bad_col ANN OF [1.0] LIMIT 1");
+        createTable("CREATE TABLE %s (pk int, str_val text, val vector<float, 3>, PRIMARY KEY(pk))");
+        createIndex("CREATE CUSTOM INDEX ON %s(val) USING 'StorageAttachedIndex'");
+
+        assertInvalidMessage(StatementRestrictions.VECTOR_INDEXES_UNSUPPORTED_OP_MESSAGE,
+                             "SELECT * FROM %s WHERE val = [2.5, 3.5, 4.5] LIMIT 1");
+
+        assertInvalidMessage(StatementRestrictions.VECTOR_INDEXES_UNSUPPORTED_OP_MESSAGE,
+                             "SELECT * FROM %s WHERE val = [2.5, 3.5, 4.5]");
     }
 
     @Test
-    public void cannotPerformNonANNQueryOnVectorIndex() throws Throwable
+    public void annOrderingMustHaveLimit()
     {
         createTable("CREATE TABLE %s (pk int, ck int, val vector<float, 3>, PRIMARY KEY(pk, ck))");
         createIndex("CREATE CUSTOM INDEX ON %s(val) USING 'StorageAttachedIndex'");
 
-        assertInvalidMessage(StatementRestrictions.VECTOR_INDEXES_ANN_ONLY_MESSAGE,
-                             "SELECT * FROM %s WHERE val = [1.0, 2.0, 3.0]");
+        assertInvalidMessage("SAI based ORDER BY clause requires a LIMIT that is not greater than 1000. LIMIT was NO LIMIT",
+                             "SELECT * FROM %s ORDER BY val ann of [2.5, 3.5, 4.5]");
+
     }
 
     @Test
-    public void cannotOrderWithAnnOnNonVectorColumn() throws Throwable
+    public void testInvalidColumnNameWithAnn()
     {
-        createTable("CREATE TABLE %s (k int, v int, primary key(k))");
-        createIndex("CREATE CUSTOM INDEX ON %s(v) USING 'StorageAttachedIndex'");
-
-        assertInvalidMessage(StatementRestrictions.ANN_ONLY_SUPPORTED_ON_VECTOR_MESSAGE,
-                             "SELECT * FROM %s ORDER BY v ANN OF 1 LIMIT 1");
+        String table = createTable(KEYSPACE, "CREATE TABLE %s (k int, c int, v int, primary key (k, c))");
+        assertInvalidMessage(String.format("Undefined column name bad_col in table %s", KEYSPACE + "." + table),
+                             "SELECT k from %s ORDER BY bad_col ANN OF [1.0] LIMIT 1");
     }
 
     @Test
@@ -185,183 +185,59 @@ public class VectorInvalidQueryTest extends SAITester
         createIndex("CREATE CUSTOM INDEX ON %s(value) USING 'StorageAttachedIndex' WITH OPTIONS = {'similarity_function' : 'cosine'}");
 
         assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, [0.0, 0.0])")).isInstanceOf(InvalidRequestException.class);
-        assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, ?)", vector(0.0f, 0.0f))).isInstanceOf(InvalidRequestException.class);
-        assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, ?)", vector(1.0f, Float.NaN))).isInstanceOf(InvalidRequestException.class);
-        assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, ?)", vector(1.0f, Float.POSITIVE_INFINITY))).isInstanceOf(InvalidRequestException.class);
-        assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, ?)", vector(Float.NEGATIVE_INFINITY, 1.0f))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, ?)", vector(0, 0))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, ?)", vector(1E-6f, 1E-6f))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, ?)", vector(1, Float.NaN))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, ?)", vector(1, Float.POSITIVE_INFINITY))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, ?)", vector(Float.NEGATIVE_INFINITY, 1))).isInstanceOf(InvalidRequestException.class);
         assertThatThrownBy(() -> execute("SELECT * FROM %s ORDER BY value ann of [0.0, 0.0] LIMIT 2")).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("SELECT * FROM %s ORDER BY value ann of ? LIMIT 2", vector(0, 0))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("SELECT * FROM %s ORDER BY value ann of ? LIMIT 2", vector(1E-6f, 1E-6f))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("SELECT * FROM %s ORDER BY value ann of ? LIMIT 2", vector(1, Float.NaN))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("SELECT * FROM %s ORDER BY value ann of ? LIMIT 2", vector(1, Float.POSITIVE_INFINITY))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("SELECT * FROM %s ORDER BY value ann of ? LIMIT 2", vector(Float.NEGATIVE_INFINITY, 1))).isInstanceOf(InvalidRequestException.class);
     }
 
     @Test
-    public void mustHaveLimitSpecifiedAndWithinMaxAllowed()
+    public void disallowZeroVectorsWithDefaultSimilarity()
     {
-        createTable("CREATE TABLE %s (k int PRIMARY KEY, v vector<float, 1>)");
-        createIndex("CREATE CUSTOM INDEX ON %s(v) USING 'StorageAttachedIndex' WITH OPTIONS = {'similarity_function' : 'euclidean'}");
+        createTable(KEYSPACE, "CREATE TABLE %s (pk int primary key, value vector<float, 2>)");
+        createIndex("CREATE CUSTOM INDEX ON %s(value) USING 'StorageAttachedIndex'");
 
-        assertThatThrownBy(() -> executeNet("SELECT * FROM %s WHERE k = 1 ORDER BY v ANN OF [0]"))
-        .isInstanceOf(InvalidQueryException.class).hasMessage(SelectStatement.TOPK_LIMIT_ERROR);
-
-        assertThatThrownBy(() -> executeNet("SELECT * FROM %s WHERE k = 1 ORDER BY v ANN OF [0] LIMIT 1001"))
-        .isInstanceOf(InvalidQueryException.class).hasMessage(String.format(StorageAttachedIndex.ANN_LIMIT_ERROR, IndexWriterConfig.MAX_TOP_K, 1001));
+        assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, [0.0, 0.0])")).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, ?)", vector(0, 0))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, ?)", vector(1, Float.NaN))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, ?)", vector(1, Float.POSITIVE_INFINITY))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("INSERT INTO %s (pk, value) VALUES (0, ?)", vector(Float.NEGATIVE_INFINITY, 1))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("SELECT * FROM %s ORDER BY value ann of [0.0, 0.0] LIMIT 2")).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("SELECT * FROM %s ORDER BY value ann of ? LIMIT 2", vector(0, 0))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("SELECT * FROM %s ORDER BY value ann of ? LIMIT 2", vector(1, Float.NaN))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("SELECT * FROM %s ORDER BY value ann of ? LIMIT 2", vector(1, Float.POSITIVE_INFINITY))).isInstanceOf(InvalidRequestException.class);
+        assertThatThrownBy(() -> execute("SELECT * FROM %s ORDER BY value ann of ? LIMIT 2", vector(Float.NEGATIVE_INFINITY, 1))).isInstanceOf(InvalidRequestException.class);
     }
 
     @Test
-    public void mustHaveLimitWithinPageSize()
+    public void disallowClusteringColumnPredicateWithoutSupportingIndex()
     {
-        createTable("CREATE TABLE %s (k int PRIMARY KEY, v vector<float, 3>)");
+        createTable("CREATE TABLE %s (pk int, num int, v vector<float, 2>, PRIMARY KEY(pk, num))");
         createIndex("CREATE CUSTOM INDEX ON %s(v) USING 'StorageAttachedIndex'");
+        execute("INSERT INTO %s (pk, num, v) VALUES (3, 1, [1,1])");
+        execute("INSERT INTO %s (pk, num, v) VALUES (3, 4, [1,4])");
+        flush();
 
-        execute("INSERT INTO %s (k, v) VALUES (1, [1.0, 2.0, 3.0])");
-        execute("INSERT INTO %s (k, v) VALUES (2, [2.0, 3.0, 4.0])");
-        execute("INSERT INTO %s (k, v) VALUES (3, [3.0, 4.0, 5.0])");
+        // If we didn't have the query planner fail this query, we would get incorrect results for both queries
+        // because the clustering columns are not yet available to restrict the ANN result set.
+        assertThatThrownBy(() -> execute("SELECT num FROM %s WHERE pk=3 AND num > 3 ORDER BY v ANN OF [1,1] LIMIT 1"))
+        .isInstanceOf(InvalidRequestException.class)
+        .hasMessage(StatementRestrictions.NON_CLUSTER_ORDERING_REQUIRES_ALL_RESTRICTED_NON_PARTITION_KEY_COLUMNS_INDEXED_MESSAGE);
 
-        ClientWarn.instance.captureWarnings();
-        ResultSet result = execute("SELECT * FROM %s WHERE k = 1 ORDER BY v ANN OF [2.0, 3.0, 4.0] LIMIT 10", 9);
-        assertEquals(1, ClientWarn.instance.getWarnings().size());
-        assertEquals(String.format(SelectStatement.TOPK_PAGE_SIZE_WARNING, 9, 10, 10), ClientWarn.instance.getWarnings().get(0));
-        assertEquals(1, result.size());
+        assertThatThrownBy(() -> execute("SELECT num FROM %s WHERE pk=3 AND num = 4 ORDER BY v ANN OF [1,1] LIMIT 1"))
+        .isInstanceOf(InvalidRequestException.class)
+        .hasMessage(StatementRestrictions.NON_CLUSTER_ORDERING_REQUIRES_ALL_RESTRICTED_NON_PARTITION_KEY_COLUMNS_INDEXED_MESSAGE);
 
-        ClientWarn.instance.captureWarnings();
-        result = execute("SELECT * FROM %s WHERE k = 1 ORDER BY v ANN OF [2.0, 3.0, 4.0] LIMIT 10", 11);
-        assertNull(ClientWarn.instance.getWarnings());
-        assertEquals(1, result.size());
-    }
-
-    @Test
-    public void cannotHaveAggregationOnANNQuery()
-    {
-        createTable("CREATE TABLE %s (k int PRIMARY KEY, v vector<float, 1>, c int)");
-        createIndex("CREATE CUSTOM INDEX ON %s(v) USING 'StorageAttachedIndex' WITH OPTIONS = {'similarity_function' : 'euclidean'}");
-
-        execute("INSERT INTO %s (k, v, c) VALUES (1, [4], 1)");
-        execute("INSERT INTO %s (k, v, c) VALUES (2, [3], 10)");
-        execute("INSERT INTO %s (k, v, c) VALUES (3, [2], 100)");
-        execute("INSERT INTO %s (k, v, c) VALUES (4, [1], 1000)");
-
-        assertThatThrownBy(() -> executeNet("SELECT sum(c) FROM %s WHERE k = 1 ORDER BY v ANN OF [0] LIMIT 4"))
-        .isInstanceOf(InvalidQueryException.class).hasMessage(SelectStatement.TOPK_AGGREGATION_ERROR);
-    }
-
-    @Test
-    public void multipleVectorColumnsInQueryFailCorrectlyTest() throws Throwable
-    {
-        createTable("CREATE TABLE %s (k int PRIMARY KEY, v1 vector<float, 1>, v2 vector<float, 1>)");
-        createIndex("CREATE CUSTOM INDEX ON %s(v1) USING 'StorageAttachedIndex' WITH OPTIONS = {'similarity_function' : 'euclidean'}");
-
-        execute("INSERT INTO %s (k, v1, v2) VALUES (1, [1], [2])");
-
-        assertInvalidMessage(StatementRestrictions.ANN_REQUIRES_INDEX_MESSAGE,
-                             "SELECT * FROM %s WHERE v1 = [1] ORDER BY v2 ANN OF [2] ALLOW FILTERING");
-    }
-
-    @Test
-    public void annOrderingIsNotAllowedWithoutIndexWhereIndexedColumnExistsInQueryTest() throws Throwable
-    {
-        createTable("CREATE TABLE %s (k int PRIMARY KEY, v vector<float, 1>, c int)");
-        createIndex("CREATE CUSTOM INDEX ON %s(c) USING 'StorageAttachedIndex'");
-
-        execute("INSERT INTO %s (k, v, c) VALUES (1, [4], 1)");
-        execute("INSERT INTO %s (k, v, c) VALUES (2, [3], 10)");
-        execute("INSERT INTO %s (k, v, c) VALUES (3, [2], 100)");
-        execute("INSERT INTO %s (k, v, c) VALUES (4, [1], 1000)");
-
-        assertInvalidMessage(StatementRestrictions.ANN_REQUIRES_INDEX_MESSAGE,
-                             "SELECT * FROM %s WHERE c >= 100 ORDER BY v ANN OF [1] LIMIT 4 ALLOW FILTERING");
-    }
-
-    @Test
-    public void cannotPostFilterOnNonIndexedColumnWithAnnOrdering() throws Throwable
-    {
-        createTable("CREATE TABLE %s (pk1 int, pk2 int, ck1 int, ck2 int, v vector<float, 1>, c int, primary key ((pk1, pk2), ck1, ck2))");
-        createIndex("CREATE CUSTOM INDEX ON %s(v) USING 'StorageAttachedIndex' WITH OPTIONS = {'similarity_function' : 'euclidean'}");
-
-        execute("INSERT INTO %s (pk1, pk2, ck1, ck2, v, c) VALUES (1, 1, 1, 1, [4], 1)");
-        execute("INSERT INTO %s (pk1, pk2, ck1, ck2, v, c) VALUES (2, 2, 1, 1, [3], 10)");
-        execute("INSERT INTO %s (pk1, pk2, ck1, ck2, v, c) VALUES (3, 3, 1, 1, [2], 100)");
-        execute("INSERT INTO %s (pk1, pk2, ck1, ck2, v, c) VALUES (4, 4, 1, 1, [1], 1000)");
-
-        assertInvalidMessage(StatementRestrictions.ANN_REQUIRES_INDEXED_FILTERING_MESSAGE,
-                             "SELECT * FROM %s WHERE c >= 100 ORDER BY v ANN OF [1] LIMIT 4 ALLOW FILTERING");
-
-        assertInvalidMessage(StatementRestrictions.ANN_REQUIRES_INDEXED_FILTERING_MESSAGE,
-                             "SELECT * FROM %s WHERE ck1 >= 0 ORDER BY v ANN OF [1] LIMIT 4 ALLOW FILTERING");
-
-        assertInvalidMessage(StatementRestrictions.ANN_REQUIRES_INDEXED_FILTERING_MESSAGE,
-                             "SELECT * FROM %s WHERE ck2 = 1 ORDER BY v ANN OF [1] LIMIT 4 ALLOW FILTERING");
-
-        assertInvalidMessage(StatementRestrictions.ANN_REQUIRES_INDEXED_FILTERING_MESSAGE,
-                             "SELECT * FROM %s WHERE pk1 = 1 ORDER BY v ANN OF [1] LIMIT 4 ALLOW FILTERING");
-
-        assertInvalidMessage(StatementRestrictions.ANN_REQUIRES_INDEXED_FILTERING_MESSAGE,
-                             "SELECT * FROM %s WHERE pk2 = 1 ORDER BY v ANN OF [1] LIMIT 4 ALLOW FILTERING");
-
-        assertInvalidMessage(StatementRestrictions.ANN_REQUIRES_INDEXED_FILTERING_MESSAGE,
-                             "SELECT * FROM %s WHERE pk1 = 1 AND pk2 = 1 AND ck2 = 1 ORDER BY v ANN OF [1] LIMIT 4 ALLOW FILTERING");
-
-        assertInvalidMessage(StatementRestrictions.ANN_REQUIRES_INDEXED_FILTERING_MESSAGE,
-                             "SELECT * FROM %s WHERE token(pk1, pk2) = token(1, 1) AND ck2 = 1 ORDER BY v ANN OF [1] LIMIT 4 ALLOW FILTERING");
-    }
-
-    @Test
-    public void cannotHavePerPartitionLimitWithAnnOrdering()
-    {
-        createTable("CREATE TABLE %s (k int, c int, v vector<float, 1>, PRIMARY KEY(k, c))");
-        createIndex("CREATE CUSTOM INDEX ON %s(v) USING 'StorageAttachedIndex' WITH OPTIONS = {'similarity_function' : 'euclidean'}");
-
-        execute("INSERT INTO %s (k, c, v) VALUES (1, 1, [1])");
-        execute("INSERT INTO %s (k, c, v) VALUES (1, 2, [2])");
-        execute("INSERT INTO %s (k, c, v) VALUES (1, 3, [3])");
-
-        assertThatThrownBy(() -> executeNet("SELECT * FROM %s ORDER BY v ANN OF [2] PER PARTITION LIMIT 1 LIMIT 3"))
-            .isInstanceOf(InvalidQueryException.class).hasMessage(SelectStatement.TOPK_PARTITION_LIMIT_ERROR);
-    }
-
-    @Test
-    public void cannotCreateIndexOnNonFloatVector()
-    {
-        createTable("CREATE TABLE %s (k int PRIMARY KEY, v vector<int, 1>)");
-
-        assertThatThrownBy(() -> createIndex("CREATE CUSTOM INDEX ON %s(v) USING 'StorageAttachedIndex'"))
-            .isInstanceOf(InvalidRequestException.class).hasRootCauseMessage(StorageAttachedIndex.VECTOR_NON_FLOAT_ERROR);
-    }
-
-    @Test
-    public void canOrderWithWhereOnPrimaryColumns() throws Throwable
-    {
-        createTable("CREATE TABLE %s (a int, b int, c int, d int, v vector<float, 2>, PRIMARY KEY ((a,b),c,d))");
-        createIndex("CREATE CUSTOM INDEX ON %s(v) USING 'StorageAttachedIndex'");
-
-        execute("INSERT INTO %s (a, b, c, d, v) VALUES (1, 2, 1, 2, [6.0,1.0])");
-
-        assertThatThrownBy(() -> executeNet("SELECT * FROM %s WHERE v > [5.0,1.0] ORDER BY v ANN OF [2.0,1.0] LIMIT 1"))
-            .isInstanceOf(InvalidQueryException.class).hasMessage("v cannot be restricted by more than one relation in an ANN ordering");
-
-        ResultSet result = execute("SELECT * FROM %s WHERE a = 1 AND b = 2 ORDER BY v ANN OF [2.0,1.0] LIMIT 1", ConsistencyLevel.ONE);
-        assertEquals(1, result.size());
-        result = execute("SELECT * FROM %s WHERE a = 1 AND b = 2 AND c = 1 ORDER BY v ANN OF [2.0,1.0] LIMIT 1", ConsistencyLevel.ONE);
-        assertEquals(1, result.size());
-        result = execute("SELECT * FROM %s WHERE a = 1 AND b = 2 AND c = 1 AND d = 2 ORDER BY v ANN OF [2.0,1.0] LIMIT 1", ConsistencyLevel.ONE);
-        assertEquals(1, result.size());
-
-        assertThatThrownBy(() -> executeNet("SELECT * FROM %s WHERE a = 1 AND b = 2 AND d = 2 ORDER BY v ANN OF [2.0,1.0] LIMIT 1"))
-            .isInstanceOf(InvalidQueryException.class).hasMessage(StatementRestrictions.ANN_REQUIRES_INDEXED_FILTERING_MESSAGE);
-
-        createIndex("CREATE CUSTOM INDEX c_idx ON %s(c) USING 'StorageAttachedIndex'");
-
-        assertThatThrownBy(() -> executeNet("SELECT * FROM %s WHERE a = 1 AND b = 2 AND d = 2 ORDER BY v ANN OF [2.0,1.0] LIMIT 1"))
-            .isInstanceOf(InvalidQueryException.class).hasMessage(StatementRestrictions.ANN_REQUIRES_INDEXED_FILTERING_MESSAGE);
-
-        dropIndex("DROP INDEX %s.c_idx");
-        createIndex("CREATE CUSTOM INDEX ON %s(d) USING 'StorageAttachedIndex'");
-
-        result = execute("SELECT * FROM %s WHERE a = 1 AND b = 2 AND c = 1 ORDER BY v ANN OF [2.0,1.0] LIMIT 1", ConsistencyLevel.ONE);
-        assertEquals(1, result.size());
-        result = execute("SELECT * FROM %s WHERE a = 1 AND b = 2 AND c = 1 AND d = 2 ORDER BY v ANN OF [2.0,1.0] LIMIT 1", ConsistencyLevel.ONE);
-        assertEquals(1, result.size());
-        result = execute("SELECT * FROM %s WHERE a = 1 AND b = 2 AND d = 2 ORDER BY v ANN OF [2.0,1.0] LIMIT 1", ConsistencyLevel.ONE);
-        assertEquals(1, result.size());
-        result = execute("SELECT * FROM %s WHERE a = 1 AND b = 2 AND c > 0 ORDER BY v ANN OF [2.0,1.0] LIMIT 1", ConsistencyLevel.ONE);
-        assertEquals(1, result.size());
+        // Cover the alternative code path
+        createIndex("CREATE CUSTOM INDEX ON %s(num) USING 'StorageAttachedIndex'");
+        assertRows(execute("SELECT num FROM %s WHERE pk=3 AND num > 3 ORDER BY v ANN OF [1,1] LIMIT 1"), row(4));
     }
 
     @Test
@@ -375,6 +251,7 @@ public class VectorInvalidQueryTest extends SAITester
         execute("INSERT INTO %s (k, c, v) VALUES (1, 3, [3])");
 
         ClientWarn.instance.captureWarnings();
+        execute("SELECT * FROM %s ORDER BY v ANN OF [2] LIMIT 3");
         ResultSet result = execute("SELECT * FROM %s ORDER BY v ANN OF [2] LIMIT 3", ConsistencyLevel.ONE);
         assertEquals(3, result.size());
         assertNull(ClientWarn.instance.getWarnings());
@@ -397,12 +274,12 @@ public class VectorInvalidQueryTest extends SAITester
                      ClientWarn.instance.getWarnings().get(0));
 
         assertThatThrownBy(() -> execute("SELECT * FROM %s ORDER BY v ANN OF [2] LIMIT 3", ConsistencyLevel.SERIAL))
-            .isInstanceOf(InvalidRequestException.class)
-            .hasMessage(String.format(SelectStatement.TOPK_CONSISTENCY_LEVEL_ERROR, ConsistencyLevel.SERIAL));
+        .isInstanceOf(InvalidRequestException.class)
+        .hasMessage(String.format(SelectStatement.TOPK_CONSISTENCY_LEVEL_ERROR, ConsistencyLevel.SERIAL));
 
         assertThatThrownBy(() -> execute("SELECT * FROM %s ORDER BY v ANN OF [2] LIMIT 3", ConsistencyLevel.LOCAL_SERIAL))
-            .isInstanceOf(InvalidRequestException.class)
-            .hasMessage(String.format(SelectStatement.TOPK_CONSISTENCY_LEVEL_ERROR, ConsistencyLevel.LOCAL_SERIAL));
+        .isInstanceOf(InvalidRequestException.class)
+        .hasMessage(String.format(SelectStatement.TOPK_CONSISTENCY_LEVEL_ERROR, ConsistencyLevel.LOCAL_SERIAL));
     }
 
     protected ResultSet execute(String query, ConsistencyLevel consistencyLevel)
@@ -421,11 +298,11 @@ public class VectorInvalidQueryTest extends SAITester
         QueryState queryState = new QueryState(state);
 
         CQLStatement statement = QueryProcessor.parseStatement(formatQuery(query), queryState.getClientState());
-        statement.validate(state);
+        statement.validate(queryState);
 
-        QueryOptions options = QueryOptions.withConsistencyLevel(QueryOptions.forInternalCalls(Collections.emptyList()), consistencyLevel);
-        options = QueryOptions.withPageSize(options, pageSize);
+        QueryOptions options = QueryOptions.forInternalCalls(Collections.emptyList());
+        options.updateConsistency(consistencyLevel);
 
-        return ((ResultMessage.Rows)statement.execute(queryState, options, Dispatcher.RequestTime.forImmediateExecution())).result;
+        return ((ResultMessage.Rows)statement.execute(queryState, options, System.nanoTime())).result;
     }
 }

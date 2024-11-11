@@ -19,42 +19,42 @@ package org.apache.cassandra.repair;
 
 import java.util.concurrent.RunnableFuture;
 
+import com.google.common.util.concurrent.AbstractFuture;
+
 import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.RequestCallback;
 import org.apache.cassandra.net.Message;
-import org.apache.cassandra.repair.messages.RepairMessage;
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.repair.messages.SnapshotMessage;
-import org.apache.cassandra.utils.concurrent.AsyncFuture;
 
 import static org.apache.cassandra.net.Verb.SNAPSHOT_MSG;
-import static org.apache.cassandra.repair.messages.RepairMessage.notDone;
 
 /**
  * SnapshotTask is a task that sends snapshot request.
  */
-public class SnapshotTask extends AsyncFuture<InetAddressAndPort> implements RunnableFuture<InetAddressAndPort>
+public class SnapshotTask extends AbstractFuture<InetAddressAndPort> implements RunnableFuture<InetAddressAndPort>
 {
     private final RepairJobDesc desc;
     private final InetAddressAndPort endpoint;
-    private final SharedContext ctx;
 
-    SnapshotTask(SharedContext ctx, RepairJobDesc desc, InetAddressAndPort endpoint)
+    SnapshotTask(RepairJobDesc desc, InetAddressAndPort endpoint)
     {
-        this.ctx = ctx;
         this.desc = desc;
         this.endpoint = endpoint;
     }
 
     public void run()
     {
-        RepairMessage.sendMessageWithRetries(ctx, notDone(this), new SnapshotMessage(desc), SNAPSHOT_MSG, endpoint, new SnapshotCallback(this));
+        MessagingService.instance().sendWithCallback(Message.out(SNAPSHOT_MSG, new SnapshotMessage(desc)),
+                                                     endpoint,
+                                                     new SnapshotCallback(this));
     }
 
     /**
      * Callback for snapshot request. Run on INTERNAL_RESPONSE stage.
      */
-    static class SnapshotCallback implements RequestCallback<InetAddressAndPort>
+    static class SnapshotCallback implements RequestCallback
     {
         final SnapshotTask task;
 
@@ -71,7 +71,7 @@ public class SnapshotTask extends AsyncFuture<InetAddressAndPort> implements Run
         @Override
         public void onResponse(Message msg)
         {
-            task.trySuccess(task.endpoint);
+            task.set(task.endpoint);
         }
 
         @Override
@@ -83,7 +83,7 @@ public class SnapshotTask extends AsyncFuture<InetAddressAndPort> implements Run
         @Override
         public void onFailure(InetAddressAndPort from, RequestFailureReason failureReason)
         {
-            task.tryFailure(new RuntimeException("Could not create snapshot at " + from + "; " + failureReason));
+            task.setException(new RuntimeException("Could not create snapshot at " + from));
         }
     }
 }

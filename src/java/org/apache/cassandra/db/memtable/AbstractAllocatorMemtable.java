@@ -18,29 +18,27 @@
 
 package org.apache.cassandra.db.memtable;
 
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.concurrent.ImmediateExecutor;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.commitlog.CommitLogPosition;
-import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableMetadataRef;
-import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.WrappedRunnable;
-import org.apache.cassandra.utils.concurrent.AsyncPromise;
-import org.apache.cassandra.utils.concurrent.Future;
 import org.apache.cassandra.utils.concurrent.OpOrder;
-import org.apache.cassandra.utils.concurrent.Promise;
 import org.apache.cassandra.utils.memory.HeapPool;
 import org.apache.cassandra.utils.memory.MemtableAllocator;
 import org.apache.cassandra.utils.memory.MemtableCleaner;
@@ -61,64 +59,56 @@ public abstract class AbstractAllocatorMemtable extends AbstractMemtableWithComm
 
     @Unmetered
     protected final Owner owner;
-    @Unmetered  // total pool size should not be included in memtable's deep size
     protected final MemtableAllocator allocator;
 
     // Record the comparator of the CFS at the creation of the memtable. This
     // is only used when a user update the CF comparator, to know if the
     // memtable was created with the new or old comparator.
     @Unmetered
-    protected final ClusteringComparator initialComparator;
-    // As above, used to determine if the memtable needs to be flushed on schema change.
-    @Unmetered
-    public final Factory initialFactory;
+    public final ClusteringComparator initialComparator;
 
-    private final long creationNano = Clock.Global.nanoTime();
+    private final long creationNano = System.nanoTime();
 
     @VisibleForTesting
     static MemtablePool createMemtableAllocatorPool()
     {
         Config.MemtableAllocationType allocationType = DatabaseDescriptor.getMemtableAllocationType();
-        long heapLimit = DatabaseDescriptor.getMemtableHeapSpaceInMiB() << 20;
-        long offHeapLimit = DatabaseDescriptor.getMemtableOffheapSpaceInMiB() << 20;
+        long heapLimit = DatabaseDescriptor.getMemtableHeapSpaceInMb() << 20;
+        long offHeapLimit = DatabaseDescriptor.getMemtableOffheapSpaceInMb() << 20;
         float memtableCleanupThreshold = DatabaseDescriptor.getMemtableCleanupThreshold();
         MemtableCleaner cleaner = AbstractAllocatorMemtable::flushLargestMemtable;
-        return createMemtableAllocatorPoolInternal(allocationType, heapLimit, offHeapLimit, memtableCleanupThreshold, cleaner);
+        return createMemtableAllocatorPool(allocationType, heapLimit, offHeapLimit, memtableCleanupThreshold, cleaner);
     }
 
     @VisibleForTesting
-    public static MemtablePool createMemtableAllocatorPoolInternal(Config.MemtableAllocationType allocationType,
-                                                                   long heapLimit, long offHeapLimit,
-                                                                   float memtableCleanupThreshold, MemtableCleaner cleaner)
+    public static MemtablePool createMemtableAllocatorPool(Config.MemtableAllocationType allocationType, 
+                                                           long heapLimit, long offHeapLimit, 
+                                                           float memtableCleanupThreshold, MemtableCleaner cleaner)
     {
         switch (allocationType)
         {
-        case unslabbed_heap_buffers_logged:
-            return new HeapPool.Logged(heapLimit, memtableCleanupThreshold, cleaner);
-        case unslabbed_heap_buffers:
-            logger.debug("Memtables allocating with on-heap buffers");
-            return new HeapPool(heapLimit, memtableCleanupThreshold, cleaner);
-        case heap_buffers:
-            logger.debug("Memtables allocating with on-heap slabs");
-            return new SlabPool(heapLimit, 0, memtableCleanupThreshold, cleaner);
-        case offheap_buffers:
-            logger.debug("Memtables allocating with off-heap buffers");
-            return new SlabPool(heapLimit, offHeapLimit, memtableCleanupThreshold, cleaner);
-        case offheap_objects:
-            logger.debug("Memtables allocating with off-heap objects");
-            return new NativePool(heapLimit, offHeapLimit, memtableCleanupThreshold, cleaner);
-        default:
-            throw new AssertionError();
+            case unslabbed_heap_buffers:
+                logger.debug("Memtables allocating with on-heap buffers");
+                return new HeapPool(heapLimit, memtableCleanupThreshold, cleaner);
+            case heap_buffers:
+                logger.debug("Memtables allocating with on-heap slabs");
+                return new SlabPool(heapLimit, 0, memtableCleanupThreshold, cleaner);
+            case offheap_buffers:
+                logger.debug("Memtables allocating with off-heap buffers");
+                return new SlabPool(heapLimit, offHeapLimit, memtableCleanupThreshold, cleaner);
+            case offheap_objects:
+                logger.debug("Memtables allocating with off-heap objects");
+                return new NativePool(heapLimit, offHeapLimit, memtableCleanupThreshold, cleaner);
+            default:
+                throw new AssertionError();
         }
     }
 
-    // only to be used by init(), to setup the very first memtable for the cfs
     public AbstractAllocatorMemtable(AtomicReference<CommitLogPosition> commitLogLowerBound, TableMetadataRef metadataRef, Owner owner)
     {
         super(metadataRef, commitLogLowerBound);
-        this.allocator = MEMORY_POOL.newAllocator(metadataRef.toString());
+        this.allocator = MEMORY_POOL.newAllocator();
         this.initialComparator = metadata.get().comparator;
-        this.initialFactory = metadata().params.memtable.factory();
         this.owner = owner;
         scheduleFlush();
     }
@@ -128,37 +118,36 @@ public abstract class AbstractAllocatorMemtable extends AbstractMemtableWithComm
         return allocator;
     }
 
-    @Override
-    public boolean shouldSwitch(ColumnFamilyStore.FlushReason reason, TableMetadata latest)
+    public boolean shouldSwitch(ColumnFamilyStore.FlushReason reason)
     {
         switch (reason)
         {
         case SCHEMA_CHANGE:
-            return initialComparator != latest.comparator // If the CF comparator has changed, because our partitions reference the old one
-                   || !initialFactory.equals(latest.params.memtable.factory()); // If a different type of memtable is requested
-        case OWNED_RANGES_CHANGE:
-            return false; // by default we don't use the local ranges, thus this has no effect
+            return initialComparator != metadata().comparator // If the CF comparator has changed, because our partitions reference the old one
+                   || metadata().params.memtable.factory != factory(); // If a different type of memtable is requested
         default:
             return true;
         }
     }
 
-    public void metadataUpdated()
+    @Override
+    public OpOrder readOrdering()
     {
-        // We decided not to swap out this memtable, but if the flush period has changed we must schedule it for the
-        // new expiration time.
-        scheduleFlush();
+        return owner.readOrdering();
     }
 
-    public void localRangesUpdated()
+    public void metadataUpdated()
     {
-        // nothing to be done by default
+        scheduleFlush();
     }
 
     public void performSnapshot(String snapshotName)
     {
-        throw new AssertionError("performSnapshot must be implemented if shouldSwitch(SNAPSHOT) can return false.");
+        // unless shouldSwitch(SNAPSHOT) returns false, this cannot be called.
+        throw new AssertionError();
     }
+
+    protected abstract Factory factory();
 
     public void switchOut(OpOrder.Barrier writeBarrier, AtomicReference<CommitLogPosition> commitLogUpperBound)
     {
@@ -179,7 +168,7 @@ public abstract class AbstractAllocatorMemtable extends AbstractMemtableWithComm
                              metadata.get().name,
                              hashCode(),
                              FBUtilities.prettyPrintMemory(getLiveDataSize()),
-                             operationCount(),
+                             getOperations(),
                              usage);
     }
 
@@ -202,6 +191,13 @@ public abstract class AbstractAllocatorMemtable extends AbstractMemtableWithComm
         getAllocator().offHeap().allocate(additionalSpace, opGroup);
     }
 
+    @Override
+    public long unusedReservedOnHeapMemory()
+    {
+        return allocator.unusedReservedOnHeapMemory();
+    }
+
+
     void scheduleFlush()
     {
         int period = metadata().params.memtableFlushPeriodInMs;
@@ -221,13 +217,13 @@ public abstract class AbstractAllocatorMemtable extends AbstractMemtableWithComm
                     ((AbstractAllocatorMemtable) current).flushIfPeriodExpired();
             }
         };
-        ScheduledExecutors.scheduledTasks.scheduleSelfRecurring(runnable, period, TimeUnit.MILLISECONDS);
+        ScheduledExecutors.scheduledTasks.schedule(runnable, period, TimeUnit.MILLISECONDS);
     }
 
     private void flushIfPeriodExpired()
     {
         int period = metadata().params.memtableFlushPeriodInMs;
-        if (period > 0 && (Clock.Global.nanoTime() - creationNano >= TimeUnit.MILLISECONDS.toNanos(period)))
+        if (period > 0 && (System.nanoTime() - creationNano >= TimeUnit.MILLISECONDS.toNanos(period)))
         {
             if (isClean())
             {
@@ -247,7 +243,7 @@ public abstract class AbstractAllocatorMemtable extends AbstractMemtableWithComm
      * Finds the largest memtable, as a percentage of *either* on- or off-heap memory limits, and immediately
      * queues it for flushing. If the memtable selected is flushed before this completes, no work is done.
      */
-    public static Future<Boolean> flushLargestMemtable()
+    public static CompletableFuture<Boolean> flushLargestMemtable()
     {
         float largestRatio = 0f;
         AbstractAllocatorMemtable largestMemtable = null;
@@ -283,7 +279,7 @@ public abstract class AbstractAllocatorMemtable extends AbstractMemtableWithComm
             liveOffHeap += usage.ownershipRatioOffHeap;
         }
 
-        Promise<Boolean> returnFuture = new AsyncPromise<>();
+        CompletableFuture<Boolean> returnFuture = new CompletableFuture<>();
 
         if (largestMemtable != null)
         {
@@ -291,28 +287,28 @@ public abstract class AbstractAllocatorMemtable extends AbstractMemtableWithComm
             float usedOffHeap = MEMORY_POOL.offHeap.usedRatio();
             float flushingOnHeap = MEMORY_POOL.onHeap.reclaimingRatio();
             float flushingOffHeap = MEMORY_POOL.offHeap.reclaimingRatio();
-            logger.info("Flushing largest {} to free up room. Used total: {}, live: {}, flushing: {}, this: {}",
-                        largestMemtable.owner, ratio(usedOnHeap, usedOffHeap), ratio(liveOnHeap, liveOffHeap),
-                        ratio(flushingOnHeap, flushingOffHeap), ratio(largestUsage.ownershipRatioOnHeap, largestUsage.ownershipRatioOffHeap));
+            logger.debug("Flushing largest {} to free up room. Used total: {}, live: {}, flushing: {}, this: {}",
+                         largestMemtable.owner, ratio(usedOnHeap, usedOffHeap), ratio(liveOnHeap, liveOffHeap),
+                         ratio(flushingOnHeap, flushingOffHeap), ratio(largestUsage.ownershipRatioOnHeap, largestUsage.ownershipRatioOffHeap));
 
-            Future<CommitLogPosition> flushFuture = largestMemtable.owner.signalFlushRequired(largestMemtable, ColumnFamilyStore.FlushReason.MEMTABLE_LIMIT);
+            ListenableFuture<CommitLogPosition> flushFuture = largestMemtable.owner.signalFlushRequired(largestMemtable, ColumnFamilyStore.FlushReason.MEMTABLE_LIMIT);
             flushFuture.addListener(() -> {
                 try
                 {
                     flushFuture.get();
-                    returnFuture.trySuccess(true);
+                    returnFuture.complete(true);
                 }
                 catch (Throwable t)
                 {
-                    returnFuture.tryFailure(t);
+                    returnFuture.completeExceptionally(t);
                 }
-            }, ImmediateExecutor.INSTANCE);
+            }, MoreExecutors.directExecutor());
         }
         else
         {
             logger.debug("Flushing of largest memtable, not done, no memtable found");
 
-            returnFuture.trySuccess(false);
+            returnFuture.complete(false);
         }
 
         return returnFuture;

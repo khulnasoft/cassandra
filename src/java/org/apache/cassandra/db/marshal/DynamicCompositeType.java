@@ -23,20 +23,24 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.cql3.terms.Term;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.SyntaxException;
@@ -98,6 +102,7 @@ public class DynamicCompositeType extends AbstractCompositeType
             return Objects.hash(aliases);
         }
     }
+
     private static final Logger logger = LoggerFactory.getLogger(DynamicCompositeType.class);
 
     private static final ByteSource[] EMPTY_BYTE_SOURCE_ARRAY = new ByteSource[0];
@@ -105,7 +110,8 @@ public class DynamicCompositeType extends AbstractCompositeType
 
     @VisibleForTesting
     public final Map<Byte, AbstractType<?>> aliases;
-    private final Map<AbstractType<?>, Byte> inverseMapping;
+    @VisibleForTesting
+    public final Map<AbstractType<?>, Byte> inverseMapping;
     private final Serializer serializer;
 
     // interning instances
@@ -118,30 +124,51 @@ public class DynamicCompositeType extends AbstractCompositeType
 
     public static DynamicCompositeType getInstance(Map<Byte, AbstractType<?>> aliases)
     {
-        DynamicCompositeType dct = instances.get(aliases);
-        return null == dct
-             ? instances.computeIfAbsent(aliases, DynamicCompositeType::new)
-             : dct;
+        return getInstance(instances, aliases, () -> new DynamicCompositeType(aliases));
+    }
+
+    @Override
+    public DynamicCompositeType overrideKeyspace(Function<String, String> overrideKeyspace)
+    {
+        return getInstance(aliases.entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().overrideKeyspace(overrideKeyspace))));
     }
 
     private DynamicCompositeType(Map<Byte, AbstractType<?>> aliases)
     {
-        this.aliases = ImmutableMap.copyOf(aliases);
+        super(ImmutableList.copyOf(aliases.values()));
+        this.aliases = aliases;
         this.serializer = new Serializer(this.aliases);
         this.inverseMapping = new HashMap<>();
         for (Map.Entry<Byte, AbstractType<?>> en : aliases.entrySet())
             this.inverseMapping.put(en.getValue(), en.getKey());
     }
 
+    @Override
+    public AbstractType<?> with(ImmutableList<AbstractType<?>> subTypes, boolean isMultiCell)
+    {
+        if (isMultiCell)
+            throw new IllegalArgumentException("Cannot create a multi-cell DynamicCompositeType");
+
+        Map<Byte, AbstractType<?>> copiedAliases = new HashMap<>();
+        Iterator<Byte> keysIter = aliases.keySet().iterator();
+        Iterator<AbstractType<?>> subTypesIter = subTypes.iterator();
+        while (keysIter.hasNext())
+        {
+            if (!subTypesIter.hasNext())
+                throw new IllegalArgumentException("Not enough subtypes provided");
+
+            copiedAliases.put(keysIter.next(), subTypesIter.next());
+        }
+
+        if (subTypesIter.hasNext())
+            throw new IllegalArgumentException("Too much subtypes provided");
+
+        return new DynamicCompositeType(copiedAliases);
+    }
+
     public int size()
     {
         return aliases.size();
-    }
-
-    @Override
-    public List<AbstractType<?>> subTypes()
-    {
-        return new ArrayList<>(aliases.values());
     }
 
     @Override
@@ -161,7 +188,7 @@ public class DynamicCompositeType extends AbstractCompositeType
         return 0;
     }
 
-    protected <V> int getComparatorSize(int i, V value, ValueAccessor<V> accessor, int offset)
+    protected <V> int getComparatorSize(V value, ValueAccessor<V> accessor, int offset)
     {
         int header = accessor.getShort(value, offset);
         if ((header & 0x8000) == 0)
@@ -181,7 +208,6 @@ public class DynamicCompositeType extends AbstractCompositeType
             int header = accessor.getShort(value, offset);
             if ((header & 0x8000) == 0)
             {
-
                 String name = accessor.toString(accessor.slice(value, offset + 2, header));
                 return TypeParser.parse(name);
             }
@@ -276,7 +302,6 @@ public class DynamicCompositeType extends AbstractCompositeType
         srcs.add(isStatic ? null : ByteSource.EMPTY);
 
         byte lastEoc = 0;
-        int i = 0;
         while (offset < length)
         {
             // Only the end-of-component byte of the last component of this composite can be non-zero, so the
@@ -284,7 +309,7 @@ public class DynamicCompositeType extends AbstractCompositeType
             assert lastEoc == 0 : lastEoc;
 
             AbstractType<?> comp = getComparator(data, accessor, offset);
-            offset += getComparatorSize(i, data, accessor, offset);
+            offset += getComparatorSize(data, accessor, offset);
             // The comparable bytes for the component need to ensure comparisons consistent with
             // AbstractCompositeType.compareCustom(ByteBuffer, ByteBuffer) and
             // DynamicCompositeType.getComparator(int, ByteBuffer, ByteBuffer):
@@ -314,7 +339,6 @@ public class DynamicCompositeType extends AbstractCompositeType
             lastEoc = accessor.getByte(data, offset);
             offset += 1;
             srcs.add(ByteSource.oneByte(version == Version.LEGACY ? lastEoc : lastEoc & 0xFF ^ 0x80));
-            ++i;
         }
 
         return ByteSource.withTerminatorMaybeLegacy(version, ByteSource.END_OF_STREAM, srcs.toArray(EMPTY_BYTE_SOURCE_ARRAY));
@@ -362,9 +386,8 @@ public class DynamicCompositeType extends AbstractCompositeType
             // Decode the type's fully qualified class name and parse the actual type from it.
             String fullClassName = ByteSourceInverse.getString(ByteSourceInverse.nextComponentSource(comparableBytes));
             assert fullClassName.endsWith(simpleClassName);
-            if (isReversed)
-                fullClassName = REVERSED_TYPE + '(' + fullClassName + ')';
-            AbstractType<?> type = TypeParser.parse(fullClassName);
+            AbstractType<?> type = isReversed ? ReversedType.getInstance(TypeParser.parse(fullClassName))
+                                              : TypeParser.parse(fullClassName);
             assert type != null;
             types.add(type);
 
@@ -570,12 +593,6 @@ public class DynamicCompositeType extends AbstractCompositeType
         return getInstance(Maps.transformValues(aliases, v -> v.withUpdatedUserType(udt)));
     }
 
-    @Override
-    public AbstractType<?> expandUserTypes()
-    {
-        return getInstance(Maps.transformValues(aliases, v -> v.expandUserTypes()));
-    }
-
     private class DynamicParsedComparator implements ParsedComparator
     {
         final AbstractType<?> type;
@@ -673,8 +690,9 @@ public class DynamicCompositeType extends AbstractCompositeType
     }
 
     @Override
-    public String toString()
+    public String toString(boolean ignoreFrozen)
     {
+        // DCT is always frozen, but implicitly so (FrozenType is never used), so we ignore our parameter
         return getClass().getName() + TypeParser.stringifyAliasesParameters(aliases);
     }
 

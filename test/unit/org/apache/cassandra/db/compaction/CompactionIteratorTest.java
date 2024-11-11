@@ -17,23 +17,18 @@
  */
 package org.apache.cassandra.db.compaction;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.DIAGNOSTIC_SNAPSHOT_INTERVAL_NANOS;
 import static org.apache.cassandra.db.transform.DuplicateRowCheckerTest.assertCommandIssued;
 import static org.apache.cassandra.db.transform.DuplicateRowCheckerTest.makeRow;
-import static org.apache.cassandra.db.transform.DuplicateRowCheckerTest.partition;
+import static org.apache.cassandra.db.transform.DuplicateRowCheckerTest.rows;
 import static org.junit.Assert.*;
 
 import java.util.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import com.google.common.collect.*;
 
-import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
@@ -63,29 +58,27 @@ public class CompactionIteratorTest extends CQLTester
     private static final String KSNAME = "CompactionIteratorTest";
     private static final String CFNAME = "Integer1";
 
-    private static final DecoratedKey kk;
-    private static final TableMetadata metadata;
+    static final DecoratedKey kk;
+    static final TableMetadata metadata;
     private static final int RANGE = 1000;
     private static final int COUNT = 100;
 
     Map<List<Unfiltered>, DeletionTime> deletionTimes = new HashMap<>();
 
-    static
-    {
-        kk = Util.dk("key");
-        metadata = SchemaLoader.standardCFMD(KSNAME,
-                                             CFNAME,
-                                             1,
-                                             UTF8Type.instance,
-                                             Int32Type.instance,
-                                             Int32Type.instance).build();
-    }
+    static {
+        DatabaseDescriptor.daemonInitialization();
 
-    @BeforeClass
-    public static void setupClass()
-    {
-        SchemaLoader.createKeyspace(KSNAME, KeyspaceParams.simple(1), metadata);
-        ServerTestUtils.markCMS();
+        kk = Util.dk("key");
+
+        SchemaLoader.prepareServer();
+        SchemaLoader.createKeyspace(KSNAME,
+                                    KeyspaceParams.simple(1),
+                                    metadata = SchemaLoader.standardCFMD(KSNAME,
+                                                                         CFNAME,
+                                                                         1,
+                                                                         UTF8Type.instance,
+                                                                         Int32Type.instance,
+                                                                         Int32Type.instance).build());
     }
 
     // See org.apache.cassandra.db.rows.UnfilteredRowsGenerator.parse for the syntax used in these tests.
@@ -249,22 +242,7 @@ public class CompactionIteratorTest extends CQLTester
 
     private List<List<Unfiltered>> parse(String[] inputs, UnfilteredRowsGenerator generator)
     {
-        return ImmutableList.copyOf(Lists.transform(Arrays.asList(inputs), x -> parse(x, generator)));
-    }
-
-    private List<Unfiltered> parse(String input, UnfilteredRowsGenerator generator)
-    {
-        Matcher m = Pattern.compile("D(\\d+)\\|").matcher(input);
-        if (m.lookingAt())
-        {
-            int del = Integer.parseInt(m.group(1));
-            input = input.substring(m.end());
-            List<Unfiltered> list = generator.parse(input, NOW - 1);
-            deletionTimes.put(list, DeletionTime.build(del, del));
-            return list;
-        }
-        else
-            return generator.parse(input, NOW - 1);
+        return ImmutableList.copyOf(Lists.transform(Arrays.asList(inputs), x -> generator.parse(x, NOW - 1, deletionTimes)));
     }
 
     private List<Unfiltered> compact(Iterable<List<Unfiltered>> sources, Iterable<List<Unfiltered>> tombstoneSources)
@@ -339,12 +317,13 @@ public class CompactionIteratorTest extends CQLTester
                                                               Lists.transform(content, x -> new Scanner(x)),
                                                               controller, NOW, null))
         {
+            TableOperation op = iter.getOperation();
             assertTrue(iter.hasNext());
             UnfilteredRowIterator rows = iter.next();
             assertTrue(rows.hasNext());
             assertNotNull(rows.next());
 
-            iter.stop();
+            op.stop(TableOperation.StopTrigger.UNIT_TESTS);
             try
             {
                 // Will call Transformation#applyToRow
@@ -372,7 +351,8 @@ public class CompactionIteratorTest extends CQLTester
                                                               Lists.transform(content, x -> new Scanner(x)),
                                                               controller, NOW, null))
         {
-            iter.stop();
+            TableOperation op = iter.getOperation();
+            op.stop(TableOperation.StopTrigger.UNIT_TESTS);
             try
             {
                 // Will call Transformation#applyToPartition
@@ -390,7 +370,7 @@ public class CompactionIteratorTest extends CQLTester
     {
         private final Map<DecoratedKey, Iterable<UnfilteredRowIterator>> tombstoneSources;
 
-        public Controller(ColumnFamilyStore cfs, Map<DecoratedKey, Iterable<UnfilteredRowIterator>> tombstoneSources, long gcBefore)
+        public Controller(ColumnFamilyStore cfs, Map<DecoratedKey, Iterable<UnfilteredRowIterator>> tombstoneSources, int gcBefore)
         {
             super(cfs, Collections.emptySet(), gcBefore);
             this.tombstoneSources = tombstoneSources;
@@ -460,12 +440,18 @@ public class CompactionIteratorTest extends CQLTester
         {
             return ImmutableSet.of();
         }
+
+        @Override
+        public int level()
+        {
+            return 0;
+        }
     }
 
     @Test
     public void duplicateRowsTest() throws Throwable
     {
-        DIAGNOSTIC_SNAPSHOT_INTERVAL_NANOS.setLong(0);
+        System.setProperty("cassandra.diagnostic_snapshot_interval_nanos", "0");
         // Create a table and insert some data. The actual rows read in the test will be synthetic
         // but this creates an sstable on disk to be snapshotted.
         createTable("CREATE TABLE %s (pk text, ck1 int, ck2 int, v int, PRIMARY KEY (pk, ck1, ck2))");
@@ -499,7 +485,7 @@ public class CompactionIteratorTest extends CQLTester
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         DecoratedKey key = cfs.getPartitioner().decorateKey(ByteBufferUtil.bytes("key"));
         try (CompactionController controller = new CompactionController(cfs, Integer.MAX_VALUE);
-             UnfilteredRowIterator rows = partition(cfs.metadata(), key, false, unfiltereds);
+             UnfilteredRowIterator rows = rows(cfs.metadata(), key, false, unfiltereds);
              ISSTableScanner scanner = new Scanner(Collections.singletonList(rows));
              CompactionIterator iter = new CompactionIterator(OperationType.COMPACTION,
                                                               Collections.singletonList(scanner),

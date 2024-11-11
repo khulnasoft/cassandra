@@ -1,1 +1,0 @@
-SELECT * FROM rank_by_year_and_name WHERE rank = 1;

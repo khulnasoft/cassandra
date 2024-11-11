@@ -36,22 +36,12 @@ public abstract class AbstractNetstatsBootstrapStreaming extends AbstractNetstat
     protected void executeTest(final boolean streamEntireSSTables,
                                final boolean compressionEnabled) throws Exception
     {
-        executeTest(streamEntireSSTables, compressionEnabled, 1);
-    }
-
-    protected void executeTest(final boolean streamEntireSSTables,
-                               final boolean compressionEnabled,
-                               final int throughput) throws Exception
-    {
         final Cluster.Builder builder = builder().withNodes(1)
                                                  .withTokenSupplier(TokenSupplier.evenlyDistributedTokens(2))
                                                  .withNodeIdTopology(NetworkTopology.singleDcNetworkTopology(2, "dc0", "rack0"))
                                                  .withConfig(config -> config.with(NETWORK, GOSSIP, NATIVE_PROTOCOL)
-                                                                             .set(streamEntireSSTables
-                                                                                  ? "entire_sstable_stream_throughput_outbound"
-                                                                                  : "stream_throughput_outbound",
-                                                                                  throughput+"MiB/s")
-                                                                             .set("compaction_throughput", "1MiB/s")
+                                                                             .set("stream_throughput_outbound_megabits_per_sec", 1)
+                                                                             .set("compaction_throughput_mb_per_sec", 1)
                                                                              .set("stream_entire_sstables", streamEntireSSTables));
 
         try (final Cluster cluster = builder.withNodes(1).start())
@@ -62,7 +52,14 @@ public abstract class AbstractNetstatsBootstrapStreaming extends AbstractNetstat
 
             cluster.get(1).nodetoolResult("disableautocompaction", "netstats_test").asserts().success();
 
-            populateData(compressionEnabled);
+            if (compressionEnabled)
+            {
+                populateData(true);
+            }
+            else
+            {
+                populateData(false);
+            }
 
             cluster.get(1).flush("netstats_test");
 
@@ -77,10 +74,8 @@ public abstract class AbstractNetstatsBootstrapStreaming extends AbstractNetstat
             final Future<?> startupRunnable = executorService.submit((Runnable) secondNode::startup);
             final Future<AbstractNetstatsStreaming.NetstatResults> netstatsFuture = executorService.submit(new NetstatsCallable(cluster.get(1)));
 
-            startupRunnable.get(3, MINUTES);
-            // 1m is a bit much, but should be fine on slower environments.  Node2 can't come up without streaming
-            // completing, so if node2 is up 1m is enough time for the nodetool watcher to yield
             final AbstractNetstatsStreaming.NetstatResults results = netstatsFuture.get(1, MINUTES);
+            startupRunnable.get(2, MINUTES);
 
             results.assertSuccessful();
 

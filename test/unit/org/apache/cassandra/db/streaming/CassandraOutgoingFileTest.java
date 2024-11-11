@@ -26,7 +26,6 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.Util;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
@@ -41,6 +40,7 @@ import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.streaming.StreamOperation;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -80,7 +80,7 @@ public class CassandraOutgoingFileTest
             .build()
             .applyUnsafe();
         }
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
         CompactionManager.instance.performMaximal(store, false);
 
         sstable = store.getLiveSSTables().iterator().next();
@@ -89,7 +89,7 @@ public class CassandraOutgoingFileTest
     @Test
     public void validateFullyContainedIn_SingleContiguousRange_Succeeds()
     {
-        List<Range<Token>> requestedRanges = Arrays.asList(new Range<>(store.getPartitioner().getMinimumToken(), sstable.getLast().getToken()));
+        List<Range<Token>> requestedRanges = Arrays.asList(new Range<>(store.getPartitioner().getMinimumToken(), sstable.last.getToken()));
 
         List<SSTableReader.PartitionPositionBounds> sections = sstable.getPositionsForRanges(requestedRanges);
         CassandraOutgoingFile cof = new CassandraOutgoingFile(StreamOperation.BOOTSTRAP, sstable.ref(),
@@ -100,7 +100,7 @@ public class CassandraOutgoingFileTest
     }
 
     @Test
-    public void validateFullyContainedIn_PartialOverlap_Fails()
+    public void validateFullyContainedIn_PartialOverlap_Fails() throws IOException
     {
         List<Range<Token>> requestedRanges = Arrays.asList(new Range<>(store.getPartitioner().getMinimumToken(), getTokenAtIndex(2)));
 
@@ -113,11 +113,11 @@ public class CassandraOutgoingFileTest
     }
 
     @Test
-    public void validateFullyContainedIn_SplitRange_Succeeds()
+    public void validateFullyContainedIn_SplitRange_Succeeds() throws IOException
     {
         List<Range<Token>> requestedRanges = Arrays.asList(new Range<>(store.getPartitioner().getMinimumToken(), getTokenAtIndex(4)),
                                                          new Range<>(getTokenAtIndex(2), getTokenAtIndex(6)),
-                                                         new Range<>(getTokenAtIndex(5), sstable.getLast().getToken()));
+                                                         new Range<>(getTokenAtIndex(5), sstable.last.getToken()));
         requestedRanges = Range.normalize(requestedRanges);
 
         List<SSTableReader.PartitionPositionBounds> sections = sstable.getPositionsForRanges(requestedRanges);
@@ -128,12 +128,12 @@ public class CassandraOutgoingFileTest
         assertTrue(cof.contained(sections, sstable));
     }
 
-    private DecoratedKey getKeyAtIndex(int i)
+    private DecoratedKey getKeyAtIndex(int i) throws IOException
     {
         int count = 0;
         DecoratedKey key;
 
-        try (KeyIterator iter = sstable.keyIterator())
+        try (KeyIterator iter = KeyIterator.forSSTable(sstable))
         {
             do
             {
@@ -141,14 +141,10 @@ public class CassandraOutgoingFileTest
                 count++;
             } while (iter.hasNext() && count < i);
         }
-        catch (IOException e)
-        {
-            throw new RuntimeException(e);
-        }
         return key;
     }
 
-    private Token getTokenAtIndex(int i)
+    private Token getTokenAtIndex(int i) throws IOException
     {
         return getKeyAtIndex(i).getToken();
     }

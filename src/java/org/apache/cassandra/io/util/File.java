@@ -18,17 +18,10 @@
 
 package org.apache.cassandra.io.util;
 
-import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.channels.FileChannel;
-import java.nio.file.FileSystem;
-import java.nio.file.FileSystems;
-import java.nio.file.Files;
-import java.nio.file.NoSuchFileException;
-import java.nio.file.Path;
-import java.nio.file.Paths; // checkstyle: permit this import
+import java.nio.file.*;
 import java.util.Objects;
 import java.util.function.BiPredicate;
 import java.util.function.Consumer;
@@ -36,12 +29,11 @@ import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
+
 import javax.annotation.Nullable;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.RateLimiter;
 
-import net.openhft.chronicle.core.util.ThrowingFunction;
 import org.apache.cassandra.io.FSWriteError;
 
 import static org.apache.cassandra.io.util.PathUtils.filename;
@@ -52,11 +44,11 @@ import static org.apache.cassandra.utils.Throwables.maybeFail;
  *
  * TODO codebase probably should not use tryList, as unexpected exceptions are hidden;
  *      probably want to introduce e.g. listIfExists
+ * TODO codebase probably should not use Paths.get() to ensure we can override the filesystem
  */
 public class File implements Comparable<File>
 {
-    private static FileSystem filesystem = FileSystems.getDefault();
-
+    private static final FileSystem filesystem = FileSystems.getDefault();
     public enum WriteMode { OVERWRITE, APPEND }
 
     public static String pathSeparator()
@@ -122,20 +114,8 @@ public class File implements Comparable<File>
      */
     public File(URI path)
     {
-        this(Paths.get(path)); //TODO unsafe if uri is file:// as it uses default file system and not File.filesystem
+        this(Paths.get(path));
         if (!path.isAbsolute() || path.isOpaque()) throw new IllegalArgumentException();
-    }
-
-    /**
-     * Unsafe constructor that allows a File to use a differet {@link FileSystem} than {@link File#filesystem}.
-     *
-     * The main caller of such a method are cases such as JVM Dtest functions that need access to the logging framwork
-     * files, which exists on in {@link FileSystems#getDefault()}.
-     */
-    @VisibleForTesting
-    public File(FileSystem fs, String first, String... more)
-    {
-        this.path = fs.getPath(first, more);
     }
 
     /**
@@ -143,15 +123,7 @@ public class File implements Comparable<File>
      */
     public File(Path path)
     {
-        if (path != null && path.getFileSystem() != filesystem)
-            throw new IllegalArgumentException("Incompatible file system; path FileSystem (" + path.getFileSystem() + ") is not the same reference (" + filesystem + ")");
-
         this.path = path;
-    }
-
-    public static Path getPath(String first, String... more)
-    {
-        return filesystem.getPath(first, more);
     }
 
     /**
@@ -186,16 +158,6 @@ public class File implements Comparable<File>
     public void delete()
     {
         maybeFail(delete(null, null));
-    }
-
-    /**
-     * This file will be deleted, with any failures being reported with an FSError
-     * @throws FSWriteError if cannot be deleted
-     */
-    public void deleteIfExists()
-    {
-        if (path != null)
-            PathUtils.deleteIfExists(path);
     }
 
     /**
@@ -259,6 +221,47 @@ public class File implements Comparable<File>
     public void move(File to)
     {
         PathUtils.rename(toPathForRead(), to.toPathForWrite());
+    }
+
+    public void copy(File target, StandardCopyOption options)
+    {
+        PathUtils.copy(toPathForRead(), target.toPathForWrite(), options);
+    }
+
+    /**
+     * Constructs a relative path between this path and a given path.
+     */
+    public File relativize(File other)
+    {
+        Path relative = toPathForRead().relativize(other.toPathForRead());
+        return new File(relative);
+    }
+
+    /**
+     * Resolves give path against this path's parent path
+     */
+    public File resolveSibling(String path)
+    {
+        Path sibling = toPathForRead().resolveSibling(path);
+        return new File(sibling);
+    }
+
+    /**
+     * Resolves give path against this path
+     */
+    public File resolve(String path)
+    {
+        Path sibling = toPathForRead().resolve(path);
+        return new File(sibling);
+    }
+
+    /**
+     * Resolves give path against this path
+     */
+    public File resolve(File path)
+    {
+        Path sibling = toPathForRead().resolve(path.toPathForRead());
+        return new File(sibling);
     }
 
     /**
@@ -370,11 +373,6 @@ public class File implements Comparable<File>
         return PathUtils.createFileIfNotExists(toPathForWrite());
     }
 
-    public boolean createDirectoriesIfNotExists()
-    {
-        return PathUtils.createDirectoriesIfNotExists(toPathForWrite());
-    }
-
     /**
      * Try to create a directory at this path.
      * Return true if a new directory was created at this path, and false otherwise.
@@ -465,39 +463,22 @@ public class File implements Comparable<File>
         return path == null ? "" : filename(path);
     }
 
-    public void forEach(Consumer<File> forEach)
+    public void forEach(Consumer<File> fileConsumer)
     {
-        PathUtils.forEach(path, path -> forEach.accept(new File(path)));
+        PathUtils.forEach(path, path -> fileConsumer.accept(new File(path)));
     }
 
-    public void forEachRecursive(Consumer<File> forEach)
+    public void forEachRecursive(Consumer<File> fileConsumer)
     {
-        PathUtils.forEachRecursive(path, path -> forEach.accept(new File(path)));
+        PathUtils.forEachRecursive(path, path -> fileConsumer.accept(new File(path)));
     }
-
-    private static <V> ThrowingFunction<IOException, V, RuntimeException> nulls() { return ignore -> null; }
-    private static <V> ThrowingFunction<IOException, V, IOException> rethrow()
-    {
-        return fail -> {
-            if (fail == null) throw new FileNotFoundException();
-            throw fail;
-        };
-    }
-    private static <V> ThrowingFunction<IOException, V, UncheckedIOException> unchecked()
-    {
-        return fail -> {
-            if (fail == null) fail = new FileNotFoundException();
-            throw new UncheckedIOException(fail);
-        };
-    }
-
 
     /**
      * @return if a directory, the names of the files within; null otherwise
      */
     public String[] tryListNames()
     {
-        return tryListNames(nulls());
+        return tryListNames(path, Function.identity());
     }
 
     /**
@@ -505,7 +486,7 @@ public class File implements Comparable<File>
      */
     public String[] tryListNames(BiPredicate<File, String> filter)
     {
-        return tryListNames(filter, nulls());
+        return tryList(path, stream -> stream.map(PathUtils::filename).filter(filename -> filter.test(this, filename)), String[]::new);
     }
 
     /**
@@ -513,7 +494,7 @@ public class File implements Comparable<File>
      */
     public File[] tryList()
     {
-        return tryList(nulls());
+        return tryList(path, Function.identity());
     }
 
     /**
@@ -521,7 +502,7 @@ public class File implements Comparable<File>
      */
     public File[] tryList(Predicate<File> filter)
     {
-        return tryList(filter, nulls());
+        return tryList(path, stream -> stream.filter(filter));
     }
 
     /**
@@ -529,148 +510,28 @@ public class File implements Comparable<File>
      */
     public File[] tryList(BiPredicate<File, String> filter)
     {
-        return tryList(filter, nulls());
+        return tryList(path, stream -> stream.filter(file -> filter.test(this, file.name())));
     }
 
-    /**
-     * @return if a directory, the names of the files within; null otherwise
-     */
-    public String[] listNames() throws IOException
-    {
-        return tryListNames(rethrow());
-    }
-
-    /**
-     * @return if a directory, the names of the files within, filtered by the provided predicate; null otherwise
-     */
-    public String[] listNames(BiPredicate<File, String> filter) throws IOException
-    {
-        return tryListNames(filter, rethrow());
-    }
-
-    /**
-     * @return if a directory, the files within; null otherwise
-     */
-    public File[] list() throws IOException
-    {
-        return tryList(rethrow());
-    }
-
-    /**
-     * @return if a directory, the files within, filtered by the provided predicate; null otherwise
-     */
-    public File[] list(Predicate<File> filter) throws IOException
-    {
-        return tryList(filter, rethrow());
-    }
-
-    /**
-     * @return if a directory, the files within, filtered by the provided predicate; null otherwise
-     */
-    public File[] list(BiPredicate<File, String> filter) throws IOException
-    {
-        return tryList(filter, rethrow());
-    }
-
-    /**
-     * @return if a directory, the names of the files within; null otherwise
-     */
-    public String[] listNamesUnchecked() throws UncheckedIOException
-    {
-        return tryListNames(unchecked());
-    }
-
-    /**
-     * @return if a directory, the names of the files within, filtered by the provided predicate; null otherwise
-     */
-    public String[] listNamesUnchecked(BiPredicate<File, String> filter) throws UncheckedIOException
-    {
-        return tryListNames(filter, unchecked());
-    }
-
-    /**
-     * @return if a directory, the files within; null otherwise
-     */
-    public File[] listUnchecked() throws UncheckedIOException
-    {
-        return tryList(unchecked());
-    }
-
-    /**
-     * @return if a directory, the files within, filtered by the provided predicate; null otherwise
-     */
-    public File[] listUnchecked(Predicate<File> filter) throws UncheckedIOException
-    {
-        return tryList(filter, unchecked());
-    }
-
-    /**
-     * @return if a directory, the files within, filtered by the provided predicate; throw an UncheckedIO exception otherwise
-     */
-    public File[] listUnchecked(BiPredicate<File, String> filter) throws UncheckedIOException
-    {
-        return tryList(filter, unchecked());
-    }
-
-    /**
-     * @return if a directory, the names of the files within; null otherwise
-     */
-    public <T extends Throwable> String[] tryListNames(ThrowingFunction<IOException, String[], T> orElse) throws T
-    {
-        return tryListNames(path, Function.identity(), orElse);
-    }
-
-    /**
-     * @return if a directory, the names of the files within, filtered by the provided predicate; null otherwise
-     */
-    public <T extends Throwable> String[] tryListNames(BiPredicate<File, String> filter, ThrowingFunction<IOException, String[], T> orElse) throws T
-    {
-        return tryList(path, stream -> stream.map(PathUtils::filename).filter(filename -> filter.test(this, filename)), String[]::new, orElse);
-    }
-
-    /**
-     * @return if a directory, the files within; null otherwise
-     */
-    private <T extends Throwable> File[] tryList(ThrowingFunction<IOException, File[], T> orElse) throws T
-    {
-        return tryList(path, Function.identity(), orElse);
-    }
-
-    /**
-     * @return if a directory, the files within, filtered by the provided predicate; null otherwise
-     */
-    private <T extends Throwable> File[] tryList(Predicate<File> filter, ThrowingFunction<IOException, File[], T> orElse) throws T
-    {
-        return tryList(path, stream -> stream.filter(filter), orElse);
-    }
-
-    /**
-     * @return if a directory, the files within, filtered by the provided predicate; null otherwise
-     */
-    private <T extends Throwable> File[] tryList(BiPredicate<File, String> filter, ThrowingFunction<IOException, File[], T> orElse) throws T
-    {
-        return tryList(path, stream -> stream.filter(file -> filter.test(this, file.name())), orElse);
-    }
-
-    private static <T extends Throwable> String[] tryListNames(Path path, Function<Stream<File>, Stream<File>> toFiles, ThrowingFunction<IOException, String[], T> orElse) throws T
+    private static String[] tryListNames(Path path, Function<Stream<File>, Stream<File>> toFiles)
     {
         if (path == null)
-            return orElse.apply(null);
-        return PathUtils.tryList(path, stream -> toFiles.apply(stream.map(File::new)).map(File::name), String[]::new, orElse);
+            return null;
+        return PathUtils.tryList(path, stream -> toFiles.apply(stream.map(File::new)).map(File::name), String[]::new);
     }
 
-    private static <T extends Throwable, V> V[] tryList(Path path, Function<Stream<Path>, Stream<V>> transformation, IntFunction<V[]> constructor, ThrowingFunction<IOException, V[], T> orElse) throws T
+    private static <T> T[] tryList(Path path, Function<Stream<Path>, Stream<T>> transformation, IntFunction<T[]> constructor)
     {
         if (path == null)
-            return orElse.apply(null);
-        return PathUtils.tryList(path, transformation, constructor, orElse);
+            return null;
+        return PathUtils.tryList(path, transformation, constructor);
     }
 
-    private static <T extends Throwable> File[] tryList(Path path, Function<Stream<File>, Stream<File>> toFiles, ThrowingFunction<IOException, File[], T> orElse) throws T
+    private static File[] tryList(Path path, Function<Stream<File>, Stream<File>> toFiles)
     {
         if (path == null)
-            return orElse.apply(null);
-        return PathUtils.tryList(path, stream -> toFiles.apply(stream.map(File::new)), File[]::new, orElse);
+            return null;
+        return PathUtils.tryList(path, stream -> toFiles.apply(stream.map(File::new)), File[]::new);
     }
 
     /**
@@ -718,10 +579,14 @@ public class File implements Comparable<File>
         return this.path.compareTo(that.path);
     }
 
+    public URI toUri()
+    {
+        return Objects.requireNonNull(path).toUri();
+    }
+
     public java.io.File toJavaIOFile()
     {
-        return path == null ? new java.io.File("") // checkstyle: permit this instantiation
-                            : path.toFile(); // checkstyle: permit this invocation
+        return path == null ? new java.io.File("") : path.toFile();
     }
 
     /**
@@ -769,13 +634,6 @@ public class File implements Comparable<File>
         return new FileInputStreamPlus(this);
     }
 
-    public File withSuffix(String suffix)
-    {
-        if (path == null)
-            throw new IllegalStateException("Cannot suffix an empty path");
-        return new File(path.getParent().resolve(path.getFileName().toString() + suffix));
-    }
-
     private Path toPathForWrite()
     {
         if (path == null)
@@ -788,17 +646,6 @@ public class File implements Comparable<File>
         if (path == null)
             throw new IllegalStateException("Cannot read from an empty path");
         return path;
-    }
-
-    @VisibleForTesting
-    public static FileSystem unsafeGetFilesystem()
-    {
-        return filesystem;
-    }
-
-    public static void unsafeSetFilesystem(FileSystem fs)
-    {
-        filesystem = fs;
     }
 }
 

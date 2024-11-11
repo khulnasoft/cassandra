@@ -39,7 +39,7 @@ import com.google.common.annotations.VisibleForTesting;
 
 import jdk.internal.ref.Cleaner;
 import net.nicoulaj.compilecommand.annotations.Inline;
-import org.apache.cassandra.concurrent.Shutdownable;
+import org.apache.cassandra.concurrent.InfiniteLoopExecutor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,17 +49,13 @@ import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.metrics.BufferPoolMetrics;
 import org.apache.cassandra.utils.NoSpamLogger;
-import org.apache.cassandra.utils.Shared;
 import org.apache.cassandra.utils.concurrent.Ref;
 import org.apache.cassandra.utils.concurrent.Ref.DirectBufferRef;
 import sun.nio.ch.DirectBuffer;
 
 import static com.google.common.collect.ImmutableList.of;
-import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
-import static org.apache.cassandra.concurrent.InfiniteLoopExecutor.SimulatorSafe.UNSAFE;
 import static org.apache.cassandra.utils.ExecutorUtils.*;
 import static org.apache.cassandra.utils.FBUtilities.prettyPrintMemory;
-import static org.apache.cassandra.utils.Shared.Scope.SIMULATION;
 import static org.apache.cassandra.utils.memory.MemoryUtil.isExactlyDirect;
 
 /**
@@ -136,7 +132,6 @@ public class BufferPool
     private static final ByteBuffer EMPTY_BUFFER = ByteBuffer.allocateDirect(0);
 
     private volatile Debug debug = Debug.NO_OP;
-    private volatile DebugLeaks debugLeaks = DebugLeaks.NO_OP;
 
     protected final String name;
     protected final BufferPoolMetrics metrics;
@@ -182,7 +177,7 @@ public class BufferPool
     private final Set<LocalPoolRef> localPoolReferences = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     private final ReferenceQueue<Object> localPoolRefQueue = new ReferenceQueue<>();
-    private final Shutdownable localPoolCleaner;
+    private final InfiniteLoopExecutor localPoolCleaner;
 
     public BufferPool(String name, long memoryUsageThreshold, boolean recyclePartially)
     {
@@ -190,9 +185,9 @@ public class BufferPool
         this.memoryUsageThreshold = memoryUsageThreshold;
         this.readableMemoryUsageThreshold = prettyPrintMemory(memoryUsageThreshold);
         this.globalPool = new GlobalPool();
-        this.metrics = new BufferPoolMetrics(name, this);
+        this.metrics = BufferPoolMetrics.create(name, this);
         this.recyclePartially = recyclePartially;
-        this.localPoolCleaner = executorFactory().infiniteLoop("LocalPool-Cleaner-" + name, this::cleanupOneReference, UNSAFE);
+        this.localPoolCleaner = new InfiniteLoopExecutor("LocalPool-Cleaner-" + name, this::cleanupOneReference).start();
     }
 
     /**
@@ -339,19 +334,10 @@ public class BufferPool
         void recyclePartial(Chunk chunk);
     }
 
-    @Shared(scope = SIMULATION)
-    public interface DebugLeaks
+    public void debug(Debug setDebug)
     {
-        public static DebugLeaks NO_OP = () -> {};
-        void leak();
-    }
-
-    public void debug(Debug newDebug, DebugLeaks newDebugLeaks)
-    {
-        if (newDebug != null)
-            this.debug = newDebug;
-        if (newDebugLeaks != null)
-            this.debugLeaks = newDebugLeaks;
+        assert setDebug != null;
+        this.debug = setDebug;
     }
 
     interface Recycler
@@ -751,9 +737,9 @@ public class BufferPool
             clearForEach(Chunk::release);
         }
 
-        private void unsafeRecycle()
+        private void unsafeRecycle(boolean forceEvicted)
         {
-            clearForEach(Chunk::unsafeRecycle);
+            clearForEach(chunk -> Chunk.unsafeRecycle(chunk, forceEvicted));
         }
     }
 
@@ -939,19 +925,19 @@ public class BufferPool
             }
             else if (size > NORMAL_CHUNK_SIZE)
             {
-                metrics.misses.mark();
+                metrics.markMissed();
                 return null;
             }
 
             ByteBuffer ret = pool.tryGetInternal(size, sizeIsLowerBound);
             if (ret != null)
             {
-                metrics.hits.mark();
+                metrics.markHit();
                 memoryInUse.add(ret.capacity());
             }
             else
             {
-                metrics.misses.mark();
+                metrics.markMissed();
             }
             return ret;
         }
@@ -1046,9 +1032,9 @@ public class BufferPool
         }
 
         @VisibleForTesting
-        void unsafeRecycle()
+        void unsafeRecycle(boolean forceEvicted)
         {
-            chunks.unsafeRecycle();
+            chunks.unsafeRecycle(forceEvicted);
         }
 
         @VisibleForTesting
@@ -1086,7 +1072,6 @@ public class BufferPool
         Object obj = localPoolRefQueue.remove(100);
         if (obj instanceof LocalPoolRef)
         {
-            debugLeaks.leak();
             ((LocalPoolRef) obj).release();
             localPoolReferences.remove(obj);
         }
@@ -1546,7 +1531,7 @@ public class BufferPool
         @Override
         public String toString()
         {
-            return String.format("[slab %s, slots bitmap %s, capacity %d, free %d]", slab, Long.toBinaryString(freeSlots), capacity(), free());
+            return String.format("[slab %s, slots bitmap %s, capacity %d, free %d, owner %s, recycler %s]", slab, Long.toBinaryString(freeSlots), capacity(), free(), owner, recycler);
         }
 
         @VisibleForTesting
@@ -1562,15 +1547,17 @@ public class BufferPool
             if (parent != null)
                 parent.free(slab);
             else
-                FileUtils.clean(slab);
+                FileUtils.cleanWithAttachment(slab);
         }
 
-        static void unsafeRecycle(Chunk chunk)
+        static void unsafeRecycle(Chunk chunk, boolean forceRecycle)
         {
             if (chunk != null)
             {
                 chunk.owner = null;
                 chunk.freeSlots = 0L;
+                if (forceRecycle && !chunk.recycler.canRecyclePartially())
+                    chunk.setEvicted();
                 chunk.recycleFully();
             }
         }
@@ -1614,7 +1601,8 @@ public class BufferPool
     @VisibleForTesting
     public void shutdownLocalCleaner(long timeout, TimeUnit unit) throws InterruptedException, TimeoutException
     {
-        shutdownAndWait(timeout, unit, of(localPoolCleaner));
+        shutdownNow(of(localPoolCleaner));
+        awaitTermination(timeout, unit, of(localPoolCleaner));
     }
 
     @VisibleForTesting
@@ -1627,10 +1615,15 @@ public class BufferPool
     @VisibleForTesting
     public void unsafeReset()
     {
+        unsafeReset(false);
+    }
+    @VisibleForTesting
+    public void unsafeReset(boolean forceEvicted)
+    {
         overflowMemoryUsage.reset();
         memoryInUse.reset();
         memoryAllocated.set(0);
-        localPool.get().unsafeRecycle();
+        localPool.get().unsafeRecycle(forceEvicted);
         globalPool.unsafeFree();
     }
 

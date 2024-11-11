@@ -19,57 +19,59 @@
 package org.apache.cassandra.index.sai.disk.v1.postings;
 
 import java.io.IOException;
-import java.util.PrimitiveIterator;
 
-import org.apache.cassandra.index.sai.postings.PostingList;
+import org.apache.cassandra.index.sai.disk.PostingList;
+import org.apache.cassandra.index.sai.utils.RowIdWithMeta;
+import org.apache.cassandra.utils.CloseableIterator;
 import org.apache.lucene.util.LongHeap;
 
 /**
- * A {@link PostingList} for ANN search results. Transforms result from similarity order to row ID order.
+ * A posting list for ANN search results.  Transforms results from similarity order to rowId order.
  */
 public class VectorPostingList implements PostingList
 {
     private final LongHeap segmentRowIds;
     private final int size;
-    private final int visitedCount;
 
-    public VectorPostingList(PrimitiveIterator.OfInt source, int limit, int visitedCount)
+    public VectorPostingList(CloseableIterator<? extends RowIdWithMeta> source)
     {
-        this.visitedCount = visitedCount;
-        segmentRowIds = new LongHeap(Math.max(limit, 1));
+        // TODO find int specific data structure?
+        segmentRowIds = new LongHeap(32);
         int n = 0;
-        while (source.hasNext() && n++ < limit)
-            segmentRowIds.push(source.nextInt());
+        // Once the source is consumed, we have to close it.
+        try (source)
+        {
+            while (source.hasNext())
+            {
+                segmentRowIds.push(source.next().getSegmentRowId());
+                n++;
+            }
+        }
         this.size = n;
     }
 
     @Override
-    public long nextPosting()
+    public int nextPosting() throws IOException
     {
         if (segmentRowIds.size() == 0)
             return PostingList.END_OF_STREAM;
-        return segmentRowIds.pop();
+        return (int) segmentRowIds.pop();
     }
 
     @Override
-    public long size()
+    public int size()
     {
         return size;
     }
 
     @Override
-    public long advance(long targetRowID) throws IOException
+    public int advance(int targetRowID) throws IOException
     {
-        long rowId;
+        int rowId;
         do
         {
             rowId = nextPosting();
         } while (rowId < targetRowID);
         return rowId;
-    }
-
-    public int getVisitedCount()
-    {
-        return visitedCount;
     }
 }

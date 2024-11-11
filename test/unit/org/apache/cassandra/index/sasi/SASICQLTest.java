@@ -19,24 +19,21 @@
 package org.apache.cassandra.index.sasi;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.stream.Collectors;
 
 import com.google.common.collect.Sets;
 import org.junit.Test;
 
-import com.datastax.driver.core.Row;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.SimpleStatement;
-import com.datastax.driver.core.exceptions.InvalidQueryException;
+import com.khulnasoft.driver.core.Row;
+import com.khulnasoft.driver.core.Session;
+import com.khulnasoft.driver.core.SimpleStatement;
+import com.khulnasoft.driver.core.exceptions.InvalidQueryException;
 import org.junit.Assert;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.cql3.restrictions.StatementRestrictions;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.service.ClientWarn;
-import org.apache.cassandra.transport.ProtocolVersion;
 
 public class SASICQLTest extends CQLTester
 {
@@ -112,23 +109,21 @@ public class SASICQLTest extends CQLTester
     {
         createTable("CREATE TABLE %s (k int PRIMARY KEY, v int)");
 
-        boolean enableSASIIndexes = DatabaseDescriptor.getSASIIndexesEnabled();
+        boolean enableSASIIndexes = DatabaseDescriptor.getEnableSASIIndexes();
         try
         {
-            DatabaseDescriptor.setSASIIndexesEnabled(false);
+            DatabaseDescriptor.setEnableSASIIndexes(false);
             createIndex("CREATE CUSTOM INDEX ON %s (v) USING 'org.apache.cassandra.index.sasi.SASIIndex'");
             Assert.fail("Should not be able to create a SASI index if they are disabled");
         }
         catch (RuntimeException e)
         {
-            Throwable cause = e.getCause();
-            Assert.assertNotNull(cause);
-            Assert.assertTrue(cause instanceof InvalidRequestException);
-            Assert.assertTrue(cause.getMessage().contains("SASI indexes are disabled"));
+            Assert.assertTrue(e instanceof InvalidRequestException);
+            Assert.assertTrue(e.getMessage().contains("SASI indexes are disabled"));
         }
         finally
         {
-            DatabaseDescriptor.setSASIIndexesEnabled(enableSASIIndexes);
+            DatabaseDescriptor.setEnableSASIIndexes(enableSASIIndexes);
         }
     }
 
@@ -350,18 +345,5 @@ public class SASICQLTest extends CQLTester
 
             }
         }
-    }
-
-    @Test
-    public void testInOperator() throws Throwable
-    {
-        createTable("CREATE TABLE %s (pk int primary key, v int);");
-
-        createIndex("CREATE CUSTOM INDEX ON %s (v) USING 'org.apache.cassandra.index.sasi.SASIIndex';");
-
-        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
-                                  StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE,
-                                  InvalidQueryException.class,
-                                  "SELECT * FROM %s WHERE v IN (200, 250, 300)");
     }
 }

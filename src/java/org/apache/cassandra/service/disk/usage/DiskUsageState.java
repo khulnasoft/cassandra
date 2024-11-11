@@ -15,30 +15,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.service.disk.usage;
-
-import org.apache.cassandra.db.guardrails.GuardrailsConfig;
 
 public enum DiskUsageState
 {
-    /** Either disk usage guardrail is not enabled or gossip state is not ready. */
-    NOT_AVAILABLE("Not Available"),
-
-    /**
-     * Disk usage is below both {@link GuardrailsConfig#getDataDiskUsagePercentageWarnThreshold()} ()} and
-     * {@link GuardrailsConfig#getDataDiskUsagePercentageFailThreshold()}.
-     */
-    SPACIOUS("Spacious"),
-
-    /**
-     * Disk usage exceeds {@link GuardrailsConfig#getDataDiskUsagePercentageWarnThreshold()} but is below
-     * {@link GuardrailsConfig#getDataDiskUsagePercentageFailThreshold()}.
-     */
-    STUFFED("Stuffed"),
-
-    /** Disk usage exceeds {@link GuardrailsConfig#getDataDiskUsagePercentageFailThreshold()}. */
-    FULL("Full");
+    NOT_AVAILABLE("Not Available"), // either disk usage guardrail is not enabled or gossip state is not ready
+    SPACIOUS("Spacious"),           // below disk_usage_percentage_warn_threshold
+    STUFFED("Stuffed"),             // exceeds disk_usage_percentage_warn_threshold but below disk_usage_percentage_failure_threshold
+    FULL("Full");                   // exceeds disk_usage_percentage_failure_threshold
 
     private final String msg;
 

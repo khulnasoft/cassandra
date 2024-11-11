@@ -20,11 +20,13 @@ package org.apache.cassandra.streaming.management;
 import java.net.UnknownHostException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 import javax.management.openmbean.*;
+
+import com.google.common.base.Throwables;
 
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.streaming.ProgressInfo;
-import org.apache.cassandra.utils.TimeUUID;
 
 public class ProgressInfoCompositeData
 {
@@ -66,18 +68,16 @@ public class ProgressInfoCompositeData
         }
         catch (OpenDataException e)
         {
-            throw new RuntimeException(e);
+            throw Throwables.propagate(e);
         }
     }
 
-    public static CompositeData toCompositeData(TimeUUID planId, ProgressInfo progressInfo)
+    public static CompositeData toCompositeData(UUID planId, ProgressInfo progressInfo)
     {
-        // Delta is not returned as it wasn't clear the impact to backwards compatability; it may be safe to expose.
-        // see CASSANDRA-18110
         Map<String, Object> valueMap = new HashMap<>();
         valueMap.put(ITEM_NAMES[0], planId.toString());
-        valueMap.put(ITEM_NAMES[1], progressInfo.peer.getAddress().getHostAddress());
-        valueMap.put(ITEM_NAMES[2], progressInfo.peer.getPort());
+        valueMap.put(ITEM_NAMES[1], progressInfo.peer.address.getHostAddress());
+        valueMap.put(ITEM_NAMES[2], progressInfo.peer.port);
         valueMap.put(ITEM_NAMES[3], progressInfo.sessionIndex);
         valueMap.put(ITEM_NAMES[4], progressInfo.fileName);
         valueMap.put(ITEM_NAMES[5], progressInfo.direction.name());
@@ -89,7 +89,7 @@ public class ProgressInfoCompositeData
         }
         catch (OpenDataException e)
         {
-            throw new RuntimeException(e);
+            throw Throwables.propagate(e);
         }
     }
 
@@ -103,12 +103,11 @@ public class ProgressInfoCompositeData
                                     (String) values[4],
                                     ProgressInfo.Direction.valueOf((String)values[5]),
                                     (long) values[6],
-                                    (long) values[6],
                                     (long) values[7]);
         }
         catch (UnknownHostException e)
         {
-            throw new RuntimeException(e);
+            throw Throwables.propagate(e);
         }
     }
 }

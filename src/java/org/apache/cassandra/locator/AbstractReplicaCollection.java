@@ -22,23 +22,17 @@ import com.carrotsearch.hppc.ObjectIntHashMap;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Iterators;
 
-import java.util.AbstractList;
 import java.util.AbstractMap;
 import java.util.AbstractSet;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Objects;
-import java.util.RandomAccess;
 import java.util.Set;
-import java.util.Spliterator;
 import java.util.function.BiConsumer;
 import java.util.function.BinaryOperator;
-import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -49,9 +43,6 @@ import java.util.stream.Stream;
  * A collection like class for Replica objects. Since the Replica class contains inetaddress, range, and
  * transient replication status, basic contains and remove methods can be ambiguous. Replicas forces you
  * to be explicit about what you're checking the container for, or removing from it.
- *
- * TODO: there's nothing about this collection that's unique to Replicas, and the implementation
- *       could make a useful general purpose immutable list<->set
  */
 public abstract class AbstractReplicaCollection<C extends AbstractReplicaCollection<C>> implements ReplicaCollection<C>
 {
@@ -76,10 +67,8 @@ public abstract class AbstractReplicaCollection<C extends AbstractReplicaCollect
      * A simple list with no comodification checks and immutability by default (only append permitted, and only one initial copy)
      * this permits us to reduce the amount of garbage generated, by not wrapping iterators or unnecessarily copying
      * and reduces the amount of indirection necessary, as well as ensuring monomorphic callsites
-     *
-     * TODO flatten into AbstractReplicaCollection?
      */
-    protected final static class ReplicaList implements Iterable<Replica>
+    protected static class ReplicaList implements Iterable<Replica>
     {
         private static final Replica[] EMPTY = new Replica[0];
         Replica[] contents;
@@ -99,18 +88,6 @@ public abstract class AbstractReplicaCollection<C extends AbstractReplicaCollect
             if (index > size)
                 throw new IndexOutOfBoundsException();
             return contents[begin + index];
-        }
-
-        public ReplicaList map(Function<Replica, Replica> map)
-        {
-            Replica[] contents = new Replica[size];
-            for (int i = 0; i < contents.length; i++)
-            {
-                if (this.contents[i] != null)
-                    contents[i] = map.apply(this.contents[i]);
-            }
-
-            return new ReplicaList(contents, begin, contents.length);
         }
 
         public void add(Replica replica)
@@ -146,7 +123,7 @@ public abstract class AbstractReplicaCollection<C extends AbstractReplicaCollect
             return new ReplicaList(contents, this.begin + begin, end - begin);
         }
 
-        public ReplicaList sorted(Comparator<? super Replica> comparator)
+        public ReplicaList sorted(Comparator<Replica> comparator)
         {
             Replica[] copy = Arrays.copyOfRange(contents, begin, begin + size);
             Arrays.sort(copy, comparator);
@@ -156,37 +133,6 @@ public abstract class AbstractReplicaCollection<C extends AbstractReplicaCollect
         public Stream<Replica> stream()
         {
             return Arrays.stream(contents, begin, begin + size);
-        }
-
-        @Override
-        public void forEach(Consumer<? super Replica> forEach)
-        {
-            for (int i = begin, end = begin + size ; i < end ; ++i)
-                forEach.accept(contents[i]);
-        }
-
-        /** see {@link ReplicaCollection#count(Predicate)}*/
-        public int count(Predicate<? super Replica> test)
-        {
-            int count = 0;
-            for (int i = begin, end = i + size ; i < end ; ++i)
-                if (test.test(contents[i]))
-                    ++count;
-            return count;
-        }
-
-        public final boolean anyMatch(Predicate<? super Replica> predicate)
-        {
-            for (int i = begin, end = i + size ; i < end ; ++i)
-                if (predicate.test(contents[i]))
-                    return true;
-            return false;
-        }
-
-        @Override
-        public Spliterator<Replica> spliterator()
-        {
-            return Arrays.spliterator(contents, begin, begin + size);
         }
 
         // we implement our own iterator, because it is trivial to do so, and in monomorphic call sites
@@ -215,7 +161,7 @@ public abstract class AbstractReplicaCollection<C extends AbstractReplicaCollect
 
         // we implement our own iterator, because it is trivial to do so, and in monomorphic call sites
         // will compile down to almost optimal indexed for loop
-        public <K> Iterator<K> transformIterator(Function<? super Replica, ? extends K> function)
+        public <K> Iterator<K> transformIterator(Function<Replica, K> function)
         {
             return new Iterator<K>()
             {
@@ -238,7 +184,7 @@ public abstract class AbstractReplicaCollection<C extends AbstractReplicaCollect
         // we implement our own iterator, because it is trivial to do so, and in monomorphic call sites
         // will compile down to almost optimal indexed for loop
         // in this case, especially, it is impactful versus Iterables.limit(Iterables.filter())
-        private Iterator<Replica> filterIterator(Predicate<? super Replica> predicate, int limit)
+        private Iterator<Replica> filterIterator(Predicate<Replica> predicate, int limit)
         {
             return new Iterator<Replica>()
             {
@@ -268,12 +214,6 @@ public abstract class AbstractReplicaCollection<C extends AbstractReplicaCollect
                     return result;
                 }
             };
-        }
-
-        protected <T> void forEach(Function<? super Replica, T> function, Consumer<? super T> action)
-        {
-            for (int i = begin, end = begin + size ; i < end ; ++i)
-                action.accept(function.apply(contents[i]));
         }
 
         @VisibleForTesting
@@ -321,12 +261,6 @@ public abstract class AbstractReplicaCollection<C extends AbstractReplicaCollect
             public boolean contains(Object o) { return containsKey(o); }
             @Override
             public Iterator<K> iterator() { return list.transformIterator(toKey); }
-
-            @Override
-            public void forEach(Consumer<? super K> action)
-            {
-                list.forEach(toKey, action);
-            }
         }
 
         class EntrySet extends AbstractImmutableSet<Entry<K, Replica>>
@@ -382,7 +316,7 @@ public abstract class AbstractReplicaCollection<C extends AbstractReplicaCollect
         public boolean containsKey(Object key)
         {
             Preconditions.checkNotNull(key);
-            return get(key) != null;
+            return get((K)key) != null;
         }
 
         public Replica get(Object key)
@@ -432,35 +366,6 @@ public abstract class AbstractReplicaCollection<C extends AbstractReplicaCollect
         }
     }
 
-    static class AsList<T> extends AbstractList<T> implements RandomAccess
-    {
-        final Function<Replica, T> view;
-        final ReplicaList list;
-
-        AsList(Function<Replica, T> view, ReplicaList list)
-        {
-            this.view = view;
-            this.list = list;
-        }
-
-        public final T get(int index)
-        {
-            return view.apply(list.get(index));
-        }
-
-        public final int size()
-        {
-            return list.size;
-        }
-
-        @Override
-        public final void forEach(Consumer<? super T> forEach)
-        {
-            list.forEach(view, forEach);
-        }
-    }
-
-
     protected final ReplicaList list;
     AbstractReplicaCollection(ReplicaList list)
     {
@@ -491,30 +396,24 @@ public abstract class AbstractReplicaCollection<C extends AbstractReplicaCollect
         return snapshot(subList);
     }
 
-    public final <T> List<T> asList(Function<Replica, T> view)
-    {
-        return new AsList<>(view, list);
-    }
-
     /** see {@link ReplicaCollection#count(Predicate)}*/
-    public final int count(Predicate<? super Replica> test)
+    public int count(Predicate<Replica> predicate)
     {
-        return list.count(test);
-    }
-
-    public final boolean anyMatch(Predicate<? super Replica> test)
-    {
-        return list.anyMatch(test);
+        int count = 0;
+        for (int i = 0 ; i < list.size() ; ++i)
+            if (predicate.test(list.get(i)))
+                ++count;
+        return count;
     }
 
     /** see {@link ReplicaCollection#filter(Predicate)}*/
-    public final C filter(Predicate<? super Replica> predicate)
+    public final C filter(Predicate<Replica> predicate)
     {
         return filter(predicate, Integer.MAX_VALUE);
     }
 
     /** see {@link ReplicaCollection#filter(Predicate, int)}*/
-    public final C filter(Predicate<? super Replica> predicate, int limit)
+    public final C filter(Predicate<Replica> predicate, int limit)
     {
         if (isEmpty())
             return snapshot();
@@ -558,19 +457,19 @@ public abstract class AbstractReplicaCollection<C extends AbstractReplicaCollect
     }
 
     /** see {@link ReplicaCollection#filterLazily(Predicate)}*/
-    public final Iterable<Replica> filterLazily(Predicate<? super Replica> predicate)
+    public final Iterable<Replica> filterLazily(Predicate<Replica> predicate)
     {
         return filterLazily(predicate, Integer.MAX_VALUE);
     }
 
     /** see {@link ReplicaCollection#filterLazily(Predicate,int)}*/
-    public final Iterable<Replica> filterLazily(Predicate<? super Replica> predicate, int limit)
+    public final Iterable<Replica> filterLazily(Predicate<Replica> predicate, int limit)
     {
         return () -> list.filterIterator(predicate, limit);
     }
 
     /** see {@link ReplicaCollection#sorted(Comparator)}*/
-    public final C sorted(Comparator<? super Replica> comparator)
+    public final C sorted(Comparator<Replica> comparator)
     {
         return snapshot(list.sorted(comparator));
     }
@@ -595,39 +494,37 @@ public abstract class AbstractReplicaCollection<C extends AbstractReplicaCollect
         return list.iterator();
     }
 
-    public final void forEach(Consumer<? super Replica> forEach)
-    {
-        list.forEach(forEach);
-    }
-
     public final Stream<Replica> stream() { return list.stream(); }
 
     /**
      *  <p>
-     *  Implements order sensitive {@link Object#equals(Object)} #equals() equals} of {@link java.util.List}.
+     *  It's not clear whether {@link AbstractReplicaCollection} should implement the order sensitive {@link Object#equals(Object) equals}
+     *  of {@link java.util.List} or the order oblivious {@link Object#equals(Object) equals} of {@link java.util.Set}. We never rely on equality
+     *  in the database so rather then leave in a potentially surprising implementation we have it throw {@link UnsupportedOperationException}.
+     *  </p>
+     *  <p>
+     *  Don't implement this and pick one behavior over the other. If you want equality you can static import {@link com.google.common.collect.Iterables#elementsEqual(Iterable, Iterable)}
+     *  and use that to get order sensitive equals.
      *  </p>
      */
     public final boolean equals(Object o)
     {
-        if (!(o instanceof AbstractReplicaCollection))
-            return false;
-
-        return Iterators.elementsEqual(iterator(), ((AbstractReplicaCollection) o).iterator());
+        throw new UnsupportedOperationException("AbstractReplicaCollection equals unsupported");
     }
 
     /**
      *  <p>
-     *  Implements order sensitive {@link Object#hashCode() hashCode} of {@link java.util.List}.
+     *  It's not clear whether {@link AbstractReplicaCollection} should implement the order sensitive {@link Object#hashCode() hashCode}
+     *  of {@link java.util.List} or the order oblivious {@link Object#hashCode() equals} of {@link java.util.Set}. We never rely on hashCode
+     *  in the database so rather then leave in a potentially surprising implementation we have it throw {@link UnsupportedOperationException}.
+     *  </p>
+     *  <p>
+     *  Don't implement this and pick one behavior over the other.
      *  </p>
      */
     public final int hashCode()
     {
-        int result = 1;
-
-        for (Replica e : this)
-            result = 31 * result + (e == null ? 0 : e.hashCode());
-
-        return result;
+        throw new UnsupportedOperationException("AbstractReplicaCollection hashCode unsupported");
     }
 
     @Override

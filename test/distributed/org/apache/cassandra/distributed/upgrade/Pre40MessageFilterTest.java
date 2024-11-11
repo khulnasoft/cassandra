@@ -34,7 +34,9 @@ public class Pre40MessageFilterTest extends UpgradeTestBase
         .nodes(2)
         .withConfig(configConsumer)
         .nodesToUpgrade(1)
-        .upgradesToCurrentFrom(v40)
+        // all upgrades from v30 up, excluding v30->v3X
+        .singleUpgrade(v30, v40)
+        .upgradesFrom(v3X)
         .setup((cluster) -> {
             cluster.filters().outbound().allVerbs().messagesMatching((f,t,m) -> false).drop();
             cluster.schemaChange("CREATE TABLE " + KEYSPACE + ".tbl (pk int, ck int, v int, PRIMARY KEY (pk, ck))");
@@ -52,7 +54,7 @@ public class Pre40MessageFilterTest extends UpgradeTestBase
     @Test
     public void reserializePre40RequestPaxosWithoutNetworkTest() throws Throwable
     {
-        reserializePre40RequestPaxosTest(config -> config.with(Feature.GOSSIP));
+        reserializePre40RequestPaxosTest(config -> {});
     }
 
     @Test

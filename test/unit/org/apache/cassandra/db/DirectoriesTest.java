@@ -18,12 +18,9 @@
 package org.apache.cassandra.db;
 
 import java.io.IOException;
-import java.nio.file.FileStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.FileAttributeView;
-import java.nio.file.attribute.FileStoreAttributeView;
-import java.time.Instant;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -32,23 +29,22 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import com.google.common.collect.Sets;
 import org.apache.commons.lang3.StringUtils;
+
 import org.junit.After;
 import org.junit.AfterClass;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -66,11 +62,16 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 
 import org.apache.cassandra.Util;
+import org.apache.cassandra.cql3.ColumnIdentifier;
+import org.apache.cassandra.io.sstable.format.big.BigFormat;
+import org.apache.cassandra.schema.Indexes;
+import org.apache.cassandra.schema.MockSchema;
+import org.apache.cassandra.schema.SchemaConstants;
+import org.apache.cassandra.schema.SchemaKeyspaceTables;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.auth.AuthKeyspace;
 import org.apache.cassandra.config.Config.DiskFailurePolicy;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.config.DurationSpec;
-import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.statements.schema.IndexTarget;
 import org.apache.cassandra.db.Directories.DataDirectories;
 import org.apache.cassandra.db.Directories.DataDirectory;
@@ -82,24 +83,15 @@ import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableId;
 import org.apache.cassandra.io.sstable.SequenceBasedSSTableId;
 import org.apache.cassandra.io.sstable.UUIDBasedSSTableId;
-import org.apache.cassandra.io.sstable.format.big.BigFormat.Components;
+import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileOutputStreamPlus;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.schema.IndexMetadata;
-import org.apache.cassandra.schema.Indexes;
-import org.apache.cassandra.schema.MockSchema;
-import org.apache.cassandra.schema.SchemaConstants;
-import org.apache.cassandra.schema.SchemaKeyspaceTables;
-import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.DefaultFSErrorHandler;
-import org.apache.cassandra.service.snapshot.SnapshotManifest;
-import org.apache.cassandra.service.snapshot.TableSnapshot;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 
 import static org.apache.cassandra.schema.MockSchema.sstableId;
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
-import static org.apache.cassandra.utils.FBUtilities.now;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -110,27 +102,19 @@ import static org.junit.Assert.fail;
 @RunWith(Parameterized.class)
 public class DirectoriesTest
 {
-    public static final String TABLE_NAME = "FakeTable";
-    public static final String SNAPSHOT1 = "snapshot1";
-    public static final String SNAPSHOT2 = "snapshot2";
-    public static final String SNAPSHOT3 = "snapshot3";
-
-    public static final String LEGACY_SNAPSHOT_NAME = "42";
-
-
     private static File tempDataDir;
     private static final String KS = "ks";
     private static String[] TABLES;
     private static Set<TableMetadata> CFM;
-    private static Map<String, List<File>> sstablesByTableName;
+    private static Map<String, List<File>> files;
+
 
     private static final String MDCID = "test-DirectoriesTest-id";
     private static AtomicInteger diyThreadId = new AtomicInteger(1);
     private int myDiyId = -1;
     private static Logger logger;
     private ListAppender<ILoggingEvent> listAppender;
-
-    @Parameterized.Parameter
+    @Parameterized.Parameter(0)
     public SSTableId.Builder<? extends SSTableId> idBuilder;
 
     @Parameterized.Parameter(1)
@@ -158,11 +142,14 @@ public class DirectoriesTest
 
         TABLES = new String[] { "cf1", "ks" };
         CFM = new HashSet<>(TABLES.length);
-        sstablesByTableName = new HashMap<>();
+        files = new HashMap<>();
 
         for (String table : TABLES)
         {
-            CFM.add(createFakeTable(table));
+            CFM.add(TableMetadata.builder(KS, table)
+                                 .addPartitionKeyColumn("thekey", UTF8Type.instance)
+                                 .addClusteringColumn("thecolumn", UTF8Type.instance)
+                                 .build());
         }
 
         tempDataDir = FileUtils.createTempFile("cassandra", "unittest");
@@ -177,7 +164,7 @@ public class DirectoriesTest
     @AfterClass
     public static void afterClass()
     {
-        tempDataDir.deleteRecursive();
+        FileUtils.deleteRecursive(tempDataDir);
     }
 
     @After
@@ -191,98 +178,62 @@ public class DirectoriesTest
         return new DataDirectory[] { new DataDirectory(location) };
     }
 
-    private void createTestFiles()
+    private static DataDirectory[] toDataDirectories(File[] locations)
+    {
+        DataDirectory[] dirs = new DataDirectory[locations.length];
+        for (int i=0; i<locations.length; i++)
+        {
+            dirs[i] = new DataDirectory(locations[i]);
+        }
+        return dirs;
+    }
+
+    private void createTestFiles() throws IOException
     {
         for (TableMetadata cfm : CFM)
         {
-            List<File> allSStables = new ArrayList<>();
-            sstablesByTableName.put(cfm.name, allSStables);
-            File tableDir = cfDir(cfm);
-            tableDir.tryCreateDirectories();
+            List<File> fs = new ArrayList<>();
+            files.put(cfm.name, fs);
+            File dir = cfDir(cfm);
+            dir.tryCreateDirectories();
 
-            allSStables.addAll(createFakeSSTable(tableDir, cfm.name, 1));
-            allSStables.addAll(createFakeSSTable(tableDir, cfm.name, 2));
+            createFakeSSTable(dir, cfm.name, 1, fs);
+            createFakeSSTable(dir, cfm.name, 2, fs);
 
-            File backupDir = new File(tableDir, Directories.BACKUPS_SUBDIR);
+            File backupDir = new File(dir, Directories.BACKUPS_SUBDIR);
             backupDir.tryCreateDirectory();
-            allSStables.addAll(createFakeSSTable(backupDir, cfm.name, 1));
+            createFakeSSTable(backupDir, cfm.name, 1, fs);
 
-            File snapshotDir = new File(tableDir, Directories.SNAPSHOT_SUBDIR + File.pathSeparator() + LEGACY_SNAPSHOT_NAME);
+            File snapshotDir = new File(dir, Directories.SNAPSHOT_SUBDIR + File.pathSeparator() + "42");
             snapshotDir.tryCreateDirectories();
-            allSStables.addAll(createFakeSSTable(snapshotDir, cfm.name, 1));
+            createFakeSSTable(snapshotDir, cfm.name, 1, fs);
         }
     }
 
-    static class FakeSnapshot {
-        final TableMetadata table;
-        final String tag;
-        final File snapshotDir;
-        final SnapshotManifest manifest;
-        final boolean ephemeral;
-
-        FakeSnapshot(TableMetadata table, String tag, File snapshotDir, SnapshotManifest manifest, boolean ephemeral)
-        {
-            this.table = table;
-            this.tag = tag;
-            this.snapshotDir = snapshotDir;
-            this.manifest = manifest;
-            this.ephemeral = ephemeral;
-        }
-
-        public TableSnapshot asTableSnapshot()
-        {
-            Instant createdAt = manifest == null ? null : manifest.createdAt;
-            Instant expiresAt = manifest == null ? null : manifest.expiresAt;
-            return new TableSnapshot(table.keyspace, table.name, table.id.asUUID(), tag, createdAt, expiresAt, Collections.singleton(snapshotDir), ephemeral);
-        }
-    }
-
-    private TableMetadata createFakeTable(String table)
+    private void createFakeSSTable(File dir, String cf, int gen, List<File> addTo) throws IOException
     {
-        return TableMetadata.builder(KS, table)
-                            .addPartitionKeyColumn("thekey", UTF8Type.instance)
-                            .addClusteringColumn("thecolumn", UTF8Type.instance)
-                            .build();
+        Descriptor desc = new Descriptor(dir, KS, cf, sstableId(gen), SSTableFormat.Type.BIG);
+        for (Component c : new Component[]{ Component.DATA, Component.PRIMARY_INDEX, Component.FILTER })
+        {
+            File f = desc.fileFor(c);
+            assert f.createFileIfNotExists();
+            addTo.add(f);
+        }
     }
 
-    public FakeSnapshot createFakeSnapshot(TableMetadata table, String tag, boolean createManifest, boolean ephemeral) throws IOException
+    private List<File> createFakeSSTable(File dir, String cf, int gen) throws IOException
     {
-        File tableDir = cfDir(table);
-        tableDir.tryCreateDirectories();
-        File snapshotDir = new File(tableDir, Directories.SNAPSHOT_SUBDIR + File.pathSeparator() + tag);
-        snapshotDir.tryCreateDirectories();
-
-        Descriptor sstableDesc = new Descriptor(snapshotDir, KS, table.name, sstableId(1), DatabaseDescriptor.getSelectedSSTableFormat());
-        createFakeSSTable(sstableDesc);
-
-        SnapshotManifest manifest = null;
-        if (createManifest)
-        {
-            File manifestFile = Directories.getSnapshotManifestFile(snapshotDir);
-            manifest = new SnapshotManifest(Collections.singletonList(sstableDesc.fileFor(Components.DATA).absolutePath()), new DurationSpec.IntSecondsBound("1m"), now(), ephemeral);
-            manifest.serializeToJsonFile(manifestFile);
-        }
-        else if (ephemeral)
-        {
-            Files.createFile(snapshotDir.toPath().resolve("ephemeral.snapshot"));
-        }
-
-        return new FakeSnapshot(table, tag, snapshotDir, manifest, ephemeral);
-    }
-
-    private List<File> createFakeSSTable(File dir, String cf, int gen)
-    {
-        Descriptor desc = new Descriptor(dir, KS, cf, sstableId(gen), DatabaseDescriptor.getSelectedSSTableFormat());
+        Descriptor desc = new Descriptor(dir, KS, cf, sstableId(gen), SSTableFormat.Type.BIG);
         return createFakeSSTable(desc);
     }
 
-    private List<File> createFakeSSTable(Descriptor desc)
+    private List<File> createFakeSSTable(Descriptor desc) throws IOException
     {
         List<File> components = new ArrayList<>(3);
-        for (Component c : DatabaseDescriptor.getSelectedSSTableFormat().uploadComponents())
+        for (Component c : new Component[]{ Component.DATA, Component.PRIMARY_INDEX, Component.FILTER })
         {
             File f = desc.fileFor(c);
-            f.createFileIfNotExists();
+            assert f.createFileIfNotExists();
             components.add(f);
         }
         return components;
@@ -307,18 +258,18 @@ public class DirectoriesTest
     }
 
     @Test
-    public void testStandardDirs()
+    public void testStandardDirs() throws IOException
     {
         for (TableMetadata cfm : CFM)
         {
             Directories directories = new Directories(cfm, toDataDirectories(tempDataDir));
             assertEquals(cfDir(cfm), directories.getDirectoryForNewSSTables());
 
-            Descriptor desc = new Descriptor(cfDir(cfm), KS, cfm.name, sstableId(1), DatabaseDescriptor.getSelectedSSTableFormat());
-            File snapshotDir = new File(cfDir(cfm), File.pathSeparator() + Directories.SNAPSHOT_SUBDIR + File.pathSeparator() + LEGACY_SNAPSHOT_NAME);
-            assertEquals(snapshotDir.toCanonical(), Directories.getSnapshotDirectory(desc, LEGACY_SNAPSHOT_NAME));
+            Descriptor desc = new Descriptor(cfDir(cfm), KS, cfm.name, sstableId(1), SSTableFormat.Type.BIG);
+            File snapshotDir = new File(cfDir(cfm),  File.pathSeparator() + Directories.SNAPSHOT_SUBDIR + File.pathSeparator() + "42");
+            assertEquals(snapshotDir.toCanonical(), Directories.getSnapshotDirectory(desc, "42"));
 
-            File backupsDir = new File(cfDir(cfm), File.pathSeparator() + Directories.BACKUPS_SUBDIR);
+            File backupsDir = new File(cfDir(cfm),  File.pathSeparator() + Directories.BACKUPS_SUBDIR);
             assertEquals(backupsDir.toCanonical(), Directories.getBackupsDirectory(desc));
 
             Supplier<? extends SSTableId> uidGen = directories.getUIDGenerator(idBuilder);
@@ -327,89 +278,20 @@ public class DirectoriesTest
     }
 
     @Test
-    public void testListSnapshots() throws Exception {
-        // Initial state
-        TableMetadata fakeTable = createFakeTable(TABLE_NAME);
-        Directories directories = new Directories(fakeTable, toDataDirectories(tempDataDir));
-        assertThat(directories.listSnapshots()).isEmpty();
+    public void testResolve() throws IOException
+    {
+        TableMetadata cfm = CFM.iterator().next();
+        Directories directories = new Directories(cfm, toDataDirectories(tempDataDir));
 
-        // Create snapshot with and without manifest
-        FakeSnapshot snapshot1 = createFakeSnapshot(fakeTable, SNAPSHOT1, true, false);
-        FakeSnapshot snapshot2 = createFakeSnapshot(fakeTable, SNAPSHOT2, false, false);
-        // ephemeral without manifst
-        FakeSnapshot snapshot3 = createFakeSnapshot(fakeTable, SNAPSHOT3, false, true);
+        Descriptor resolved = directories.resolve("me-123-big-Data.db", 0);
 
-        // Both snapshots should be present
-        Map<String, TableSnapshot> snapshots = directories.listSnapshots();
-        assertThat(snapshots.keySet()).isEqualTo(Sets.newHashSet(SNAPSHOT1, SNAPSHOT2, SNAPSHOT3));
-        assertThat(snapshots.get(SNAPSHOT1)).isEqualTo(snapshot1.asTableSnapshot());
-        assertThat(snapshots.get(SNAPSHOT2)).isEqualTo(snapshot2.asTableSnapshot());
-        assertThat(snapshots.get(SNAPSHOT3)).isEqualTo(snapshot3.asTableSnapshot());
-
-        // Now remove snapshot1
-        snapshot1.snapshotDir.deleteRecursive();
-
-        // Only snapshot 2 and 3 should be present
-        snapshots = directories.listSnapshots();
-        assertThat(snapshots.keySet()).isEqualTo(Sets.newHashSet(SNAPSHOT2, SNAPSHOT3));
-        assertThat(snapshots.get(SNAPSHOT2)).isEqualTo(snapshot2.asTableSnapshot());
-        assertThat(snapshots.get(SNAPSHOT3)).isEqualTo(snapshot3.asTableSnapshot());
-        assertThat(snapshots.get(SNAPSHOT3).isEphemeral()).isTrue();
+        assertEquals(cfm.keyspace, resolved.ksname);
+        assertEquals(cfm.name, resolved.cfname);
+        assertEquals(SSTableFormat.Type.BIG, resolved.formatType);
+        assertEquals(BigFormat.instance.getVersion("me"), resolved.version);
+        assertEquals("123", resolved.id.toString());
     }
 
-    @Test
-    public void testListSnapshotDirsByTag() throws Exception {
-        // Initial state
-        TableMetadata fakeTable = createFakeTable("FakeTable");
-        Directories directories = new Directories(fakeTable, toDataDirectories(tempDataDir));
-        assertThat(directories.listSnapshotDirsByTag()).isEmpty();
-
-        // Create snapshot with and without manifest
-        FakeSnapshot snapshot1 = createFakeSnapshot(fakeTable, SNAPSHOT1, true, false);
-        FakeSnapshot snapshot2 = createFakeSnapshot(fakeTable, SNAPSHOT2, false, false);
-        FakeSnapshot snapshot3 = createFakeSnapshot(fakeTable, SNAPSHOT3, false, true);
-
-        // Both snapshots should be present
-        Map<String, Set<File>> snapshotDirs = directories.listSnapshotDirsByTag();
-        assertThat(snapshotDirs.keySet()).isEqualTo(Sets.newHashSet(SNAPSHOT1, SNAPSHOT2, SNAPSHOT3));
-        assertThat(snapshotDirs.get(SNAPSHOT1)).allMatch(snapshotDir -> snapshotDir.equals(snapshot1.snapshotDir));
-        assertThat(snapshotDirs.get(SNAPSHOT2)).allMatch(snapshotDir -> snapshotDir.equals(snapshot2.snapshotDir));
-        assertThat(snapshotDirs.get(SNAPSHOT3)).allMatch(snapshotDir -> snapshotDir.equals(snapshot3.snapshotDir));
-
-        // Now remove snapshot1
-        snapshot1.snapshotDir.deleteRecursive();
-
-        // Only snapshot 2 and 3 should be present
-        snapshotDirs = directories.listSnapshotDirsByTag();
-        assertThat(snapshotDirs.keySet()).isEqualTo(Sets.newHashSet(SNAPSHOT2, SNAPSHOT3));
-    }
-
-    @Test
-    public void testMaybeManifestLoading() throws Exception {
-        for (TableMetadata cfm : CFM)
-        {
-            String tag = "test";
-            Directories directories = new Directories(cfm, toDataDirectories(tempDataDir));
-            Descriptor parentDesc = new Descriptor(directories.getDirectoryForNewSSTables(), KS, cfm.name, sstableId(0), DatabaseDescriptor.getSelectedSSTableFormat());
-            File parentSnapshotDirectory = Directories.getSnapshotDirectory(parentDesc, tag);
-
-            List<String> files = new LinkedList<>();
-            files.add(parentSnapshotDirectory.toAbsolute().absolutePath());
-
-            File manifestFile = directories.getSnapshotManifestFile(tag);
-
-            SnapshotManifest manifest = new SnapshotManifest(files, new DurationSpec.IntSecondsBound("1m"), now(), false);
-            manifest.serializeToJsonFile(manifestFile);
-
-            Set<File> dirs = new HashSet<>();
-
-            dirs.add(manifestFile.parent());
-            dirs.add(new File("buzz"));
-            SnapshotManifest loadedManifest = Directories.maybeLoadManifest(KS, cfm.name, tag, dirs);
-
-            assertEquals(manifest, loadedManifest);
-        }
-    }
 
     @Test
     public void testSecondaryIndexDirectories()
@@ -437,8 +319,8 @@ public class DirectoriesTest
         {
             assertEquals(cfDir(INDEX_CFM), dir);
         }
-        Descriptor parentDesc = new Descriptor(parentDirectories.getDirectoryForNewSSTables(), KS, PARENT_CFM.name, sstableId(0), DatabaseDescriptor.getSelectedSSTableFormat());
-        Descriptor indexDesc = new Descriptor(indexDirectories.getDirectoryForNewSSTables(), KS, INDEX_CFM.name, sstableId(0), DatabaseDescriptor.getSelectedSSTableFormat());
+        Descriptor parentDesc = new Descriptor(parentDirectories.getDirectoryForNewSSTables(), KS, PARENT_CFM.name, sstableId(0), SSTableFormat.Type.BIG);
+        Descriptor indexDesc = new Descriptor(indexDirectories.getDirectoryForNewSSTables(), KS, INDEX_CFM.name, sstableId(0), SSTableFormat.Type.BIG);
 
         // snapshot dir should be created under its parent's
         File parentSnapshotDirectory = Directories.getSnapshotDirectory(parentDesc, "test");
@@ -451,19 +333,22 @@ public class DirectoriesTest
         assertTrue(indexDirectories.snapshotExists("test"));
 
         // check true snapshot size
-        Descriptor parentSnapshot = new Descriptor(parentSnapshotDirectory, KS, PARENT_CFM.name, sstableId(0), DatabaseDescriptor.getSelectedSSTableFormat());
-        createFile(parentSnapshot.fileFor(Components.DATA), 30);
-        Descriptor indexSnapshot = new Descriptor(indexSnapshotDirectory, KS, INDEX_CFM.name, sstableId(0), DatabaseDescriptor.getSelectedSSTableFormat());
-        createFile(indexSnapshot.fileFor(Components.DATA), 40);
+        Descriptor parentSnapshot = new Descriptor(parentSnapshotDirectory, KS, PARENT_CFM.name, sstableId(0), SSTableFormat.Type.BIG);
+        createFile(parentSnapshot.fileFor(Component.DATA), 30);
+        Descriptor indexSnapshot = new Descriptor(indexSnapshotDirectory, KS, INDEX_CFM.name, sstableId(0), SSTableFormat.Type.BIG);
+        createFile(indexSnapshot.fileFor(Component.DATA), 40);
 
         assertEquals(30, parentDirectories.trueSnapshotsSize());
         assertEquals(40, indexDirectories.trueSnapshotsSize());
 
         // check snapshot details
-        Map<String, TableSnapshot> parentSnapshotDetail = parentDirectories.listSnapshots();
+        Map<String, Directories.SnapshotSizeDetails> parentSnapshotDetail = parentDirectories.getSnapshotDetails();
         assertTrue(parentSnapshotDetail.containsKey("test"));
-        // CASSANDRA-17357: include indexes when computing true size of parent table
-        assertEquals(70L, parentSnapshotDetail.get("test").computeTrueSizeBytes());
+        assertEquals(30L, parentSnapshotDetail.get("test").dataSizeBytes);
+
+        Map<String, Directories.SnapshotSizeDetails> indexSnapshotDetail = indexDirectories.getSnapshotDetails();
+        assertTrue(indexSnapshotDetail.containsKey("test"));
+        assertEquals(40L, indexSnapshotDetail.get("test").dataSizeBytes);
 
         // check backup directory
         File parentBackupDirectory = Directories.getBackupsDirectory(parentDesc);
@@ -483,6 +368,17 @@ public class DirectoriesTest
     }
 
     @Test
+    public void testVerifyFullPermissions() throws IOException
+    {
+        Assert.assertFalse(Directories.verifyFullPermissions(new File("non_directory.txt")));
+
+        Path tmpDir = Files.createTempDirectory(this.getClass().getSimpleName());
+        File dir = new File(tmpDir, "sub_dir");
+        dir.tryCreateDirectories();
+        Assert.assertTrue(Directories.verifyFullPermissions(dir));
+    }
+
+    @Test
     public void testSSTableLister()
     {
         for (TableMetadata cfm : CFM)
@@ -498,7 +394,7 @@ public class DirectoriesTest
         Set<File> listed;// List all but no snapshot, backup
         lister = directories.sstableLister(Directories.OnTxnErr.THROW);
         listed = new HashSet<>(lister.listFiles());
-        for (File f : sstablesByTableName.get(cfm.name))
+        for (File f : files.get(cfm.name))
         {
             if (f.path().contains(Directories.SNAPSHOT_SUBDIR) || f.path().contains(Directories.BACKUPS_SUBDIR))
                 assertFalse(f + " should not be listed", listed.contains(f));
@@ -509,7 +405,7 @@ public class DirectoriesTest
         // List all but including backup (but no snapshot)
         lister = directories.sstableLister(Directories.OnTxnErr.THROW).includeBackups(true);
         listed = new HashSet<>(lister.listFiles());
-        for (File f : sstablesByTableName.get(cfm.name))
+        for (File f : files.get(cfm.name))
         {
             if (f.path().contains(Directories.SNAPSHOT_SUBDIR))
                 assertFalse(f + " should not be listed", listed.contains(f));
@@ -520,7 +416,7 @@ public class DirectoriesTest
         // Skip temporary and compacted
         lister = directories.sstableLister(Directories.OnTxnErr.THROW).skipTemporary(true);
         listed = new HashSet<>(lister.listFiles());
-        for (File f : sstablesByTableName.get(cfm.name))
+        for (File f : files.get(cfm.name))
         {
             if (f.path().contains(Directories.SNAPSHOT_SUBDIR) || f.path().contains(Directories.BACKUPS_SUBDIR))
                 assertFalse(f + " should not be listed", listed.contains(f));
@@ -532,7 +428,7 @@ public class DirectoriesTest
     }
 
     @Test
-    public void testTemporaryFile()
+    public void testTemporaryFile() throws IOException
     {
         for (TableMetadata cfm : CFM)
         {
@@ -595,11 +491,12 @@ public class DirectoriesTest
         {
             final Directories directories = new Directories(cfm, toDataDirectories(tempDataDir));
             assertEquals(cfDir(cfm), directories.getDirectoryForNewSSTables());
-            final String n = Long.toString(nanoTime());
-            Callable<File> directoryGetter = () ->
-            {
-                Descriptor desc = new Descriptor(cfDir(cfm), KS, cfm.name, sstableId(1), DatabaseDescriptor.getSelectedSSTableFormat());
-                return Directories.getSnapshotDirectory(desc, n);
+            final String n = Long.toString(System.nanoTime());
+            Callable<File> directoryGetter = new Callable<File>() {
+                public File call() throws Exception {
+                    Descriptor desc = new Descriptor(cfDir(cfm), KS, cfm.name, sstableId(1), SSTableFormat.Type.BIG);
+                    return Directories.getSnapshotDirectory(desc, n);
+                }
             };
             List<Future<File>> invoked = Executors.newFixedThreadPool(2).invokeAll(Arrays.asList(directoryGetter, directoryGetter));
             for(Future<File> fut:invoked) {
@@ -711,14 +608,12 @@ public class DirectoriesTest
     }
 
     @Test
-    public void testGetLocationForDisk() throws IOException
+    public void testGetLocationForDisk()
     {
         Collection<DataDirectory> paths = new ArrayList<>();
-
-        Path tmpDir = Files.createTempDirectory("testGetLocationForDisk");
-        paths.add(new DataDirectory(tmpDir.resolve("aaa")));
-        paths.add(new DataDirectory(tmpDir.resolve("aa")));
-        paths.add(new DataDirectory(tmpDir.resolve("a")));
+        paths.add(new DataDirectory(new File("/tmp/aaa")));
+        paths.add(new DataDirectory(new File("/tmp/aa")));
+        paths.add(new DataDirectory(new File("/tmp/a").toPath()));
 
         for (TableMetadata cfm : CFM)
         {
@@ -753,21 +648,19 @@ public class DirectoriesTest
     }
 
     @Test
-    public void getDataDirectoryForFile() throws IOException
+    public void getDataDirectoryForFile()
     {
         Collection<DataDirectory> paths = new ArrayList<>();
-
-        Path tmpDir = Files.createTempDirectory("getDataDirectoryForFile");
-        paths.add(new DataDirectory(tmpDir.resolve("a")));
-        paths.add(new DataDirectory(tmpDir.resolve("aa")));
-        paths.add(new DataDirectory(tmpDir.resolve("aaa")));
+        paths.add(new DataDirectory("/tmp/a"));
+        paths.add(new DataDirectory("/tmp/aa"));
+        paths.add(new DataDirectory("/tmp/aaa"));
 
         for (TableMetadata cfm : CFM)
         {
             Directories dirs = new Directories(cfm, paths);
             for (DataDirectory dir : paths)
             {
-                Descriptor d = Descriptor.fromFile(new File(dir.location, getNewFilename(cfm, false)));
+                Descriptor d = Descriptor.fromFilename(new File(dir.location, getNewFilename(cfm, false)).toString());
                 String p = dirs.getDataDirectoryForFile(d).location.absolutePath() + File.pathSeparator();
                 assertTrue(p.startsWith(dir.location.absolutePath() + File.pathSeparator()));
             }
@@ -778,8 +671,8 @@ public class DirectoriesTest
      * Makes sure we can find the data directory when it is a symlink
      *
      * creates the following data directories:
-     * {@code <tempdir something>/datadir1}
-     * {@code <tempdir something>/datadir11 (symlink to <tempdir something>/symlinktarget)}
+     * <tempdir something>/datadir1
+     * <tempdir something>/datadir11 (symlink to <tempdir something>/symlinktarget)
      *
      * and then makes sure that we get the correct directory back.
      */
@@ -796,9 +689,9 @@ public class DirectoriesTest
         for (TableMetadata tm : CFM)
         {
             Directories dirs = new Directories(tm, Sets.newHashSet(dd1, dd2));
-            Descriptor desc = Descriptor.fromFile(new File(ddir1.resolve(getNewFilename(tm, false))));
+            Descriptor desc = Descriptor.fromFilename(new File(ddir1.resolve(getNewFilename(tm, false))));
             assertEquals(new File(ddir1), dirs.getDataDirectoryForFile(desc).location);
-            desc = Descriptor.fromFile(new File(ddir2.resolve(getNewFilename(tm, false))));
+            desc = Descriptor.fromFilename(new File(ddir2.resolve(getNewFilename(tm, false))));
             assertEquals(new File(ddir2), dirs.getDataDirectoryForFile(desc).location);
         }
     }
@@ -815,14 +708,28 @@ public class DirectoriesTest
         testDirectoriesSymlinksHelper(false);
     }
 
+    @Test
+    public void testFileActionHasPrivilege() throws IOException
+    {
+        Path p = Files.createTempDirectory("something");
+        File file = new File(p);
+        assertTrue(Directories.FileAction.hasPrivilege(file, Directories.FileAction.X));
+        assertTrue(Directories.FileAction.hasPrivilege(file, Directories.FileAction.W));
+        assertTrue(Directories.FileAction.hasPrivilege(file, Directories.FileAction.XW));
+        assertTrue(Directories.FileAction.hasPrivilege(file, Directories.FileAction.R));
+        assertTrue(Directories.FileAction.hasPrivilege(file, Directories.FileAction.XR));
+        assertTrue(Directories.FileAction.hasPrivilege(file, Directories.FileAction.RW));
+        assertTrue(Directories.FileAction.hasPrivilege(file, Directories.FileAction.XRW));
+    }
+
     /**
      * Makes sure we can find the data directory for a file when the table directory is a symlink
      *
      * if oldStyle is false we append the table id to the table directory
      *
      * creates the following structure
-     * {@code <tempdir>/datadir1/<ks>/<table>}
-     * {@code <tempdir>/datadir11/<ks>/<table symlink to <tempdir>/symlinktarget>}
+     * <tempdir>/datadir1/<ks>/<table>
+     * <tempdir>/datadir11/<ks>/<table symlink to <tempdir>/symlinktarget>
      *
      * and then we create a fake descriptor to a file in the table directory and make sure we get the correct
      * data directory back.
@@ -846,9 +753,9 @@ public class DirectoriesTest
         for (TableMetadata tm : CFM)
         {
             Directories dirs = new Directories(tm, Sets.newHashSet(dd1, dd2));
-            Descriptor desc = Descriptor.fromFile(new File(ddir1.resolve(getNewFilename(tm, oldStyle))));
+            Descriptor desc = Descriptor.fromFilename(new File(ddir1.resolve(getNewFilename(tm, oldStyle))));
             assertEquals(new File(ddir1), dirs.getDataDirectoryForFile(desc).location);
-            desc = Descriptor.fromFile(new File(ddir2.resolve(getNewFilename(tm, oldStyle))));
+            desc = Descriptor.fromFilename(new File(ddir2.resolve(getNewFilename(tm, oldStyle))));
             assertEquals(new File(ddir2), dirs.getDataDirectoryForFile(desc).location);
         }
     }
@@ -872,55 +779,56 @@ public class DirectoriesTest
     public void testDataDirectoriesIterator() throws IOException
     {
         Path tmpDir = Files.createTempDirectory(this.getClass().getSimpleName());
-        Path subDir_1 = Files.createDirectory(tmpDir.resolve("a"));
-        Path subDir_2 = Files.createDirectory(tmpDir.resolve("b"));
-        Path subDir_3 = Files.createDirectory(tmpDir.resolve("c"));
+        File subDir_1 = new File(Files.createDirectory(tmpDir.resolve("a")));
+        File subDir_2 = new File(Files.createDirectory(tmpDir.resolve("b")));
+        File subDir_3 = new File(Files.createDirectory(tmpDir.resolve("c")));
 
-        DataDirectories directories = new DataDirectories(new String[]{subDir_1.toString(), subDir_2.toString()},
-                                                          new String[]{subDir_3.toString()});
+        DataDirectories directories = new DataDirectories(new File[]{subDir_1, subDir_2}, new File[]{subDir_3});
 
         Iterator<DataDirectory> iter = directories.iterator();
         assertTrue(iter.hasNext());
-        assertEquals(new DataDirectory(new File(subDir_1)), iter.next());
+        assertEquals(new DataDirectory(subDir_1), iter.next());
         assertTrue(iter.hasNext());
-        assertEquals(new DataDirectory(new File(subDir_2)), iter.next());
+        assertEquals(new DataDirectory(subDir_2), iter.next());
         assertTrue(iter.hasNext());
-        assertEquals(new DataDirectory(new File(subDir_3)), iter.next());
+        assertEquals(new DataDirectory(subDir_3), iter.next());
         assertFalse(iter.hasNext());
 
-        directories = new DataDirectories(new String[]{subDir_1.toString(), subDir_2.toString()},
-                                                          new String[]{subDir_1.toString()});
+        directories = new DataDirectories(new File[]{subDir_1, subDir_2}, new File[]{subDir_1});
 
         iter = directories.iterator();
         assertTrue(iter.hasNext());
-        assertEquals(new DataDirectory(new File(subDir_1)), iter.next());
+        assertEquals(new DataDirectory(subDir_1), iter.next());
         assertTrue(iter.hasNext());
-        assertEquals(new DataDirectory(new File(subDir_2)), iter.next());
+        assertEquals(new DataDirectory(subDir_2), iter.next());
         assertFalse(iter.hasNext());
     }
 
-    @Test
-    public void testFreeCompactionSpace()
+    private String getNewFilename(TableMetadata tm, boolean oldStyle)
     {
-        double oldMaxSpaceForCompactions = DatabaseDescriptor.getMaxSpaceForCompactionsPerDrive();
-        long oldFreeSpace = DatabaseDescriptor.getMinFreeSpacePerDriveInMebibytes();
-        DatabaseDescriptor.setMaxSpaceForCompactionsPerDrive(100.0);
-        DatabaseDescriptor.setMinFreeSpacePerDriveInMebibytes(0);
-        FileStore fstore = new FakeFileStore();
-        try
-        {
-            DatabaseDescriptor.setMaxSpaceForCompactionsPerDrive(1);
-            assertEquals(100, Directories.getAvailableSpaceForCompactions(fstore));
-            DatabaseDescriptor.setMaxSpaceForCompactionsPerDrive(.5);
-            assertEquals(50, Directories.getAvailableSpaceForCompactions(fstore));
-            DatabaseDescriptor.setMaxSpaceForCompactionsPerDrive(0);
-            assertEquals(0, Directories.getAvailableSpaceForCompactions(fstore));
-        }
-        finally
-        {
-            DatabaseDescriptor.setMaxSpaceForCompactionsPerDrive(oldMaxSpaceForCompactions);
-            DatabaseDescriptor.setMinFreeSpacePerDriveInMebibytes(oldFreeSpace / FileUtils.ONE_MIB);
-        }
+        return tm.keyspace + File.pathSeparator() + tm.name + (oldStyle ? "" : Component.separator + tm.id.toHexString()) + "/na-1-big-Data.db";
+    }
+
+    private List<Directories.DataDirectoryCandidate> getWriteableDirectories(DataDirectory[] dataDirectories, long writeSize)
+    {
+        // copied from Directories.getWriteableLocation(long)
+        List<Directories.DataDirectoryCandidate> candidates = new ArrayList<>();
+
+        long totalAvailable = 0L;
+
+        for (DataDirectory dataDir : dataDirectories)
+            {
+                Directories.DataDirectoryCandidate candidate = new Directories.DataDirectoryCandidate(dataDir);
+                // exclude directory if its total writeSize does not fit to data directory
+                if (candidate.availableSpace < writeSize)
+                    continue;
+                candidates.add(candidate);
+                totalAvailable += candidate.availableSpace;
+            }
+
+        Directories.sortWriteableCandidates(candidates, totalAvailable);
+
+        return candidates;
     }
 
     private int getDiyThreadId()
@@ -951,10 +859,11 @@ public class DirectoriesTest
     private List<ILoggingEvent> filterLogByDiyId(List<ILoggingEvent> log)
     {
         ArrayList<ILoggingEvent> filteredLog = new ArrayList<>();
-        for(ILoggingEvent event : log)
+        for (ILoggingEvent event : log)
         {
             int mdcId = Integer.parseInt(event.getMDCPropertyMap().get(this.MDCID));
-            if(mdcId == myDiyId){
+            if (mdcId == myDiyId)
+            {
                 filteredLog.add(event);
             }
         }
@@ -966,191 +875,101 @@ public class DirectoriesTest
         int found=0;
         for(ILoggingEvent e: log)
         {
+            System.err.println(e.getFormattedMessage());
             if(e.getFormattedMessage().endsWith(expectedMessage))
+            {
                 if (e.getLevel() == expectedLevel)
                     found++;
+            }
         }
 
         assertEquals(expectedCount, found);
     }
 
     @Test
-    public void testHasAvailableSpace()
+    public void testHasAvailableDiskSpace()
     {
-        double oldMaxSpaceForCompactions = DatabaseDescriptor.getMaxSpaceForCompactionsPerDrive();
-        long oldFreeSpace = DatabaseDescriptor.getMinFreeSpacePerDriveInMebibytes();
-        DatabaseDescriptor.setMaxSpaceForCompactionsPerDrive(1.0);
-        DatabaseDescriptor.setMinFreeSpacePerDriveInMebibytes(0);
-        try
-        {
-            FakeFileStore fs1 = new FakeFileStore();
-            FakeFileStore fs2 = new FakeFileStore();
-            FakeFileStore fs3 = new FakeFileStore();
-            Map<FileStore, Long> writes = new HashMap<>();
+        DataDirectory[] dataDirectories = new DataDirectory[]
+                                          {
+                                          new DataDirectory(new File("/nearlyFullDir1"))
+                                          {
+                                              public long getAvailableSpace()
+                                              {
+                                                  return 11L;
+                                              }
+                                          },
+                                          new DataDirectory(new File("/uniformDir2"))
+                                          {
+                                              public long getAvailableSpace()
+                                              {
+                                                  return 999L;
+                                              }
+                                          },
+                                          new DataDirectory(new File("/veryFullDir"))
+                                          {
+                                              public long getAvailableSpace()
+                                              {
+                                                  return 4L;
+                                              }
+                                          }
+                                          };
 
-            fs1.usableSpace = 30;
-            fs2.usableSpace = 30;
-            fs3.usableSpace = 30;
+        Directories d = new Directories( ((TableMetadata) CFM.toArray()[0]), dataDirectories);
 
-            writes.put(fs1, 20L);
-            writes.put(fs2, 20L);
-            writes.put(fs3, 20L);
-            assertTrue(Directories.hasDiskSpaceForCompactionsAndStreams(writes));
+        assertTrue(d.hasAvailableDiskSpace(1,2));
+        assertTrue(d.hasAvailableDiskSpace(10,99));
+        assertFalse(d.hasAvailableDiskSpace(10,1024));
+        assertFalse(d.hasAvailableDiskSpace(1024,1024*1024));
 
-            fs1.usableSpace = 19;
-            assertFalse(Directories.hasDiskSpaceForCompactionsAndStreams(writes));
+        List<ILoggingEvent> filteredLog = listAppender.list;
+        //List<ILoggingEvent> filteredLog = filterLogByDiyId(listAppender.list);
+        // Log messages can be out of order, even for the single thread. (e tui AsyncAppender?)
+        // We can deal with it, it's sufficient to just check that all messages exist in the result
+        assertEquals(23, filteredLog.size());
+        String logMsgFormat = "DataDirectory %s has %d bytes available, checking if we can write %d bytes";
+        String logMsg = String.format(logMsgFormat, "/nearlyFullDir1", 11, 2);
+        checkFormattedMessage(filteredLog, Level.DEBUG, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/uniformDir2", 999, 2);
+        checkFormattedMessage(filteredLog, Level.DEBUG, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/veryFullDir", 4, 2);
+        checkFormattedMessage(filteredLog, Level.DEBUG, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/nearlyFullDir1", 11, 2);
+        checkFormattedMessage(filteredLog, Level.DEBUG, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/uniformDir2", 999, 9);
+        checkFormattedMessage(filteredLog, Level.DEBUG, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/veryFullDir", 4, 9);
+        checkFormattedMessage(filteredLog, Level.DEBUG, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/nearlyFullDir1", 11, 102);
+        checkFormattedMessage(filteredLog, Level.DEBUG, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/uniformDir2", 999, 102);
+        checkFormattedMessage(filteredLog, Level.DEBUG, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/veryFullDir", 4, 102);
+        checkFormattedMessage(filteredLog, Level.DEBUG, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/nearlyFullDir1", 11, 1024);
+        checkFormattedMessage(filteredLog, Level.DEBUG, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/uniformDir2", 999, 1024);
+        checkFormattedMessage(filteredLog, Level.DEBUG, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/veryFullDir", 4, 1024);
+        checkFormattedMessage(filteredLog, Level.DEBUG, logMsg, 1);
 
-            writes.put(fs2, 25L*1024*1024+9);
-            fs2.usableSpace = 20L*1024*1024-9;
-            writes.put(fs3, 999L*1024*1024*1024+9);
-            fs2.usableSpace = 20L*1024+99;
-            assertFalse(Directories.hasDiskSpaceForCompactionsAndStreams(writes));
+        logMsgFormat = "DataDirectory %s can't be used for compaction. Only %s is available, but %s is the minimum write size.";
+        logMsg = String.format(logMsgFormat, "/veryFullDir", "4 bytes", "9 bytes");
+        checkFormattedMessage(filteredLog, Level.WARN, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/nearlyFullDir1", "11 bytes", "102 bytes");
+        checkFormattedMessage(filteredLog, Level.WARN, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/veryFullDir", "4 bytes", "102 bytes");
+        checkFormattedMessage(filteredLog, Level.WARN, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/nearlyFullDir1", "11 bytes", "1 KiB");
+        checkFormattedMessage(filteredLog, Level.WARN, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/uniformDir2", "999 bytes", "1 KiB");
+        checkFormattedMessage(filteredLog, Level.WARN, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "/veryFullDir", "4 bytes", "1 KiB");
+        checkFormattedMessage(filteredLog, Level.WARN, logMsg, 1);
 
-            fs1.usableSpace = 30;
-            fs2.usableSpace = 30;
-            fs3.usableSpace = 30L*1024*1024*1024*1024;
-
-            writes.put(fs1, 20L);
-            writes.put(fs2, 20L);
-            writes.put(fs3, 30L*1024*1024*1024*1024+1);
-            assertFalse(Directories.hasDiskSpaceForCompactionsAndStreams(writes));
-
-            List<ILoggingEvent> filteredLog = filterLogByDiyId(listAppender.list);
-            // Log messages can be out of order, even for the single thread. (e tui AsyncAppender?)
-            // We can deal with it, it's sufficient to just check that all messages exist in the result
-            assertEquals(17, filteredLog.size());
-
-            String logMsg = "30 bytes available, checking if we can write 20 bytes";
-            checkFormattedMessage(filteredLog, Level.DEBUG, logMsg, 7);
-            logMsg = "19 bytes available, checking if we can write 20 bytes";
-            checkFormattedMessage(filteredLog, Level.DEBUG, logMsg, 2);
-
-
-            logMsg = "19 bytes available, but 20 bytes is needed";
-            checkFormattedMessage(filteredLog, Level.WARN, logMsg, 2);
-            logMsg = "has only 20.1 KiB available, but 25 MiB is needed";
-            checkFormattedMessage(filteredLog, Level.WARN, logMsg, 1);
-            logMsg = "has only 30 bytes available, but 999 GiB is needed";
-            checkFormattedMessage(filteredLog, Level.WARN, logMsg, 1);
-            logMsg = "has only 30 TiB available, but 30 TiB is needed";
-            checkFormattedMessage(filteredLog, Level.WARN, logMsg, 1);
-        }
-        finally
-        {
-            DatabaseDescriptor.setMaxSpaceForCompactionsPerDrive(oldMaxSpaceForCompactions);
-            DatabaseDescriptor.setMinFreeSpacePerDriveInMebibytes(oldFreeSpace);
-        }
-    }
-
-    @Test
-    public void testHasAvailableSpaceSumming()
-    {
-        double oldMaxSpaceForCompactions = DatabaseDescriptor.getMaxSpaceForCompactionsPerDrive();
-        long oldFreeSpace = DatabaseDescriptor.getMinFreeSpacePerDriveInMebibytes();
-        DatabaseDescriptor.setMaxSpaceForCompactionsPerDrive(1.0);
-        DatabaseDescriptor.setMinFreeSpacePerDriveInMebibytes(0);
-        try
-        {
-            FakeFileStore fs1 = new FakeFileStore();
-            FakeFileStore fs2 = new FakeFileStore();
-            Map<File, Long> expectedNewWriteSizes = new HashMap<>();
-            Map<File, Long> totalCompactionWriteRemaining = new HashMap<>();
-
-            fs1.usableSpace = 100;
-            fs2.usableSpace = 100;
-
-            File f1 = new File("f1");
-            File f2 = new File("f2");
-            File f3 = new File("f3");
-
-            expectedNewWriteSizes.put(f1, 20L);
-            expectedNewWriteSizes.put(f2, 20L);
-            expectedNewWriteSizes.put(f3, 20L);
-
-            totalCompactionWriteRemaining.put(f1, 20L);
-            totalCompactionWriteRemaining.put(f2, 20L);
-            totalCompactionWriteRemaining.put(f3, 20L);
-            Function<File, FileStore> filestoreMapper = (f) -> {
-                if (f == f1 || f == f2)
-                    return fs1;
-                return fs2;
-            };
-            assertTrue(Directories.hasDiskSpaceForCompactionsAndStreams(expectedNewWriteSizes, totalCompactionWriteRemaining, filestoreMapper));
-            fs1.usableSpace = 79;
-            assertFalse(Directories.hasDiskSpaceForCompactionsAndStreams(expectedNewWriteSizes, totalCompactionWriteRemaining, filestoreMapper));
-            fs1.usableSpace = 81;
-            assertTrue(Directories.hasDiskSpaceForCompactionsAndStreams(expectedNewWriteSizes, totalCompactionWriteRemaining, filestoreMapper));
-
-            expectedNewWriteSizes.clear();
-            expectedNewWriteSizes.put(f1, 100L);
-            totalCompactionWriteRemaining.clear();
-            totalCompactionWriteRemaining.put(f2, 100L);
-            fs1.usableSpace = 150;
-
-            assertFalse(Directories.hasDiskSpaceForCompactionsAndStreams(expectedNewWriteSizes, totalCompactionWriteRemaining, filestoreMapper));
-            expectedNewWriteSizes.clear();
-            expectedNewWriteSizes.put(f1, 100L);
-            totalCompactionWriteRemaining.clear();
-            totalCompactionWriteRemaining.put(f3, 500L);
-            fs1.usableSpace = 150;
-            fs2.usableSpace = 400; // too little space for the ongoing compaction, but this filestore does not affect the new compaction so it should be allowed
-
-            assertTrue(Directories.hasDiskSpaceForCompactionsAndStreams(expectedNewWriteSizes, totalCompactionWriteRemaining, filestoreMapper));
-        }
-        finally
-        {
-            DatabaseDescriptor.setMaxSpaceForCompactionsPerDrive(oldMaxSpaceForCompactions);
-            DatabaseDescriptor.setMinFreeSpacePerDriveInMebibytes(oldFreeSpace / FileUtils.ONE_MIB);
-        }
-    }
-
-    private String getNewFilename(TableMetadata tm, boolean oldStyle)
-    {
-        return tm.keyspace + File.pathSeparator() + tm.name + (oldStyle ? "" : Component.separator + tm.id.toHexString()) + "/na-1-big-Data.db";
-    }
-
-    private List<Directories.DataDirectoryCandidate> getWriteableDirectories(DataDirectory[] dataDirectories, long writeSize)
-    {
-        // copied from Directories.getWriteableLocation(long)
-        List<Directories.DataDirectoryCandidate> candidates = new ArrayList<>();
-
-        long totalAvailable = 0L;
-
-        for (DataDirectory dataDir : dataDirectories)
-        {
-            Directories.DataDirectoryCandidate candidate = new Directories.DataDirectoryCandidate(dataDir);
-            // exclude directory if its total writeSize does not fit to data directory
-            if (candidate.availableSpace < writeSize)
-                continue;
-            candidates.add(candidate);
-            totalAvailable += candidate.availableSpace;
-        }
-
-        Directories.sortWriteableCandidates(candidates, totalAvailable);
-
-        return candidates;
-    }
-
-    public static class FakeFileStore extends FileStore
-    {
-        public long usableSpace = 100;
-        public long getUsableSpace()
-        {
-            return usableSpace;
-        }
-        public String name() {return null;}
-        public String type() {return null;}
-        public boolean isReadOnly() {return false;}
-        public long getTotalSpace() {return 0;}
-        public long getUnallocatedSpace() {return 0;}
-        public boolean supportsFileAttributeView(Class<? extends FileAttributeView> type) {return false;}
-        public boolean supportsFileAttributeView(String name) {return false;}
-        public <V extends FileStoreAttributeView> V getFileStoreAttributeView(Class<V> type) {return null;}
-        public Object getAttribute(String attribute) {return null;}
-
-        public String toString()
-        {
-            return "MockFileStore";
-        }
+        logMsgFormat = "Across %s there's only %s available, but %s is needed.";
+        logMsg = String.format(logMsgFormat, "[/nearlyFullDir1,/uniformDir2,/veryFullDir]", "999 bytes", "1 KiB");
+        checkFormattedMessage(filteredLog, Level.WARN, logMsg, 1);
+        logMsg = String.format(logMsgFormat, "[/nearlyFullDir1,/uniformDir2,/veryFullDir]", "0 bytes", "1 MiB");
+        checkFormattedMessage(filteredLog, Level.WARN, logMsg, 1);
     }
 }

@@ -1,4 +1,10 @@
 /*
+ * All changes to the original code are Copyright KhulnaSoft, Ltd.
+ *
+ * Please see the included license file for details.
+ */
+
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,22 +24,37 @@
 
 package org.apache.cassandra.index.sai.analyzer;
 
+import java.io.Closeable;
 import java.nio.ByteBuffer;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
-import java.util.stream.Collectors;
+import java.util.Set;
 
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Maps;
+
+import org.slf4j.Logger;
+
+import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.AsciiType;
+import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.apache.cassandra.index.sai.utils.IndexTermType;
+import org.apache.cassandra.index.sai.utils.TypeUtil;
+import org.apache.lucene.analysis.Analyzer;
 
 public abstract class AbstractAnalyzer implements Iterator<ByteBuffer>
 {
+    private static final Logger logger = org.slf4j.LoggerFactory.getLogger(AbstractAnalyzer.class);
+
+    public static final Set<AbstractType<?>> ANALYZABLE_TYPES = ImmutableSet.of(UTF8Type.instance, AsciiType.instance);
+
     protected ByteBuffer next = null;
-    protected String nextLiteral = null;
+    String nextLiteral = null;
 
     /**
-     * @return true if index value is transformed, e.g. normalized or lower-cased or tokenized.
+     * @return true if index value is transformed, eg. normalized or lower-cased or tokenized.
      */
     public abstract boolean transformValue();
 
@@ -73,44 +94,133 @@ public abstract class AbstractAnalyzer implements Iterator<ByteBuffer>
         resetInternal(input);
     }
 
-    public interface AnalyzerFactory
+    public static boolean hasQueryAnalyzer(Map<String, String> options)
+    {
+       return options.containsKey(LuceneAnalyzer.QUERY_ANALYZER);
+    }
+
+    public interface AnalyzerFactory extends Closeable
     {
         AbstractAnalyzer create();
+
+        /**
+         * @return true if the analyzer supports EQ queries (see {@link AnalyzerEqOperatorSupport})
+         */
+        default boolean supportsEquals()
+        {
+            return true;
+        }
 
         default void close()
         {
         }
     }
 
-    public static AnalyzerFactory fromOptions(IndexTermType indexTermType, Map<String, String> options)
+    public static AnalyzerFactory fromOptionsQueryAnalyzer(final AbstractType<?> type, final Map<String, String> options)
     {
-        if (hasNonTokenizingOptions(options))
+        final String json = options.get(LuceneAnalyzer.QUERY_ANALYZER);
+        return toAnalyzerFactory(json, type, options);
+    }
+
+    public static AnalyzerFactory toAnalyzerFactory(String json, final AbstractType<?> type, final Map<String, String> options) //throws Exception
+    {
+        if (!TypeUtil.isIn(type, ANALYZABLE_TYPES))
         {
-            if (indexTermType.isString())
+            logger.warn("CQL type {} cannot be analyzed options={}; using NoOpAnalyzer", type.asCQL3Type(), options);
+            return NoOpAnalyzer::new;
+        }
+
+        try
+        {
+            final Analyzer analyzer = JSONAnalyzerParser.parse(json);
+            return new AnalyzerFactory()
             {
-                // validate options
-                NonTokenizingOptions.fromMap(options);
-                return () -> new NonTokenizingAnalyzer(indexTermType, options);
+                @Override
+                public void close()
+                {
+                    analyzer.close();
+                }
+
+                public AbstractAnalyzer create()
+                {
+                    return new LuceneAnalyzer(type, analyzer, options);
+                }
+
+                @Override
+                public boolean supportsEquals()
+                {
+                    return AnalyzerEqOperatorSupport.supportsEqualsFromOptions(options);
+                }
+            };
+        }
+        catch (InvalidRequestException ex)
+        {
+            throw ex;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidRequestException("CQL type " + type.asCQL3Type() + " cannot be analyzed options="+options, ex);
+        }
+    }
+
+    public static boolean isAnalyzed(Map<String, String> options) {
+        return options.containsKey(LuceneAnalyzer.INDEX_ANALYZER) || NonTokenizingOptions.hasNonDefaultOptions(options);
+    }
+
+    public static AnalyzerFactory fromOptions(AbstractType<?> type, Map<String, String> options)
+    {
+        boolean containsIndexAnalyzer = options.containsKey(LuceneAnalyzer.INDEX_ANALYZER);
+        boolean containsNonTokenizingOptions = NonTokenizingOptions.hasNonDefaultOptions(options);
+        boolean supportsEquals = AnalyzerEqOperatorSupport.supportsEqualsFromOptions(options);
+        if (containsIndexAnalyzer && containsNonTokenizingOptions)
+        {
+            logger.warn("Invalid combination of options for index_analyzer: {}", options);
+            var optionsToStrip = List.of(NonTokenizingOptions.CASE_SENSITIVE, NonTokenizingOptions.NORMALIZE, NonTokenizingOptions.ASCII);
+            options = Maps.filterKeys(options, k -> !optionsToStrip.contains(k));
+            logger.warn("Rewrote options to {}", options);
+        }
+        boolean containsQueryAnalyzer = options.containsKey(LuceneAnalyzer.QUERY_ANALYZER);
+        if (containsQueryAnalyzer && !containsIndexAnalyzer && !containsNonTokenizingOptions)
+        {
+            throw new InvalidRequestException("Cannot specify query_analyzer without an index_analyzer option or any" +
+                                              " combination of case_sensitive, normalize, or ascii options. options=" + options);
+        }
+
+        if (containsIndexAnalyzer)
+        {
+            String json = options.get(LuceneAnalyzer.INDEX_ANALYZER);
+            return toAnalyzerFactory(json, type, options);
+        }
+
+        if (containsNonTokenizingOptions)
+        {
+            if (TypeUtil.isIn(type, ANALYZABLE_TYPES))
+            {
+                // load NonTokenizingAnalyzer so it'll validate options
+                NonTokenizingAnalyzer a = new NonTokenizingAnalyzer(type, options);
+                a.end();
+                Map<String, String> finalOptions = options;
+
+                return new AnalyzerFactory()
+                {
+                    @Override
+                    public AbstractAnalyzer create()
+                    {
+                        return new NonTokenizingAnalyzer(type, finalOptions);
+                    }
+
+                    @Override
+                    public boolean supportsEquals()
+                    {
+                        return supportsEquals;
+                    }
+                };
             }
             else
             {
-                throw new InvalidRequestException("CQL type " + indexTermType.asCQL3Type() + " cannot be analyzed.");
+                throw new InvalidRequestException("CQL type " + type.asCQL3Type() + " cannot be analyzed.");
             }
         }
-
-        return null;
+        return NoOpAnalyzer::new;
     }
-
-    private static boolean hasNonTokenizingOptions(Map<String, String> options)
-    {
-        return options.keySet().stream().anyMatch(NonTokenizingOptions::hasOption);
-    }
-
-    public static Map<String, String> getAnalyzerOptions(Map<String, String> options)
-    {
-        return options.entrySet().stream()
-                      .filter(e -> NonTokenizingOptions.hasOption(e.getKey()))
-                      .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-    }
-
 }

@@ -21,10 +21,10 @@ package org.apache.cassandra.hints;
 import java.io.IOException;
 import java.util.UUID;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.primitives.Ints;
 
 import org.apache.cassandra.db.TypeSizes;
-import org.apache.cassandra.exceptions.CoordinatorBehindException;
 import org.apache.cassandra.exceptions.UnknownTableException;
 import org.apache.cassandra.io.IVersionedAsymmetricSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
@@ -46,7 +46,7 @@ public class DTestSerializer implements IVersionedAsymmetricSerializer<Serializa
         }
 
         UUIDSerializer.serializer.serialize(message.hostId, out, version);
-        out.writeUnsignedVInt32(0);
+        out.writeUnsignedVInt(0);
         message.unknownTableID.serialize(out);
     }
 
@@ -63,11 +63,10 @@ public class DTestSerializer implements IVersionedAsymmetricSerializer<Serializa
         {
             return new HintMessage(hostId, Hint.serializer.deserialize(countingIn, version));
         }
-        catch (UnknownTableException | CoordinatorBehindException e)
+        catch (UnknownTableException e)
         {
             in.skipBytes(Ints.checkedCast(hintSize - countingIn.getBytesRead()));
-            TableId tableId = ((UnknownTableException) (e instanceof CoordinatorBehindException ? e.getCause() : e)).id;
-            return new HintMessage(hostId, tableId);
+            return new HintMessage(hostId, e.id);
         }
     }
 

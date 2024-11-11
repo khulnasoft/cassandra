@@ -50,6 +50,7 @@ import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.Tables;
 import org.apache.cassandra.security.EncryptionContextGenerator;
+import org.apache.cassandra.utils.JVMKiller;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.KillerForTests;
 
@@ -74,7 +75,7 @@ public class CommitLogUpgradeTest
     static final String KEYSPACE = "Keyspace1";
     static final String CELLNAME = "name";
 
-    private JVMStabilityInspector.Killer originalKiller;
+    private JVMKiller originalKiller;
     private KillerForTests killerForTests;
     private boolean shouldBeKilled = false;
 
@@ -83,7 +84,6 @@ public class CommitLogUpgradeTest
                      .addPartitionKeyColumn("key", AsciiType.instance)
                      .addClusteringColumn("col", AsciiType.instance)
                      .addRegularColumn("val", BytesType.instance)
-                     .addRegularColumn("val0", BytesType.instance)
                      .compression(SchemaLoader.getCompressionParameters())
                      .build();
 
@@ -99,27 +99,6 @@ public class CommitLogUpgradeTest
     {
         JVMStabilityInspector.replaceKiller(originalKiller);
         Assert.assertEquals("JVM killed", shouldBeKilled, killerForTests.wasKilled());
-    }
-
-    // 30 matches version in MessagingService, 3.0.13 is the latest patch release after 3.0.0 but before 3.0.14
-    @Test
-    public void test30_encrypted() throws Exception
-    {
-        testRestore(DATA_DIR + "3.0.13-encrypted");
-    }
-
-    // 3014 matches version in MessagingService, 3.0.29 is the latest patch release after 3.0.14
-    @Test
-    public void test3014_encrypted() throws Exception
-    {
-        testRestore(DATA_DIR + "3.0.29-encrypted");
-    }
-
-    // 40 matches version in MessagingService, 4.0.11 is the latest patch release on 4.0
-    @Test
-    public void test40_encrypted() throws Exception
-    {
-        testRestore(DATA_DIR + "4.0.11-encrypted");
     }
 
     @Test
@@ -184,7 +163,7 @@ public class CommitLogUpgradeTest
         {
             for (PartitionUpdate update : mutation.getPartitionUpdates())
             {
-                for (Row row : update)
+                for (Row row : update.rows())
                     if (row.clustering().size() > 0 &&
                         AsciiType.instance.compose(row.clustering().bufferAt(0)).startsWith(CELLNAME))
                     {

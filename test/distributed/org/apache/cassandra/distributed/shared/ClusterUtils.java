@@ -18,9 +18,8 @@
 
 package org.apache.cassandra.distributed.shared;
 
-import java.io.Serializable;
-import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
+import java.security.Permission;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -30,28 +29,19 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BiConsumer;
-import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.Futures;
 import org.junit.Assert;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.distributed.api.ConsistencyLevel;
-import org.apache.cassandra.distributed.api.Feature;
 import org.apache.cassandra.distributed.api.ICluster;
 import org.apache.cassandra.distributed.api.IInstance;
 import org.apache.cassandra.distributed.api.IInstanceConfig;
@@ -60,36 +50,14 @@ import org.apache.cassandra.distributed.api.IMessageFilters;
 import org.apache.cassandra.distributed.api.NodeToolResult;
 import org.apache.cassandra.distributed.impl.AbstractCluster;
 import org.apache.cassandra.distributed.impl.InstanceConfig;
-import org.apache.cassandra.distributed.impl.TestChangeListener;
-import org.apache.cassandra.distributed.test.log.TestProcessor;
-import org.apache.cassandra.gms.ApplicationState;
-import org.apache.cassandra.gms.VersionedValue;
 import org.apache.cassandra.io.util.File;
-import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.net.Message;
-import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.net.RequestCallback;
-import org.apache.cassandra.net.Verb;
-import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.tcm.ClusterMetadataService;
-import org.apache.cassandra.tcm.Commit;
-import org.apache.cassandra.tcm.Epoch;
-import org.apache.cassandra.tcm.Transformation;
-import org.apache.cassandra.tcm.log.Entry;
-import org.apache.cassandra.tcm.membership.NodeId;
-import org.apache.cassandra.tcm.ownership.ReplicaGroups;
+import org.apache.cassandra.tools.SystemExitException;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Isolated;
-import org.apache.cassandra.utils.concurrent.AsyncPromise;
-import org.apache.cassandra.utils.concurrent.CountDownLatch;
 
 import static com.google.common.util.concurrent.Uninterruptibles.sleepUninterruptibly;
 import static org.apache.cassandra.config.CassandraRelevantProperties.BOOTSTRAP_SCHEMA_DELAY_MS;
-import static org.apache.cassandra.config.CassandraRelevantProperties.BROADCAST_INTERVAL_MS;
-import static org.apache.cassandra.config.CassandraRelevantProperties.REPLACE_ADDRESS_FIRST_BOOT;
-import static org.apache.cassandra.config.CassandraRelevantProperties.RING_DELAY;
-import static org.apache.cassandra.distributed.impl.DistributedTestSnitch.toCassandraInetAddressAndPort;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -103,7 +71,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Isolated
 public class ClusterUtils
 {
-    private static final Logger logger = LoggerFactory.getLogger(ClusterUtils.class);
     /**
      * Start the instance with the given System Properties, after the instance has started, the properties will be cleared.
      */
@@ -175,22 +142,6 @@ public class ClusterUtils
      * Create a new instance and add it to the cluster, without starting it.
      *
      * @param cluster to add to
-     * @param other config to copy from
-     * @param fn function to add to the config before starting
-     * @param <I> instance type
-     * @return the instance added
-     */
-    public static <I extends IInstance> I addInstance(AbstractCluster<I> cluster,
-                                                      IInstanceConfig other,
-                                                      Consumer<IInstanceConfig> fn)
-    {
-        return addInstance(cluster, other.localDatacenter(), other.localRack(), fn);
-    }
-
-    /**
-     * Create a new instance and add it to the cluster, without starting it.
-     *
-     * @param cluster to add to
      * @param dc the instance should be in
      * @param rack the instance should be in
      * @param <I> instance type
@@ -240,7 +191,7 @@ public class ClusterUtils
      * @param <I> instance type
      * @return the instance added
      */
-    public static <I extends IInstance> I replaceHostAndStart(AbstractCluster<I> cluster, I toReplace)
+    public static <I extends IInstance> I replaceHostAndStart(AbstractCluster<I> cluster, IInstance toReplace)
     {
         return replaceHostAndStart(cluster, toReplace, ignore -> {});
     }
@@ -257,150 +208,48 @@ public class ClusterUtils
      * @return the instance added
      */
     public static <I extends IInstance> I replaceHostAndStart(AbstractCluster<I> cluster,
-                                                              I toReplace,
+                                                              IInstance toReplace,
                                                               Consumer<WithProperties> fn)
     {
-        return replaceHostAndStart(cluster, toReplace, (ignore, prop) -> fn.accept(prop));
-    }
-
-    /**
-     * Create and start a new instance that replaces an existing instance.
-     *
-     * The instance will be in the same datacenter and rack as the existing instance.
-     *
-     * @param cluster to add to
-     * @param toReplace instance to replace
-     * @param fn lambda to add additional properties or modify instance
-     * @param <I> instance type
-     * @return the instance added
-     */
-    public static <I extends IInstance> I replaceHostAndStart(AbstractCluster<I> cluster,
-                                                              I toReplace,
-                                                              BiConsumer<I, WithProperties> fn)
-    {
         IInstanceConfig toReplaceConf = toReplace.config();
-        I inst = addInstance(cluster, toReplaceConf, c -> c.set("auto_bootstrap", true)
-                                                           .set("progress_barrier_min_consistency_level", ConsistencyLevel.ONE));
-        return startHostReplacement(toReplace, inst, fn);
+        I inst = addInstance(cluster, toReplaceConf.localDatacenter(), toReplaceConf.localRack(), c -> c.set("auto_bootstrap", true));
 
-    }
-
-    /**
-     * Start a instance with the properties needed to perform a host replacement.
-     *
-     * @param toReplace instance to replace
-     * @param inst      to start
-     * @param fn        lambda to add additional properties or modify instance
-     * @param <I>       instance type
-     * @return inst
-     */
-    public static <I extends IInstance> I startHostReplacement(I toReplace, I inst, BiConsumer<I, WithProperties> fn)
-    {
         return start(inst, properties -> {
             // lower this so the replacement waits less time
-            properties.set(BROADCAST_INTERVAL_MS, Long.toString(TimeUnit.SECONDS.toMillis(30)));
+            properties.setProperty("cassandra.broadcast_interval_ms", Long.toString(TimeUnit.SECONDS.toMillis(30)));
             // default is 30s, lowering as it should be faster
-            properties.set(RING_DELAY, Long.toString(TimeUnit.SECONDS.toMillis(10)));
+            properties.setProperty("cassandra.ring_delay_ms", Long.toString(TimeUnit.SECONDS.toMillis(10)));
             properties.set(BOOTSTRAP_SCHEMA_DELAY_MS, TimeUnit.SECONDS.toMillis(10));
 
             // state which node to replace
-            InetSocketAddress address = toReplace.config().broadcastAddress();
-            // when port isn't defined we use the default port, but in jvm-dtest the port might change!
-            properties.set(REPLACE_ADDRESS_FIRST_BOOT, address.getAddress().getHostAddress() + ":" + address.getPort());
+            properties.setProperty("cassandra.replace_address_first_boot", toReplace.config().broadcastAddress().getAddress().getHostAddress());
 
-            fn.accept(inst, properties);
+            fn.accept(properties);
         });
     }
 
     /**
-     * Calls TokenMap#tokens(), returning as a list of strings.
+     * Calls {@link org.apache.cassandra.locator.TokenMetadata#sortedTokens()}, returning as a list of strings.
      */
     public static List<String> getTokenMetadataTokens(IInvokableInstance inst)
     {
         return inst.callOnInstance(() ->
-                                   ClusterMetadata.current().tokenMap.tokens()
-                                                                     .stream()
-                                                                     .map(Object::toString)
-                                                                     .collect(Collectors.toList()));
+                                   StorageService.instance.getTokenMetadata()
+                                                          .sortedTokens().stream()
+                                                          .map(Object::toString)
+                                                          .collect(Collectors.toList()));
     }
 
-    public static Collection<String> getLocalTokens(IInvokableInstance inst)
+    public static String getLocalToken(IInvokableInstance inst)
     {
         return inst.callOnInstance(() -> {
             List<String> tokens = new ArrayList<>();
-
-            for (Token t : ClusterMetadata.current().tokenMap.tokens(ClusterMetadata.current().myNodeId()))
+            for (Token t : StorageService.instance.getTokenMetadata().getTokens(FBUtilities.getBroadcastAddressAndPort()))
                 tokens.add(t.getTokenValue().toString());
-            return tokens;
+
+            assert tokens.size() == 1 : "getLocalToken assumes a single token, but multiple tokens found";
+            return tokens.get(0);
         });
-    }
-
-    public static List<String> getPeerDirectoryDebugStrings(IInvokableInstance inst)
-    {
-        String s = inst.callOnInstance(() -> ClusterMetadata.current().directory.toDebugString());
-        return Arrays.asList(s.split("\n"));
-    }
-
-    public static List<String> getTokenMapDebugStrings(IInvokableInstance inst)
-    {
-        String s = inst.callOnInstance(() -> ClusterMetadata.current().tokenMap.toDebugString());
-        return Arrays.asList(s.split("\n"));
-    }
-
-    public static void logTokenMapDebugString(IInvokableInstance inst)
-    {
-        inst.runOnInstance(() -> ClusterMetadata.current().tokenMap.logDebugString());
-    }
-
-    @SuppressWarnings("rawtypes")
-    public static Map<String, List[]> getDataPlacementDebugInfo(IInvokableInstance inst)
-    {
-        return inst.callOnInstance(() -> getPlacementDebugInfo(ClusterMetadataService.instance()));
-    }
-
-
-    // not pretty, but this is for testing. For each keyspace, includes 2—element array of List<Replica>.
-    // Element 0 is the read replicas for the keyspace, element 1 is the write replicas.
-    @VisibleForTesting
-    @SuppressWarnings("rawtypes")
-    public static Map<String, List[]> getPlacementDebugInfo(ClusterMetadataService metadataService)
-    {
-        ClusterMetadata metadata = metadataService.metadata();
-        Map<String, List[]> byKeyspace = new HashMap<>();
-        for (KeyspaceMetadata keyspace : metadata.schema.getKeyspaces())
-        {
-            List[] placements = new List[2];
-            placements[0] = metadata.placements.get(keyspace.params.replication).reads.toReplicaStringList();
-            placements[1] = metadata.placements.get(keyspace.params.replication).writes.toReplicaStringList();
-            byKeyspace.put(keyspace.name, placements);
-        }
-        return byKeyspace;
-    }
-
-    public static void logDataPlacementDebugString(IInvokableInstance inst, boolean byEndpoint)
-    {
-        inst.runOnInstance(() -> logPlacementDebugString(ClusterMetadataService.instance(), byEndpoint));
-    }
-
-    public static void logPlacementDebugString(ClusterMetadataService metadataService, boolean byEndpoint)
-    {
-        ClusterMetadata metadata = metadataService.metadata();
-        List<String> keyspaces = new ArrayList<>();
-        for (KeyspaceMetadata keyspace : metadata.schema.getKeyspaces())
-        {
-            StringBuilder builder = new StringBuilder();
-            builder.append("'keyspace' { 'name':").append(keyspace.name).append("', ");
-            builder.append("'reads':['");
-            ReplicaGroups placement = metadata.placements.get(keyspace.params.replication).reads;
-            builder.append(byEndpoint ? placement.toStringByEndpoint() : placement.toString());
-            builder.append("'], 'writes':['");
-            placement = metadata.placements.get(keyspace.params.replication).writes;
-            builder.append(byEndpoint ? placement.toStringByEndpoint() : placement.toString());
-            builder.append("']}");
-            keyspaces.add(builder.toString());
-        }
-        String debug = String.join("\n", keyspaces);
-        logger.debug(debug);
     }
 
     public static <I extends IInstance> void runAndWaitForLogs(Runnable r, String waitString, AbstractCluster<I> cluster) throws TimeoutException
@@ -418,351 +267,6 @@ public class ClusterUtils
             instances[i].logs().watchFor(marks[i], waitString);
     }
 
-    public static Epoch getClusterMetadataVersion(IInvokableInstance inst)
-    {
-        return decode(inst.callOnInstance(() -> encode(ClusterMetadata.current().epoch)));
-    }
-
-    public static long encode(Epoch epoch)
-    {
-        return epoch.getEpoch();
-    }
-
-    public static Epoch decode(long periodEpoch)
-    {
-        return Epoch.create(periodEpoch);
-    }
-
-    public static void waitForCMSToQuiesce(ICluster<IInvokableInstance> cluster, IInvokableInstance leader, int...ignored)
-    {
-        ClusterUtils.waitForCMSToQuiesce(cluster, getClusterMetadataVersion(leader), ignored);
-    }
-
-    public static void dropAllEntriesBeginningAt(IInvokableInstance instance, Epoch epoch)
-    {
-        instance.runOnInstance(() -> ClusterMetadataService.instance().log().addFilter(e -> e.epoch.isEqualOrAfter(epoch)));
-    }
-
-    public static void clearEntryFilters(IInvokableInstance instance)
-    {
-        instance.runOnInstance(() -> ClusterMetadataService.instance().log().clearFilters());
-    }
-
-    public static Callable<Void> pauseBeforeEnacting(IInvokableInstance instance, Epoch epoch)
-    {
-        return pauseBeforeEnacting(instance, epoch, 10, TimeUnit.SECONDS);
-    }
-
-    protected static Callable<Void> pauseBeforeEnacting(IInvokableInstance instance,
-                                                        Epoch epoch,
-                                                        long wait,
-                                                        TimeUnit waitUnit)
-    {
-        return instance.callOnInstance(() -> {
-            TestChangeListener listener = TestChangeListener.instance;
-            AsyncPromise<?> promise = new AsyncPromise<>();
-            listener.pauseBefore(epoch, () -> promise.setSuccess(null));
-            return () -> {
-                try
-                {
-                    promise.get(wait, waitUnit);
-                    return null;
-                }
-                catch (Throwable e)
-                {
-                    throw new RuntimeException(e);
-                }
-            };
-        });
-    }
-
-    public static Callable<Void> pauseAfterEnacting(IInvokableInstance instance, Epoch epoch)
-    {
-        return pauseAfterEnacting(instance, epoch, 10, TimeUnit.SECONDS);
-    }
-
-    protected static Callable<Void> pauseAfterEnacting(IInvokableInstance instance,
-                                                       Epoch epoch,
-                                                       long wait,
-                                                       TimeUnit waitUnit)
-    {
-        return instance.callOnInstance(() -> {
-            TestChangeListener listener = TestChangeListener.instance;
-            AsyncPromise<?> promise = new AsyncPromise<>();
-            listener.pauseAfter(epoch, () -> promise.setSuccess(null));
-            return () -> {
-                try
-                {
-                    promise.get(wait, waitUnit);
-                    return null;
-                }
-                catch (Throwable e)
-                {
-                    throw new RuntimeException(e);
-                }
-            };
-        });
-    }
-
-    public static Callable<Epoch> pauseBeforeCommit(IInvokableInstance cmsInstance, SerializablePredicate<Transformation> predicate)
-    {
-        Callable<Long> remoteCallable = cmsInstance.callOnInstance(() -> {
-            TestProcessor processor = (TestProcessor) ((ClusterMetadataService.SwitchableProcessor) ClusterMetadataService.instance().processor()).delegate();
-            AsyncPromise<Epoch> promise = new AsyncPromise<>();
-            processor.pauseIf(predicate, () -> promise.setSuccess(ClusterMetadata.current().epoch));
-            return () -> {
-                try
-                {
-                    return promise.get(30, TimeUnit.SECONDS).getEpoch();
-                }
-                catch (Throwable e)
-                {
-                    throw new RuntimeException(e);
-                }
-            };
-        });
-        return () -> Epoch.create(remoteCallable.call());
-
-    }
-
-    public static Callable<Epoch> getSequenceAfterCommit(IInvokableInstance cmsInstance,
-                                                         SerializableBiPredicate<Transformation, Commit.Result> predicate)
-    {
-        Callable<Long> remoteCallable = cmsInstance.callOnInstance(() -> {
-            TestProcessor processor = (TestProcessor) ((ClusterMetadataService.SwitchableProcessor) ClusterMetadataService.instance().processor()).delegate();
-
-            AsyncPromise<Epoch> promise = new AsyncPromise<>();
-            processor.registerCommitPredicate((event, result) -> {
-                if (predicate.test(event, result))
-                {
-                    promise.setSuccess(result.success().logState.latestEpoch());
-                    return true;
-                }
-
-                return false;
-            });
-            return () -> {
-                try
-                {
-                    return promise.get(30, TimeUnit.SECONDS).getEpoch();
-                }
-                catch (Throwable e)
-                {
-                    throw new RuntimeException(e);
-                }
-            };
-        });
-
-        return () -> Epoch.create(remoteCallable.call());
-    }
-
-    public static void unpauseCommits(IInvokableInstance instance)
-    {
-        if (instance.isShutdown())
-            return;
-        instance.runOnInstance(() -> {
-            TestProcessor processor = (TestProcessor) ((ClusterMetadataService.SwitchableProcessor) ClusterMetadataService.instance().processor()).delegate();
-            processor.unpause();
-        });
-    }
-
-    public static void unpauseEnactment(IInvokableInstance instance)
-    {
-        instance.runOnInstance(() -> TestChangeListener.instance.unpause());
-    }
-
-    public static boolean isMigrating(IInvokableInstance instance)
-    {
-        return instance.callOnInstance(() -> ClusterMetadataService.instance().isMigrating());
-    }
-
-    public static interface SerializablePredicate<T> extends Predicate<T>, Serializable
-    {}
-
-    public static interface SerializableBiPredicate<T1, T2> extends BiPredicate<T1, T2>, Serializable {}
-
-    private static class ClusterMetadataVersion
-    {
-        public final int node;
-        public final Epoch epoch;
-
-        private ClusterMetadataVersion(int node, Epoch epoch)
-        {
-            this.node = node;
-            this.epoch = epoch;
-        }
-
-        public String toString()
-        {
-            return "Version{" +
-                   "node=" + node +
-                   ", epoch=" + epoch +
-                   '}';
-        }
-    }
-
-    public static void waitForCMSToQuiesce(ICluster<IInvokableInstance> cluster, int[] cmsNodes)
-    {
-        // first step; find the largest epoch
-        waitForCMSToQuiesce(cluster, maxEpoch(cluster, cmsNodes));
-    }
-
-    private static Epoch maxEpoch(ICluster<IInvokableInstance> cluster, int[] cmsNodes)
-    {
-        Epoch max = null;
-        for (int id : cmsNodes)
-        {
-            IInvokableInstance inst = cluster.get(id);
-            if (inst.isShutdown()) continue;
-            Epoch version = getClusterMetadataVersion(inst);
-            if (max == null || version.getEpoch() > max.getEpoch())
-                max = version;
-        }
-        if (max == null)
-            throw new AssertionError("Unable to find max epoch from " + cmsNodes);
-        return max;
-    }
-
-    public static void waitForCMSToQuiesce(ICluster<IInvokableInstance> cluster, Epoch awaitedEpoch, int...ignored)
-    {
-        List<ClusterMetadataVersion> notMatching = new ArrayList<>();
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-        while (System.nanoTime() < deadline)
-        {
-            notMatching.clear();
-            for (int j = 1; j <= cluster.size(); j++)
-            {
-                boolean skip = false;
-                for (int ignore : ignored)
-                    if (ignore == j)
-                        skip = true;
-
-                if (skip)
-                    continue;
-
-                if (cluster.get(j).isShutdown())
-                    continue;
-                Epoch version = getClusterMetadataVersion(cluster.get(j));
-                if (version.getEpoch() < awaitedEpoch.getEpoch())
-                    notMatching.add(new ClusterMetadataVersion(j, version));
-            }
-            if (notMatching.isEmpty())
-                return;
-
-            sleepUninterruptibly(10, TimeUnit.MILLISECONDS);
-        }
-        throw new AssertionError(String.format("Some instances have not reached schema agreement with the leader. Awaited %s; diverging nodes: %s. ", awaitedEpoch, notMatching));
-    }
-
-    public static Epoch getCurrentEpoch(IInvokableInstance inst)
-    {
-        return decode(inst.callOnInstance(() -> encode(ClusterMetadata.current().epoch)));
-    }
-
-    public static Epoch getNextEpoch(IInvokableInstance inst)
-    {
-        return decode(inst.callOnInstance(() -> encode(ClusterMetadata.current().nextEpoch())));
-    }
-
-    public static Epoch snapshotClusterMetadata(IInvokableInstance inst)
-    {
-        return decode(inst.callOnInstance(() -> {
-            ClusterMetadata snapshotted = ClusterMetadataService.instance().triggerSnapshot();
-            return encode(snapshotted.epoch);
-        }));
-    }
-
-    public static Map<String, Epoch> getPeerEpochs(IInvokableInstance requester)
-    {
-        Map<String, Long> map = requester.callOnInstance(() -> {
-            ImmutableList<InetAddressAndPort> peers = ClusterMetadata.current().directory.allAddresses();
-            CountDownLatch latch = CountDownLatch.newCountDownLatch(peers.size());
-            Map<String, Long> epochs = new ConcurrentHashMap<>(peers.size());
-            peers.forEach(peer -> {
-                Message<Epoch> request = Message.out(Verb.TCM_CURRENT_EPOCH_REQ, ClusterMetadata.current().epoch);
-                RequestCallback<Epoch> callback = response -> {
-                    epochs.put(peer.toString(), encode(response.payload));
-                    latch.decrement();
-                };
-                MessagingService.instance().sendWithCallback(request, peer, callback);
-            });
-            latch.awaitUninterruptibly();
-            return epochs;
-        });
-        return map.entrySet()
-                  .stream()
-                  .collect(Collectors.toMap(Map.Entry::getKey, e -> decode(e.getValue())));
-    }
-
-    public static Set<String> getCMSMembers(IInvokableInstance inst)
-    {
-        return inst.callOnInstance(() -> ClusterMetadata.current()
-                                                        .fullCMSMembers()
-                                                        .stream()
-                                                        .map(InetSocketAddress::getAddress)
-                                                        .map(Object::toString)
-                                                        .collect(Collectors.toSet()));
-    }
-
-    public static boolean decommission(IInvokableInstance leaving)
-    {
-        return leaving.callOnInstance(() -> {
-            try
-            {
-                StorageService.instance.decommission(true);
-                return true;
-            }
-            catch (Exception e)
-            {
-                e.printStackTrace();
-                return false;
-            }
-        });
-    }
-
-    public static NodeId getNodeId(IInvokableInstance target)
-    {
-        return new NodeId(getNodeId(target, target));
-    }
-
-    public static int getNodeId(IInvokableInstance target, IInvokableInstance executor)
-    {
-        InetSocketAddress targetAddress = target.config().broadcastAddress();
-        return executor.callOnInstance(() -> {
-            try
-            {
-                return ClusterMetadata.current().directory.peerId(toCassandraInetAddressAndPort(targetAddress)).id();
-            }
-            catch (Exception e)
-            {
-                e.printStackTrace();
-                return null;
-            }
-        });
-    }
-
-    public static boolean cancelInProgressSequences(IInvokableInstance executor)
-    {
-        return cancelInProgressSequences(getNodeId(executor), executor);
-    }
-
-    public static boolean cancelInProgressSequences(NodeId nodeId, IInvokableInstance executor)
-    {
-        int id = nodeId.id();
-        return executor.callOnInstance(() -> {
-            try
-            {
-
-                StorageService.instance.cancelInProgressSequences(new NodeId(id));
-                return true;
-            }
-            catch (Exception e)
-            {
-                e.printStackTrace();
-                return false;
-            }
-        });
-    }
 
     /**
      * Get the ring from the perspective of the instance.
@@ -889,20 +393,6 @@ public class ClusterUtils
     }
 
     /**
-     * Wait for the ring to have the target instance with the provided status.
-     *
-     * @param instance instance to check on
-     * @param expectedInRing to look for
-     * @param status expected
-     * @return the ring
-     */
-    public static List<RingInstanceDetails> awaitRingStatus(IInstance instance, IInstance expectedInRing, String status)
-    {
-        return awaitInstanceMatching(instance, expectedInRing, d -> d.status.equals(status),
-                                     "Timeout waiting for " + expectedInRing + " to have status " + status);
-    }
-
-    /**
      * Wait for the ring to have the target instance with the provided state.
      *
      * @param instance instance to check on
@@ -912,20 +402,12 @@ public class ClusterUtils
      */
     public static List<RingInstanceDetails> awaitRingState(IInstance instance, IInstance expectedInRing, String state)
     {
-        return awaitInstanceMatching(instance, expectedInRing, d -> d.state.equals(state),
-                                     "Timeout waiting for " + expectedInRing + " to have state " + state);
-    }
-
-    private static List<RingInstanceDetails> awaitInstanceMatching(IInstance instance,
-                                                                   IInstance expectedInRing,
-                                                                   Predicate<RingInstanceDetails> predicate,
-                                                                   String errorMessage)
-    {
-        return awaitRing(instance,
-                         errorMessage,
-                         ring -> ring.stream()
-                                     .filter(d -> d.address.equals(getBroadcastAddressHostString(expectedInRing)))
-                                     .anyMatch(predicate));
+        return awaitRing(instance, "Timeout waiting for " + expectedInRing + " to have state " + state,
+                         ring ->
+                         ring.stream()
+                             .filter(d -> d.address.equals(getBroadcastAddressHostString(expectedInRing)))
+                             .filter(d -> d.state.equals(state))
+                             .findAny().isPresent());
     }
 
     /**
@@ -1039,63 +521,6 @@ public class ClusterUtils
         });
     }
 
-    public static void awaitGossipSchemaMatch(ICluster<? extends  IInstance> cluster)
-    {
-        cluster.forEach(ClusterUtils::awaitGossipSchemaMatch);
-    }
-
-    public static void awaitGossipSchemaMatch(IInstance instance)
-    {
-        if (!instance.config().has(Feature.GOSSIP))
-        {
-            // when gosisp isn't enabled, don't bother waiting on gossip to settle...
-            return;
-        }
-        awaitGossip(instance, "Schema IDs did not match", all -> {
-            String current = null;
-            for (Map.Entry<String, Map<String, String>> e : all.entrySet())
-            {
-                Map<String, String> state = e.getValue();
-                // has the instance joined?
-                String status = state.get(ApplicationState.STATUS_WITH_PORT.name());
-                if (status == null)
-                    status = state.get(ApplicationState.STATUS.name());
-                if (status == null || !status.contains(VersionedValue.STATUS_NORMAL))
-                    continue; // ignore instances not joined yet
-                String schema = state.get("SCHEMA");
-                if (schema == null)
-                    throw new AssertionError("Unable to find schema for " + e.getKey() + "; status was " + status);
-                schema = schema.split(":")[1];
-
-                if (current == null)
-                {
-                    current = schema;
-                }
-                else if (!current.equals(schema))
-                {
-                    return false;
-                }
-            }
-            return true;
-        });
-    }
-
-    public static void awaitGossipStateMatch(ICluster<? extends  IInstance> cluster, IInstance expectedInGossip, ApplicationState key)
-    {
-        Set<String> matches = null;
-        for (int i = 0; i < 100; i++)
-        {
-            matches = cluster.stream().map(ClusterUtils::gossipInfo)
-                             .map(gi -> Objects.requireNonNull(gi.get(getBroadcastAddressString(expectedInGossip))))
-                             .map(m -> m.get(key.name()))
-                             .collect(Collectors.toSet());
-            if (matches.isEmpty() || matches.size() == 1)
-                return;
-            sleepUninterruptibly(1, TimeUnit.SECONDS);
-        }
-        throw new AssertionError("Expected ApplicationState." + key + " to match, but saw " + matches);
-    }
-
     /**
      * Get the gossip information from the node.  Currently only address, generation, and heartbeat are returned
      *
@@ -1170,17 +595,6 @@ public class ClusterUtils
     }
 
     /**
-     * Get the number of tokens for the instance via config.
-     *
-     * @param instance to get token count from
-     * @return number of tokens
-     */
-    public static int getTokenCount(IInvokableInstance instance)
-    {
-        return instance.config().getInt("num_tokens");
-    }
-
-    /**
      * Get all data directories for the given instance.
      *
      * @param instance to get data directories for
@@ -1196,6 +610,19 @@ public class ClusterUtils
         for (int i = 0; i < ds.length; i++)
             files.add(new File(ds[i]));
         return files;
+    }
+
+    /**
+     * Get the metadata directory where the information about nodes is stored.
+     *
+     * @param instance to get the metadata directory for
+     * @return metadata directory
+     */
+    public static File getMetadataDirectory(IInstance instance)
+    {
+        IInstanceConfig conf = instance.config();
+        String d = conf.getString("metadata_directory");
+        return new File(d);
     }
 
     /**
@@ -1256,6 +683,7 @@ public class ClusterUtils
         out.add(getCommitLogDirectory(instance));
         out.add(getHintsDirectory(instance));
         out.add(getSavedCachesDirectory(instance));
+        out.add(getMetadataDirectory(instance));
         return out;
     }
 
@@ -1291,33 +719,13 @@ public class ClusterUtils
      */
     private static void updateAddress(IInstanceConfig conf, String address)
     {
-        InetSocketAddress previous = conf.broadcastAddress();
-
         for (String key : Arrays.asList("broadcast_address", "listen_address", "broadcast_rpc_address", "rpc_address"))
             conf.set(key, address);
 
         // InstanceConfig caches InetSocketAddress -> InetAddressAndPort
         // this causes issues as startup now ignores config, so force reset it to pull from conf.
         ((InstanceConfig) conf).unsetBroadcastAddressAndPort(); //TODO remove the need to null out the cache...
-
-        //TODO NetworkTopology class isn't flexible and doesn't handle adding/removing nodes well...
-        // it also uses a HashMap which makes the class not thread safe... so mutating AFTER starting nodes
-        // are a risk
-        if (!conf.broadcastAddress().equals(previous))
-        {
-            conf.networkTopology().put(conf.broadcastAddress(), NetworkTopology.dcAndRack(conf.localDatacenter(), conf.localRack()));
-            try
-            {
-                Field field = NetworkTopology.class.getDeclaredField("map");
-                field.setAccessible(true);
-                Map<InetSocketAddress, NetworkTopology.DcAndRack> map = (Map<InetSocketAddress, NetworkTopology.DcAndRack>) field.get(conf.networkTopology());
-                map.remove(previous);
-            }
-            catch (NoSuchFieldException | IllegalAccessException e)
-            {
-                throw new AssertionError(e);
-            }
-        }
+        conf.networkTopology().put(conf.broadcastAddress(), NetworkTopology.dcAndRack(conf.localDatacenter(), conf.localRack()));
     }
 
     /**
@@ -1338,41 +746,11 @@ public class ClusterUtils
     }
 
     /**
-     * @return the native address in host:port format (ex. 127.0.0.1:9042)
-     */
-    public static InetSocketAddress getNativeInetSocketAddress(IInstance target)
-    {
-        return new InetSocketAddress(target.config().broadcastAddress().getAddress(),
-                                     getIntConfig(target.config(), "native_transport_port", 9042));
-    }
-
-    /**
      * Get the broadcast address InetAddess string (ex. localhost/127.0.0.1 or /127.0.0.1)
      */
     private static String getBroadcastAddressString(IInstance target)
     {
         return target.config().broadcastAddress().getAddress().toString();
-    }
-
-    /**
-     * Tries to return the integer configuration from the {@code config}, fallsback to {@code defaultValue}
-     * when it fails to retrieve the value.
-     *
-     * @param config       the config instance
-     * @param configName   the name of the configuration
-     * @param defaultValue the default value
-     * @return the integer value from the configuration, or the default value when it fails to retrieve it
-     */
-    public static int getIntConfig(IInstanceConfig config, String configName, int defaultValue)
-    {
-        try
-        {
-            return config.getInt(configName);
-        }
-        catch (NullPointerException npe)
-        {
-            return defaultValue;
-        }
     }
 
     public static final class RingInstanceDetails
@@ -1444,7 +822,23 @@ public class ClusterUtils
 
     public static void preventSystemExit()
     {
-        System.setSecurityManager(new PreventSystemExit());
+        System.setSecurityManager(new SecurityManager()
+        {
+            @Override
+            public void checkExit(int status)
+            {
+                throw new SystemExitException(status);
+            }
+
+            @Override
+            public void checkPermission(Permission perm)
+            {
+            }
+
+            @Override
+            public void checkPermission(Permission perm, Object context)
+            {
+            }
+        });
     }
 }
-

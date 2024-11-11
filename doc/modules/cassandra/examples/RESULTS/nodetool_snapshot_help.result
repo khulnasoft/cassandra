@@ -42,9 +42,6 @@ OPTIONS
        -t <tag>, --tag <tag>
            The name of the snapshot
 
-       --ttl <ttl>
-           Specify a TTL of created snapshot
-
        -u <username>, --username <username>
            Remote jmx agent username
 

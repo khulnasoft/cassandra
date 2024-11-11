@@ -18,17 +18,20 @@
 package org.apache.cassandra.streaming.messages;
 
 import java.io.IOException;
+import java.util.UUID;
+
+import io.netty.channel.Channel;
 
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.util.DataInputPlus;
+import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.streaming.StreamingChannel;
-import org.apache.cassandra.streaming.StreamingDataOutputPlus;
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.streaming.StreamOperation;
 import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamSession;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.UUIDSerializer;
 
 import static org.apache.cassandra.locator.InetAddressAndPort.Serializer.inetAddressAndPortSerializer;
 
@@ -42,14 +45,14 @@ public class StreamInitMessage extends StreamMessage
 
     public final InetAddressAndPort from;
     public final int sessionIndex;
-    public final TimeUUID planId;
+    public final UUID planId;
     public final StreamOperation streamOperation;
 
-    public final TimeUUID pendingRepair;
+    public final UUID pendingRepair;
     public final PreviewKind previewKind;
 
-    public StreamInitMessage(InetAddressAndPort from, int sessionIndex, TimeUUID planId, StreamOperation streamOperation,
-                             TimeUUID pendingRepair, PreviewKind previewKind)
+    public StreamInitMessage(InetAddressAndPort from, int sessionIndex, UUID planId, StreamOperation streamOperation,
+                             UUID pendingRepair, PreviewKind previewKind)
     {
         super(Type.STREAM_INIT);
         this.from = from;
@@ -61,12 +64,10 @@ public class StreamInitMessage extends StreamMessage
     }
 
     @Override
-    public StreamSession getOrCreateAndAttachInboundSession(StreamingChannel channel, int messagingVersion)
+    public StreamSession getOrCreateSession(Channel channel)
     {
-        StreamSession session = StreamResultFuture.createFollower(sessionIndex, planId, streamOperation, from, channel, messagingVersion, pendingRepair, previewKind)
+        return StreamResultFuture.createFollower(sessionIndex, planId, streamOperation, from, channel, pendingRepair, previewKind)
                                  .getSession(from, sessionIndex);
-        session.attachInbound(channel);
-        return session;
     }
 
     @Override
@@ -80,16 +81,18 @@ public class StreamInitMessage extends StreamMessage
 
     private static class StreamInitMessageSerializer implements Serializer<StreamInitMessage>
     {
-        public void serialize(StreamInitMessage message, StreamingDataOutputPlus out, int version, StreamSession session) throws IOException
+        public void serialize(StreamInitMessage message, DataOutputStreamPlus out, int version, StreamSession session) throws IOException
         {
             inetAddressAndPortSerializer.serialize(message.from, out, version);
             out.writeInt(message.sessionIndex);
-            message.planId.serialize(out);
+            UUIDSerializer.serializer.serialize(message.planId, out, MessagingService.current_version);
             out.writeUTF(message.streamOperation.getDescription());
 
             out.writeBoolean(message.pendingRepair != null);
             if (message.pendingRepair != null)
-                message.pendingRepair.serialize(out);
+            {
+                UUIDSerializer.serializer.serialize(message.pendingRepair, out, MessagingService.current_version);
+            }
             out.writeInt(message.previewKind.getSerializationVal());
         }
 
@@ -97,10 +100,10 @@ public class StreamInitMessage extends StreamMessage
         {
             InetAddressAndPort from = inetAddressAndPortSerializer.deserialize(in, version);
             int sessionIndex = in.readInt();
-            TimeUUID planId = TimeUUID.deserialize(in);
+            UUID planId = UUIDSerializer.serializer.deserialize(in, MessagingService.current_version);
             String description = in.readUTF();
 
-            TimeUUID pendingRepair = in.readBoolean() ? TimeUUID.deserialize(in) : null;
+            UUID pendingRepair = in.readBoolean() ? UUIDSerializer.serializer.deserialize(in, version) : null;
             PreviewKind previewKind = PreviewKind.deserialize(in.readInt());
             return new StreamInitMessage(from, sessionIndex, planId, StreamOperation.fromString(description),
                                          pendingRepair, previewKind);
@@ -110,11 +113,13 @@ public class StreamInitMessage extends StreamMessage
         {
             long size = inetAddressAndPortSerializer.serializedSize(message.from, version);
             size += TypeSizes.sizeof(message.sessionIndex);
-            size += TimeUUID.sizeInBytes();
+            size += UUIDSerializer.serializer.serializedSize(message.planId, MessagingService.current_version);
             size += TypeSizes.sizeof(message.streamOperation.getDescription());
             size += TypeSizes.sizeof(message.pendingRepair != null);
             if (message.pendingRepair != null)
-                size += TimeUUID.sizeInBytes();
+            {
+                size += UUIDSerializer.serializer.serializedSize(message.pendingRepair, MessagingService.current_version);
+            }
             size += TypeSizes.sizeof(message.previewKind.getSerializationVal());
 
             return size;

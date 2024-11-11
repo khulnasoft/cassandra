@@ -1,2 +1,0 @@
-{cass-50} is the only supported database currently.
-

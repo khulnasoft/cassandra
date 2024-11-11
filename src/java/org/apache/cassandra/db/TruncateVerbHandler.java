@@ -41,8 +41,7 @@ public class TruncateVerbHandler implements IVerbHandler<TruncateRequest>
         Tracing.trace("Enqueuing response to truncate operation to {}", message.from());
 
         TruncateResponse response = new TruncateResponse(truncation.keyspace, truncation.table, true);
-        if (logger.isTraceEnabled())
-            logger.trace("{} applied.  Enqueuing response to {}@{} ", truncation, message.id(), message.from());
+        logger.trace("{} applied.  Enqueuing response to {}@{} ", truncation, message.id(), message.from());
         MessagingService.instance().send(message.responseWith(response), message.from());
     }
 }

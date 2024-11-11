@@ -18,23 +18,27 @@
 package org.apache.cassandra.cql3.statements.schema;
 
 import java.util.*;
+import java.util.function.UnaryOperator;
 
 import org.apache.cassandra.audit.AuditLogContext;
 import org.apache.cassandra.audit.AuditLogEntryType;
 import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.cql3.CQL3Type;
-import org.apache.cassandra.cql3.CQLStatement;
+import org.apache.cassandra.cql3.CQLFragmentParser;
+import org.apache.cassandra.cql3.Constants;
+import org.apache.cassandra.cql3.CqlParser;
 import org.apache.cassandra.cql3.FieldIdentifier;
 import org.apache.cassandra.cql3.UTName;
-import org.apache.cassandra.db.guardrails.Guardrails;
+import org.apache.cassandra.cql3.statements.RawKeyspaceAwareStatement;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.UserType;
+import org.apache.cassandra.guardrails.Guardrails;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.Keyspaces.KeyspacesDiff;
 import org.apache.cassandra.schema.Types;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.Event.SchemaChange;
 import org.apache.cassandra.transport.Event.SchemaChange.Change;
 import org.apache.cassandra.transport.Event.SchemaChange.Target;
@@ -50,13 +54,14 @@ public final class CreateTypeStatement extends AlterSchemaStatement
     private final List<CQL3Type.Raw> rawFieldTypes;
     private final boolean ifNotExists;
 
-    public CreateTypeStatement(String keyspaceName,
+    public CreateTypeStatement(String queryString,
+                               String keyspaceName,
                                String typeName,
                                List<FieldIdentifier> fieldNames,
                                List<CQL3Type.Raw> rawFieldTypes,
                                boolean ifNotExists)
     {
-        super(keyspaceName);
+        super(queryString, keyspaceName);
         this.typeName = typeName;
         this.fieldNames = fieldNames;
         this.rawFieldTypes = rawFieldTypes;
@@ -64,7 +69,7 @@ public final class CreateTypeStatement extends AlterSchemaStatement
     }
 
     @Override
-    public void validate(ClientState state)
+    public void validate(QueryState state)
     {
         super.validate(state);
 
@@ -76,9 +81,8 @@ public final class CreateTypeStatement extends AlterSchemaStatement
         }
     }
 
-    public Keyspaces apply(ClusterMetadata metadata)
+    public Keyspaces apply(Keyspaces schema)
     {
-        Keyspaces schema = metadata.schema.getKeyspaces();
         KeyspaceMetadata keyspace = schema.getNullable(keyspaceName);
         if (null == keyspace)
             throw ire("Keyspace '%s' doesn't exist", keyspaceName);
@@ -97,21 +101,14 @@ public final class CreateTypeStatement extends AlterSchemaStatement
             if (!usedNames.add(name))
                 throw ire("Duplicate field name '%s' in type '%s'", name, typeName);
 
-        for (CQL3Type.Raw type : rawFieldTypes)
-        {
-            if (type.isCounter())
-                throw ire("A user type cannot contain counters");
-
-            if (type.isUDT() && !type.isFrozen())
-                throw ire("A user type cannot contain non-frozen UDTs");
-        }
-
         List<AbstractType<?>> fieldTypes =
             rawFieldTypes.stream()
                          .map(t -> t.prepare(keyspaceName, keyspace.types).getType())
                          .collect(toList());
 
         UserType udt = new UserType(keyspaceName, bytes(typeName), fieldNames, fieldTypes, true);
+        validate(udt);
+
         return schema.withAddedOrUpdated(keyspace.withSwapped(keyspace.types.with(udt)));
     }
 
@@ -122,7 +119,7 @@ public final class CreateTypeStatement extends AlterSchemaStatement
 
     public void authorize(ClientState client)
     {
-        client.ensureAllTablesPermission(keyspaceName, Permission.CREATE);
+        client.ensureKeyspacePermission(keyspaceName, Permission.CREATE);
     }
 
     @Override
@@ -136,7 +133,61 @@ public final class CreateTypeStatement extends AlterSchemaStatement
         return String.format("%s (%s, %s)", getClass().getSimpleName(), keyspaceName, typeName);
     }
 
-    public static final class Raw extends CQLStatement.Raw
+    public static UserType parse(String cql, String keyspace)
+    {
+        return parse(cql, keyspace, Types.none());
+    }
+
+    public static UserType parse(String cql, String keyspace, Types userTypes)
+    {
+        return CQLFragmentParser.parseAny(CqlParser::createTypeStatement, cql, "CREATE TYPE")
+                                .keyspace(keyspace)
+                                .prepare(null) // works around a messy ClientState/QueryProcessor class init deadlock
+                                .createType(userTypes);
+    }
+
+    /**
+     * Build the {@link UserType} this statement creates.
+     *
+     * @param existingTypes the user-types existing in the keyspace in which the type is created (and thus on which
+     *                      the created type may depend on).
+     * @return the created type.
+     */
+    private UserType createType(Types existingTypes)
+    {
+        List<AbstractType<?>> fieldTypes = rawFieldTypes.stream()
+                                                        .map(t -> t.prepare(keyspaceName, existingTypes).getType())
+                                                        .collect(toList());
+        UserType type = new UserType(keyspaceName, bytes(typeName), fieldNames, fieldTypes, true);
+        validate(type);
+        return type;
+    }
+
+    /**
+     * Ensures that the created UDT is valid/allowed.
+     *
+     * <p>Note: most type validation is done through {@link AbstractType#validateForColumn} because almost no type
+     * is intrinsically invalid unless used as a column type (for instance, we don't to declare a column with a
+     * {@code set<counter>} type, but there is no reason to forbid in a SELECT clause a UDF that would take 2 separate
+     * counter values and put them in a set, so {@code set<counter>} is not intrinsically invalid and that goes
+     * for basically all the validation in {@link AbstractType#validateForColumn}).
+     *
+     * <p>But with that said, as UDTs are created separately from their use, it makes sense for user-friendliness to
+     * be a tad more restrictive: if a UDT cannot ever be used as a column type, it's almost sure this is a user error,
+     * and waiting until the type is used to throw said error might be annoying. So we don't allow creating types that
+     * simply cannot be ever used as column types, even if this is in practice an arbitrary limitation in a way (some
+     * user may "legitimately" want to create a type for the sole purpose of using it as the return type of a UDF and
+     * use it in the same way that for the {@code set<counter>} example above, and we disallow that).
+     */
+    static void validate(UserType type)
+    {
+        // The only thing that is always disallowed is the use of counters with a UDT. Anything else might be ok,
+        // though possibly only if the type is used frozen.
+        if (type.referencesCounter())
+            throw ire("A user type cannot contain counters");
+    }
+
+    public static final class Raw extends RawKeyspaceAwareStatement<CreateTypeStatement>
     {
         private final UTName name;
         private final boolean ifNotExists;
@@ -150,10 +201,21 @@ public final class CreateTypeStatement extends AlterSchemaStatement
             this.ifNotExists = ifNotExists;
         }
 
-        public CreateTypeStatement prepare(ClientState state)
+        public Raw keyspace(String keyspace)
         {
-            String keyspaceName = name.hasKeyspace() ? name.getKeyspace() : state.getKeyspace();
-            return new CreateTypeStatement(keyspaceName, name.getStringTypeName(), fieldNames, rawFieldTypes, ifNotExists);
+            name.setKeyspace(keyspace);
+            return this;
+        }
+
+        @Override
+        public CreateTypeStatement prepare(ClientState state, UnaryOperator<String> keyspaceMapper)
+        {
+            String keyspaceName = keyspaceMapper.apply(name.hasKeyspace() ? name.getKeyspace() : state.getKeyspace());
+            if (keyspaceMapper != Constants.IDENTITY_STRING_MAPPER)
+                rawFieldTypes.forEach(t -> t.forEachUserType(utName -> utName.updateKeyspaceIfDefined(keyspaceMapper)));
+            return new CreateTypeStatement(rawCQLStatement, keyspaceName,
+                                           name.getStringTypeName(), fieldNames,
+                                           rawFieldTypes, ifNotExists);
         }
 
         public void addField(FieldIdentifier name, CQL3Type.Raw type)

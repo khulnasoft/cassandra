@@ -20,13 +20,14 @@ package org.apache.cassandra.db;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
 
 import com.google.common.annotations.VisibleForTesting;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.utils.MBeanWrapper;
 
@@ -49,21 +50,14 @@ public class DisallowedDirectories implements DisallowedDirectoriesMBean
         MBeanWrapper.instance.registerMBean(this, MBEAN_NAME, MBeanWrapper.OnException.LOG);
     }
 
-    @Override
-    public Set<java.io.File> getUnreadableDirectories()
+    public Set<File> getUnreadableDirectories()
     {
-        return toJmx(unreadableDirectories);
+        return Collections.unmodifiableSet(unreadableDirectories);
     }
 
-    @Override
-    public Set<java.io.File> getUnwritableDirectories()
+    public Set<File> getUnwritableDirectories()
     {
-        return toJmx(unwritableDirectories);
-    }
-
-    private static Set<java.io.File> toJmx(Set<File> set)
-    {
-        return set.stream().map(f -> f.toPath().toFile()).collect(Collectors.toSet()); // checkstyle: permit this invocation
+        return Collections.unmodifiableSet(unwritableDirectories);
     }
 
     public void markUnreadable(String path)
@@ -84,6 +78,9 @@ public class DisallowedDirectories implements DisallowedDirectoriesMBean
      */
     public static File maybeMarkUnreadable(File path)
     {
+        if (!DatabaseDescriptor.supportsBlacklistingDirectory())
+            return null;
+
         File directory = getDirectory(path);
         if (instance.unreadableDirectories.add(directory))
         {
@@ -102,6 +99,9 @@ public class DisallowedDirectories implements DisallowedDirectoriesMBean
      */
     public static File maybeMarkUnwritable(File path)
     {
+        if (!DatabaseDescriptor.supportsBlacklistingDirectory())
+            return null;
+
         File directory = getDirectory(path);
         if (instance.unwritableDirectories.add(directory))
         {

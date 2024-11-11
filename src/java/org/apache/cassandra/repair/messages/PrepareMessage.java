@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 
 import com.google.common.base.Preconditions;
 
@@ -35,39 +36,30 @@ import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.streaming.PreviewKind;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.UUIDSerializer;
 
 
 public class PrepareMessage extends RepairMessage
 {
     public final List<TableId> tableIds;
-    public final IPartitioner partitioner;
     public final Collection<Range<Token>> ranges;
 
-    public final TimeUUID parentRepairSession;
+    public final UUID parentRepairSession;
     public final boolean isIncremental;
-    public final long repairedAt;
+    public final long timestamp;
     public final boolean isGlobal;
     public final PreviewKind previewKind;
 
-    public PrepareMessage(TimeUUID parentRepairSession, List<TableId> tableIds, IPartitioner partitioner, Collection<Range<Token>> ranges, boolean isIncremental, long repairedAt, boolean isGlobal, PreviewKind previewKind)
+    public PrepareMessage(UUID parentRepairSession, List<TableId> tableIds, Collection<Range<Token>> ranges, boolean isIncremental, long timestamp, boolean isGlobal, PreviewKind previewKind)
     {
         super(null);
         this.parentRepairSession = parentRepairSession;
         this.tableIds = tableIds;
-        this.partitioner = partitioner;
         this.ranges = ranges;
         this.isIncremental = isIncremental;
-        this.repairedAt = repairedAt;
+        this.timestamp = timestamp;
         this.isGlobal = isGlobal;
         this.previewKind = previewKind;
-    }
-
-    @Override
-    public TimeUUID parentRepairSession()
-    {
-        return parentRepairSession;
     }
 
     @Override
@@ -80,66 +72,60 @@ public class PrepareMessage extends RepairMessage
                isIncremental == other.isIncremental &&
                isGlobal == other.isGlobal &&
                previewKind == other.previewKind &&
-               repairedAt == other.repairedAt &&
+               timestamp == other.timestamp &&
                tableIds.equals(other.tableIds) &&
-               partitioner.getClass().equals(other.partitioner.getClass()) &&
                ranges.equals(other.ranges);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(parentRepairSession, isGlobal, previewKind, isIncremental, repairedAt, tableIds, ranges, partitioner);
+        return Objects.hash(parentRepairSession, isGlobal, previewKind, isIncremental, timestamp, tableIds, ranges);
     }
 
     private static final String MIXED_MODE_ERROR = "Some nodes involved in repair are on an incompatible major version. " +
-                                                   "Repair is not supported in mixed major version clusters (%d vs %d). Note that " +
-                                                   "5.x nodes running in storage compatibility mode = 4 are considered " +
-                                                   "4.x nodes.";
+                                                   "Repair is not supported in mixed major version clusters.";
 
     public static final IVersionedSerializer<PrepareMessage> serializer = new IVersionedSerializer<PrepareMessage>()
     {
         public void serialize(PrepareMessage message, DataOutputPlus out, int version) throws IOException
         {
-            Preconditions.checkArgument(version == MessagingService.current_version,
-                                        String.format(MIXED_MODE_ERROR, version, MessagingService.current_version));
+            Preconditions.checkArgument(version == MessagingService.current_version, MIXED_MODE_ERROR);
 
             out.writeInt(message.tableIds.size());
             for (TableId tableId : message.tableIds)
                 tableId.serialize(out);
-            message.parentRepairSession.serialize(out);
-            if (version >= MessagingService.VERSION_51)
-                out.writeUTF(message.partitioner.getClass().getCanonicalName());
+            UUIDSerializer.serializer.serialize(message.parentRepairSession, out, version);
             out.writeInt(message.ranges.size());
             for (Range<Token> r : message.ranges)
+            {
+                IPartitioner.validate(r);
                 Range.tokenSerializer.serialize(r, out, version);
+            }
             out.writeBoolean(message.isIncremental);
-            out.writeLong(message.repairedAt);
+            out.writeLong(message.timestamp);
             out.writeBoolean(message.isGlobal);
             out.writeInt(message.previewKind.getSerializationVal());
         }
 
         public PrepareMessage deserialize(DataInputPlus in, int version) throws IOException
         {
-            Preconditions.checkArgument(version == MessagingService.current_version,
-                                        String.format(MIXED_MODE_ERROR, version, MessagingService.current_version));
+            Preconditions.checkArgument(version == MessagingService.current_version, MIXED_MODE_ERROR);
+
             int tableIdCount = in.readInt();
             List<TableId> tableIds = new ArrayList<>(tableIdCount);
             for (int i = 0; i < tableIdCount; i++)
                 tableIds.add(TableId.deserialize(in));
-            TimeUUID parentRepairSession = TimeUUID.deserialize(in);
-            IPartitioner partitioner = version >= MessagingService.VERSION_51
-                                       ? FBUtilities.newPartitioner(in.readUTF())
-                                       : IPartitioner.global();
+            UUID parentRepairSession = UUIDSerializer.serializer.deserialize(in, version);
             int rangeCount = in.readInt();
             List<Range<Token>> ranges = new ArrayList<>(rangeCount);
             for (int i = 0; i < rangeCount; i++)
-                ranges.add((Range<Token>) Range.tokenSerializer.deserialize(in, partitioner, version));
+                ranges.add((Range<Token>) Range.tokenSerializer.deserialize(in, IPartitioner.global(), version));
             boolean isIncremental = in.readBoolean();
             long timestamp = in.readLong();
             boolean isGlobal = in.readBoolean();
             PreviewKind previewKind = PreviewKind.deserialize(in.readInt());
-            return new PrepareMessage(parentRepairSession, tableIds, partitioner, ranges, isIncremental, timestamp, isGlobal, previewKind);
+            return new PrepareMessage(parentRepairSession, tableIds, ranges, isIncremental, timestamp, isGlobal, previewKind);
         }
 
         public long serializedSize(PrepareMessage message, int version)
@@ -148,14 +134,12 @@ public class PrepareMessage extends RepairMessage
             size = TypeSizes.sizeof(message.tableIds.size());
             for (TableId tableId : message.tableIds)
                 size += tableId.serializedSize();
-            size += TimeUUID.sizeInBytes();
-            if (version >= MessagingService.VERSION_51)
-                size += TypeSizes.sizeof(message.partitioner.getClass().getCanonicalName());
+            size += UUIDSerializer.serializer.serializedSize(message.parentRepairSession, version);
             size += TypeSizes.sizeof(message.ranges.size());
             for (Range<Token> r : message.ranges)
                 size += Range.tokenSerializer.serializedSize(r, version);
             size += TypeSizes.sizeof(message.isIncremental);
-            size += TypeSizes.sizeof(message.repairedAt);
+            size += TypeSizes.sizeof(message.timestamp);
             size += TypeSizes.sizeof(message.isGlobal);
             size += TypeSizes.sizeof(message.previewKind.getSerializationVal());
             return size;
@@ -170,7 +154,7 @@ public class PrepareMessage extends RepairMessage
                ", ranges=" + ranges +
                ", parentRepairSession=" + parentRepairSession +
                ", isIncremental=" + isIncremental +
-               ", timestamp=" + repairedAt +
+               ", timestamp=" + timestamp +
                ", isGlobal=" + isGlobal +
                '}';
     }

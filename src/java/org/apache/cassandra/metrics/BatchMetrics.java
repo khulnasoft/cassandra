@@ -17,22 +17,64 @@
  */
 package org.apache.cassandra.metrics;
 
+import com.codahale.metrics.Counter;
 import com.codahale.metrics.Histogram;
+import org.apache.cassandra.cql3.statements.BatchStatement;
 
 import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
 
 public class BatchMetrics
 {
-    public static final String TYPE_NAME = "Batch";
-    private static final MetricNameFactory factory = new DefaultNameFactory(TYPE_NAME);
+    private static final MetricNameFactory factory = new DefaultNameFactory("Batch");
+
+    public final Counter numLoggedBatches;
+    public final Counter numUnloggedBatches;
+    public final Counter numCounterBatches;
+
     public final Histogram partitionsPerLoggedBatch;
     public final Histogram partitionsPerUnloggedBatch;
     public final Histogram partitionsPerCounterBatch;
 
+    public final Histogram columnsPerLoggedBatch;
+    public final Histogram columnsPerUnloggedBatch;
+    public final Histogram columnsPerCounterBatch;
+
     public BatchMetrics()
     {
+        numLoggedBatches = Metrics.counter(factory.createMetricName("NumLoggedBatches"));
+        numUnloggedBatches = Metrics.counter(factory.createMetricName("NumUnloggedBatches"));
+        numCounterBatches = Metrics.counter(factory.createMetricName("NumCounterBatches"));
+
         partitionsPerLoggedBatch = Metrics.histogram(factory.createMetricName("PartitionsPerLoggedBatch"), false);
         partitionsPerUnloggedBatch = Metrics.histogram(factory.createMetricName("PartitionsPerUnloggedBatch"), false);
         partitionsPerCounterBatch = Metrics.histogram(factory.createMetricName("PartitionsPerCounterBatch"), false);
+
+        columnsPerLoggedBatch = Metrics.histogram(factory.createMetricName("ColumnsPerLoggedBatch"), false);
+        columnsPerUnloggedBatch = Metrics.histogram(factory.createMetricName("ColumnsPerUnloggedBatch"), false);
+        columnsPerCounterBatch = Metrics.histogram(factory.createMetricName("ColumnsPerCounterBatch"), false);
+    }
+
+    public void update(BatchStatement.Type batchType, int updatedPartitions, int updatedColumns)
+    {
+        switch (batchType)
+        {
+            case LOGGED:
+                numLoggedBatches.inc();
+                partitionsPerLoggedBatch.update(updatedPartitions);
+                columnsPerLoggedBatch.update(updatedColumns);
+                break;
+            case COUNTER:
+                numCounterBatches.inc();
+                partitionsPerCounterBatch.update(updatedPartitions);
+                columnsPerCounterBatch.update(updatedColumns);
+                break;
+            case UNLOGGED:
+                numUnloggedBatches.inc();
+                partitionsPerUnloggedBatch.update(updatedPartitions);
+                columnsPerUnloggedBatch.update(updatedColumns);
+                break;
+            default:
+                throw new IllegalStateException("Unexpected batch type: " + batchType);
+        }
     }
 }

@@ -17,18 +17,24 @@
  */
 package org.apache.cassandra.db;
 
+import java.util.Locale;
+
+import javax.annotation.Nullable;
+
 import com.carrotsearch.hppc.ObjectIntHashMap;
+import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.guardrails.Guardrails;
 import org.apache.cassandra.locator.Endpoints;
-import org.apache.cassandra.locator.InOurDc;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.locator.NetworkTopologyStrategy;
+import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.ProtocolException;
 
 import static org.apache.cassandra.locator.Replicas.addToCountPerDc;
-import static org.apache.cassandra.utils.LocalizeString.toUpperCaseLocalized;
+import static org.apache.cassandra.locator.Replicas.countInOurDc;
 
 public enum ConsistencyLevel
 {
@@ -41,9 +47,11 @@ public enum ConsistencyLevel
     LOCAL_QUORUM(6, true),
     EACH_QUORUM (7),
     SERIAL      (8),
-    LOCAL_SERIAL(9, true),
+    LOCAL_SERIAL(9),
     LOCAL_ONE   (10, true),
     NODE_LOCAL  (11, true);
+
+    public static final boolean THREE_MEANS_ALL_BUT_ONE = CassandraRelevantProperties.THREE_MEANS_ALL_BUT_ONE.getBoolean();
 
     // Used by the binary protocol
     public final int code;
@@ -63,15 +71,30 @@ public enum ConsistencyLevel
         }
     }
 
-    ConsistencyLevel(int code)
+    private ConsistencyLevel(int code)
     {
         this(code, false);
     }
 
-    ConsistencyLevel(int code, boolean isDCLocal)
+    private ConsistencyLevel(int code, boolean isDCLocal)
     {
         this.code = code;
         this.isDCLocal = isDCLocal;
+    }
+
+    @Override
+    public String toString()
+    {
+        if (this == THREE && THREE_MEANS_ALL_BUT_ONE)
+        {
+            return "THREE (ALL_BUT_ONE)";
+        }
+        return super.toString();
+    }
+
+    public static ConsistencyLevel fromString(String str)
+    {
+        return valueOf(str.toUpperCase(Locale.US));
     }
 
     public static ConsistencyLevel fromCode(int code)
@@ -81,14 +104,15 @@ public enum ConsistencyLevel
         return codeIdx[code];
     }
 
-    public static ConsistencyLevel fromString(String str)
-    {
-        return valueOf(toUpperCaseLocalized(str));
-    }
-
     public static int quorumFor(AbstractReplicationStrategy replicationStrategy)
     {
         return (replicationStrategy.getReplicationFactor().allReplicas / 2) + 1;
+    }
+
+    static int allButOneFor(AbstractReplicationStrategy replicationStrategy)
+    {
+        int rf = replicationStrategy.getReplicationFactor().fullReplicas;
+        return rf <= 1 ? rf : rf - 1;
     }
 
     public static int localQuorumFor(AbstractReplicationStrategy replicationStrategy, String dc)
@@ -140,6 +164,10 @@ public enum ConsistencyLevel
             case TWO:
                 return 2;
             case THREE:
+                if (THREE_MEANS_ALL_BUT_ONE)
+                {
+                    return allButOneFor(replicationStrategy);
+                }
                 return 3;
             case QUORUM:
             case SERIAL:
@@ -178,7 +206,7 @@ public enum ConsistencyLevel
                 break;
             case LOCAL_ONE: case LOCAL_QUORUM: case LOCAL_SERIAL:
                 // we will only count local replicas towards our response count, as these queries only care about local guarantees
-                blockFor += pending.count(InOurDc.replicas());
+                blockFor += countInOurDc(pending).allReplicas();
                 break;
             case ONE: case TWO: case THREE:
             case QUORUM: case EACH_QUORUM:
@@ -212,8 +240,10 @@ public enum ConsistencyLevel
         }
     }
 
-    public void validateForWrite() throws InvalidRequestException
+    public void validateForWrite(String keyspaceName, QueryState queryState) throws InvalidRequestException
     {
+        Guardrails.disallowedWriteConsistencies.ensureAllowed(this, queryState);
+
         switch (this)
         {
             case SERIAL:
@@ -223,8 +253,10 @@ public enum ConsistencyLevel
     }
 
     // This is the same than validateForWrite really, but we include a slightly different error message for SERIAL/LOCAL_SERIAL
-    public void validateForCasCommit(AbstractReplicationStrategy replicationStrategy) throws InvalidRequestException
+    public void validateForCasCommit(AbstractReplicationStrategy replicationStrategy, String keyspaceName, QueryState queryState) throws InvalidRequestException
     {
+        Guardrails.disallowedWriteConsistencies.ensureAllowed(this, queryState);
+
         switch (this)
         {
             case EACH_QUORUM:
@@ -236,8 +268,10 @@ public enum ConsistencyLevel
         }
     }
 
-    public void validateForCas() throws InvalidRequestException
+    public void validateForCas(String keyspaceName, QueryState queryState) throws InvalidRequestException
     {
+        Guardrails.disallowedWriteConsistencies.ensureAllowed(this, queryState);
+
         if (!isSerialConsistency())
             throw new InvalidRequestException("Invalid consistency for conditional update. Must be one of SERIAL or LOCAL_SERIAL");
     }
@@ -247,8 +281,10 @@ public enum ConsistencyLevel
         return this == SERIAL || this == LOCAL_SERIAL;
     }
 
-    public void validateCounterForWrite(TableMetadata metadata) throws InvalidRequestException
+    public void validateCounterForWrite(TableMetadata metadata, QueryState queryState) throws InvalidRequestException
     {
+        Guardrails.disallowedWriteConsistencies.ensureAllowed(this, queryState);
+
         if (this == ConsistencyLevel.ANY)
             throw new InvalidRequestException("Consistency level ANY is not yet supported for counter table " + metadata.name);
 
@@ -256,21 +292,27 @@ public enum ConsistencyLevel
             throw new InvalidRequestException("Counter operations are inherently non-serializable");
     }
 
-    /**
-     * With a replication factor greater than one, reads that contact more than one replica will require 
-     * reconciliation of the individual replica results at the coordinator.
-     *
-     * @return true if reads at this consistency level require merging at the coordinator
-     */
-    public boolean needsReconciliation()
-    {
-        return this != ConsistencyLevel.ONE && this != ConsistencyLevel.LOCAL_ONE && this != ConsistencyLevel.NODE_LOCAL;
-    }
-
     private void requireNetworkTopologyStrategy(AbstractReplicationStrategy replicationStrategy) throws InvalidRequestException
     {
         if (!(replicationStrategy instanceof NetworkTopologyStrategy))
             throw new InvalidRequestException(String.format("consistency level %s not compatible with replication strategy (%s)",
                                                             this, replicationStrategy.getClass().getName()));
+    }
+
+    /**
+     * Returns the strictest consistency level allowed by Guardrails.
+     *
+     * @param state the query state, used to skip the guardrails check if the query is internal or is done by a superuser.
+     * @return the strictest allowed serial consistency level
+     * @throws InvalidRequestException if all serial consistency level are disallowed
+     */
+    public static ConsistencyLevel defaultSerialConsistency(@Nullable QueryState state) throws InvalidRequestException
+    {
+        if (DatabaseDescriptor.getRawConfig() == null || !Guardrails.disallowedWriteConsistencies.triggersOn(ConsistencyLevel.SERIAL, state))
+            return ConsistencyLevel.SERIAL;
+        else if (!Guardrails.disallowedWriteConsistencies.triggersOn(ConsistencyLevel.LOCAL_SERIAL, state))
+            return ConsistencyLevel.LOCAL_SERIAL;
+
+        throw new InvalidRequestException("Serial consistency levels are disallowed by disallowedWriteConsistencies Guardrail");
     }
 }

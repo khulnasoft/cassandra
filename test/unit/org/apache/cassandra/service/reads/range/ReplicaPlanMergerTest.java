@@ -22,7 +22,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
@@ -37,11 +36,7 @@ import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.service.StorageService;
 
-import static org.apache.cassandra.ServerTestUtils.markCMS;
-import static org.apache.cassandra.ServerTestUtils.recreateCMS;
-import static org.apache.cassandra.ServerTestUtils.resetCMS;
 import static org.apache.cassandra.Util.testPartitioner;
-import static org.apache.cassandra.config.CassandraRelevantProperties.ORG_APACHE_CASSANDRA_DISABLE_MBEAN_REGISTRATION;
 import static org.apache.cassandra.db.ConsistencyLevel.ALL;
 import static org.apache.cassandra.db.ConsistencyLevel.ANY;
 import static org.apache.cassandra.db.ConsistencyLevel.EACH_QUORUM;
@@ -67,19 +62,10 @@ public class ReplicaPlanMergerTest
     @BeforeClass
     public static void defineSchema() throws ConfigurationException
     {
-        ORG_APACHE_CASSANDRA_DISABLE_MBEAN_REGISTRATION.setBoolean(true);
         SchemaLoader.prepareServer();
         StorageService.instance.setPartitionerUnsafe(Murmur3Partitioner.instance);
-        recreateCMS();
         SchemaLoader.createKeyspace(KEYSPACE, KeyspaceParams.simple(2));
         keyspace = Keyspace.open(KEYSPACE);
-        markCMS();
-    }
-
-    @Before
-    public void before()
-    {
-        resetCMS();
     }
 
     /**

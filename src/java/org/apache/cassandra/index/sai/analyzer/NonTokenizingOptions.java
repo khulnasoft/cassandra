@@ -30,6 +30,9 @@ public class NonTokenizingOptions
     public static final String NORMALIZE = "normalize";
     public static final String CASE_SENSITIVE = "case_sensitive";
     public static final String ASCII = "ascii";
+    static final boolean NORMALIZE_DEFAULT = false;
+    static final boolean CASE_SENSITIVE_DEFAULT = true;
+    static final boolean ASCII_DEFAULT = false;
 
     private boolean caseSensitive;
     private boolean normalized;
@@ -65,16 +68,11 @@ public class NonTokenizingOptions
         this.normalized = normalized;
     }
 
-    static boolean hasOption(String option)
-    {
-        return option.equals(NORMALIZE) || option.equals(CASE_SENSITIVE) || option.equals(ASCII);
-    }
-
     public static class OptionsBuilder
     {
-        private boolean caseSensitive = true;
-        private boolean normalized = false;
-        private boolean ascii = false;
+        private boolean caseSensitive = CASE_SENSITIVE_DEFAULT;
+        private boolean normalized = NORMALIZE_DEFAULT;
+        private boolean ascii = ASCII_DEFAULT;
 
         OptionsBuilder() {}
 
@@ -108,7 +106,7 @@ public class NonTokenizingOptions
 
     public static NonTokenizingOptions getDefaultOptions()
     {
-        return fromMap(new HashMap<>(1));
+        return fromMap(new HashMap(1));
     }
 
     public static NonTokenizingOptions fromMap(Map<String, String> options)
@@ -148,7 +146,7 @@ public class NonTokenizingOptions
     {
         if (Strings.isNullOrEmpty(value))
         {
-            throw new InvalidRequestException("Empty value for boolean option '" + option + '\'');
+            throw new InvalidRequestException("Empty value for boolean option '" + option + "'");
         }
 
         if (!value.equalsIgnoreCase(Boolean.TRUE.toString()) && !value.equalsIgnoreCase(Boolean.FALSE.toString()))
@@ -157,5 +155,24 @@ public class NonTokenizingOptions
         }
 
         return Boolean.parseBoolean(value);
+    }
+
+    /**
+     * Returns true if any of the options are set to a non-default value. Can be used to determine whether the
+     * parameterized OPTIONS should be used to construct a {@link NonTokenizingAnalyzer}
+     * or a {@link NoOpAnalyzer} instance.
+     * @param options - index options
+     * @return true if and only if any of the options are set to a non-default value.
+     */
+    static boolean hasNonDefaultOptions(Map<String, String> options) {
+        return hasNonDefaultBooleanOption(options.get(CASE_SENSITIVE), CASE_SENSITIVE_DEFAULT)
+               || hasNonDefaultBooleanOption(options.get(NORMALIZE), NORMALIZE_DEFAULT)
+               || hasNonDefaultBooleanOption(options.get(ASCII), ASCII_DEFAULT);
+    }
+
+    private static boolean hasNonDefaultBooleanOption(String value, boolean defaultValue)
+    {
+        // Use string equality here to preven the need to parse the input string value.
+        return value != null && !Boolean.toString(defaultValue).equalsIgnoreCase(value);
     }
 }

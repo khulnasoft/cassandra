@@ -19,384 +19,189 @@
 package org.apache.cassandra.io.sstable.format;
 
 import java.io.IOException;
-import java.nio.BufferOverflowException;
 import java.util.Collection;
+import java.util.Map;
 import java.util.Set;
-import java.util.function.Consumer;
-import java.util.function.Supplier;
+import java.util.UUID;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionPurger;
 import org.apache.cassandra.db.DeletionTime;
-import org.apache.cassandra.db.guardrails.Guardrails;
-import org.apache.cassandra.db.guardrails.Threshold;
+import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.lifecycle.LifecycleNewTracker;
 import org.apache.cassandra.db.rows.ComplexColumnData;
-import org.apache.cassandra.db.rows.PartitionSerializationException;
 import org.apache.cassandra.db.rows.RangeTombstoneBoundMarker;
 import org.apache.cassandra.db.rows.RangeTombstoneBoundaryMarker;
 import org.apache.cassandra.db.rows.RangeTombstoneMarker;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.db.rows.Unfiltered;
-import org.apache.cassandra.db.rows.UnfilteredRowIterator;
-import org.apache.cassandra.index.Index;
+import org.apache.cassandra.guardrails.Guardrails;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.compress.CompressedSequentialWriter;
-import org.apache.cassandra.io.compress.CompressionMetadata;
-import org.apache.cassandra.io.sstable.AbstractRowIndexEntry;
+import org.apache.cassandra.io.compress.ICompressor;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTable;
-import org.apache.cassandra.io.sstable.SSTableFlushObserver;
-import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
-import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
+import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
+import org.apache.cassandra.io.sstable.metadata.MetadataComponent;
+import org.apache.cassandra.io.sstable.metadata.MetadataType;
+import org.apache.cassandra.io.sstable.metadata.ZeroCopyMetadata;
+import org.apache.cassandra.io.util.ChecksummedSequentialWriter;
 import org.apache.cassandra.io.util.DataPosition;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.io.util.SequentialWriter;
+import org.apache.cassandra.io.util.SequentialWriterOption;
 import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.FilterFactory;
-import org.apache.cassandra.utils.IFilter;
 import org.apache.cassandra.utils.Throwables;
-import org.apache.cassandra.utils.concurrent.Transactional;
 
-import static com.google.common.base.Preconditions.checkNotNull;
-
-/**
- * A generic implementation of a writer which assumes the existence of some partition index and bloom filter.
- */
-public abstract class SortedTableWriter<P extends SortedTablePartitionWriter, I extends SortedTableWriter.AbstractIndexWriter> extends SSTableWriter
+public abstract class SortedTableWriter extends SSTableWriter
 {
-    private final static Logger logger = LoggerFactory.getLogger(SortedTableWriter.class);
+    protected static final Logger logger = LoggerFactory.getLogger(SortedTableWriter.class);
+    protected final FileHandle.Builder dbuilder;
+    protected final SequentialWriter dataFile;
+    protected DataPosition dataMark;
+    protected DecoratedKey currentKey;
+    protected DeletionTime currentPartitionLevelDeletion;
+    protected long currentStartPosition;
+    private long lastEarlyOpenLength = 0;
+    private boolean isInternalKeyspace;
 
-    // TODO dataWriter is not needed to be directly accessible - we can access everything we need for the dataWriter
-    //   from a partition writer
-    protected final SequentialWriter dataWriter;
-    protected final I indexWriter;
-    protected final P partitionWriter;
-    private final FileHandle.Builder dataFileBuilder = new FileHandle.Builder(descriptor.fileFor(Components.DATA));
-    private DecoratedKey lastWrittenKey;
-    private DataPosition dataMark;
-    private long lastEarlyOpenLength;
-    private final Supplier<Double> crcCheckChanceSupplier;
 
-    public SortedTableWriter(Builder<P, I, ?, ?> builder, LifecycleNewTracker lifecycleNewTracker, SSTable.Owner owner)
+    protected SortedTableWriter(Descriptor descriptor,
+                                Set<Component> components,
+                                LifecycleNewTracker lifecycleNewTracker,
+                                SequentialWriterOption writerOption,
+                                long keyCount,
+                                long repairedAt,
+                                UUID pendingRepair,
+                                boolean isTransient,
+                                TableMetadataRef metadata,
+                                MetadataCollector metadataCollector,
+                                SerializationHeader header,
+                                Collection<SSTableFlushObserver> observers)
     {
-        super(builder, lifecycleNewTracker, owner);
+        super(descriptor, components, keyCount, repairedAt, pendingRepair, isTransient, metadata, metadataCollector, header, observers);
+        lifecycleNewTracker.trackNew(this); // must track before any files are created
 
-        TableMetadataRef ref = builder.getTableMetadataRef();
-        crcCheckChanceSupplier = () -> ref.getLocal().params.crcCheckChance;
-        SequentialWriter dataWriter = null;
-        I indexWriter = null;
-        P partitionWriter = null;
-        try
+        dataFile = constructDataFileWriter(descriptor, metadata, metadataCollector, lifecycleNewTracker, writerOption);
+        dbuilder = SSTableReaderBuilder.defaultDataHandleBuilder(descriptor, ZeroCopyMetadata.EMPTY).compressed(compression);
+        isInternalKeyspace = SchemaConstants.isInternalKeyspace(metadata.keyspace);
+    }
+
+    protected static SequentialWriter constructDataFileWriter(Descriptor descriptor,
+                                                              TableMetadataRef metadata,
+                                                              MetadataCollector metadataCollector,
+                                                              LifecycleNewTracker lifecycleNewTracker,
+                                                              SequentialWriterOption writerOption)
+    {
+        if (metadata.getLocal().params.compression.isEnabled())
         {
-            dataWriter = builder.openDataWriter();
-            checkNotNull(dataWriter);
+            final CompressionParams compressionParams = compressionFor(lifecycleNewTracker.opType(), metadata);
 
-            indexWriter = builder.openIndexWriter(dataWriter);
-            checkNotNull(indexWriter);
-
-            partitionWriter = builder.openPartitionWriter(dataWriter, indexWriter);
-            checkNotNull(partitionWriter);
-
-            this.dataWriter = dataWriter;
-            this.indexWriter = indexWriter;
-            this.partitionWriter = partitionWriter;
+            return new CompressedSequentialWriter(descriptor.fileFor(Component.DATA),
+                                                  descriptor.fileFor(Component.COMPRESSION_INFO),
+                                                  descriptor.fileFor(Component.DIGEST),
+                                                  writerOption,
+                                                  compressionParams,
+                                                  metadataCollector);
         }
-        catch (RuntimeException | Error ex)
+        else
         {
-            Throwables.closeNonNullAndAddSuppressed(ex, partitionWriter, indexWriter, dataWriter);
-            handleConstructionFailure(ex);
-            throw ex;
+            return new ChecksummedSequentialWriter(descriptor.fileFor(Component.DATA),
+                                                   descriptor.fileFor(Component.CRC),
+                                                   descriptor.fileFor(Component.DIGEST),
+                                                   writerOption);
         }
     }
 
     /**
-     * Appends partition data to this writer.
-     *
-     * @param partition the partition to write
-     * @return the created index entry if something was written, that is if {@code iterator} wasn't empty,
-     * {@code null} otherwise.
-     * @throws FSWriteError if write to the dataFile fails
+     * Given an OpType, determine the correct Compression Parameters
+     * @param opType
+     * @return {@link CompressionParams}
      */
-    @Override
-    public final AbstractRowIndexEntry append(UnfilteredRowIterator partition)
+    public static CompressionParams compressionFor(final OperationType opType, TableMetadataRef metadata)
     {
-        if (partition.isEmpty())
-            return null;
+        CompressionParams compressionParams = metadata.getLocal().params.compression;
+        final ICompressor compressor = compressionParams.getSstableCompressor();
 
-        try
+        if (null != compressor && opType == OperationType.FLUSH)
         {
-            if (!verifyPartition(partition.partitionKey()))
-                return null;
-
-            startPartition(partition.partitionKey(), partition.partitionLevelDeletion());
-
-            AbstractRowIndexEntry indexEntry;
-            if (header.hasStatic())
-                addStaticRow(partition.partitionKey(), partition.staticRow());
-
-            while (partition.hasNext())
-                addUnfiltered(partition.partitionKey(), partition.next());
-
-            indexEntry = endPartition(partition.partitionKey(), partition.partitionLevelDeletion());
-
-            return indexEntry;
+            // When we are flushing out of the memtable throughput of the compressor is critical as flushes,
+            // especially of large tables, can queue up and potentially block writes.
+            // This optimization allows us to fall back to a faster compressor if a particular
+            // compression algorithm indicates we should. See CASSANDRA-15379 for more details.
+            switch (DatabaseDescriptor.getFlushCompression())
+            {
+                // It is relatively easier to insert a Noop compressor than to disable compressed writing
+                // entirely as the "compression" member field is provided outside the scope of this class.
+                // It may make sense in the future to refactor the ownership of the compression flag so that
+                // We can bypass the CompressedSequentialWriter in this case entirely.
+                case none:
+                    compressionParams = CompressionParams.NOOP;
+                    break;
+                case fast:
+                    if (!compressor.recommendedUses().contains(ICompressor.Uses.FAST_COMPRESSION))
+                    {
+                        // The default compressor is generally fast (LZ4 with 16KiB block size)
+                        compressionParams = CompressionParams.DEFAULT;
+                        break;
+                    }
+                    // else fall through
+                case table:
+                default:
+                    break;
+            }
         }
-        catch (BufferOverflowException boe)
-        {
-            throw new PartitionSerializationException(partition, boe);
-        }
-        catch (IOException e)
-        {
-            throw new FSWriteError(e, getFilename());
-        }
+        return compressionParams;
     }
 
-    private boolean verifyPartition(DecoratedKey key)
+    public void mark()
     {
-        assert key != null : "Keys must not be null"; // empty keys ARE allowed b/c of indexed column values
+        dataMark = dataFile.mark();
+    }
 
-        if (key.getKey().remaining() > FBUtilities.MAX_UNSIGNED_SHORT)
+    public void resetAndTruncate()
+    {
+        dataFile.resetAndTruncate(dataMark);
+    }
+
+    protected boolean startPartitionMetadata(DecoratedKey key, DeletionTime partitionLevelDeletion) throws IOException
+    {
+        if (key.getKeyLength() > FBUtilities.MAX_UNSIGNED_SHORT)
         {
-            logger.error("Key size {} exceeds maximum of {}, skipping row", key.getKey().remaining(), FBUtilities.MAX_UNSIGNED_SHORT);
+            logger.error("Key size {} exceeds maximum of {}, skipping row", key.getKeyLength(), FBUtilities.MAX_UNSIGNED_SHORT);
             return false;
         }
 
-        if (lastWrittenKey != null && lastWrittenKey.compareTo(key) >= 0)
-            throw new RuntimeException(String.format("Last written key %s >= current key %s, writing into %s", lastWrittenKey, key, getFilename()));
+        checkKeyOrder(key);
+        currentKey = key;
+        currentPartitionLevelDeletion = partitionLevelDeletion;
+        currentStartPosition = dataFile.position();
 
+        metadataCollector.updatePartitionDeletion(partitionLevelDeletion);
         return true;
     }
 
-    private void startPartition(DecoratedKey key, DeletionTime partitionLevelDeletion) throws IOException
+    private void guardCollectionSize(DecoratedKey partitionKey, Unfiltered unfiltered)
     {
-        partitionWriter.start(key, partitionLevelDeletion);
-        metadataCollector.updatePartitionDeletion(partitionLevelDeletion);
-
-        onStartPartition(key);
-    }
-
-    private void addStaticRow(DecoratedKey key, Row row) throws IOException
-    {
-        guardCollectionSize(key, row);
-
-        partitionWriter.addStaticRow(row);
-        if (!row.isEmpty())
-            Rows.collectStats(row, metadataCollector);
-
-        onStaticRow(row);
-    }
-
-    private void addUnfiltered(DecoratedKey key, Unfiltered unfiltered) throws IOException
-    {
-        if (unfiltered.isRow())
-            addRow(key, (Row) unfiltered);
-        else
-            addRangeTomstoneMarker((RangeTombstoneMarker) unfiltered);
-    }
-
-    private void addRow(DecoratedKey key, Row row) throws IOException
-    {
-        guardCollectionSize(key, row);
-
-        partitionWriter.addUnfiltered(row);
-        metadataCollector.updateClusteringValues(row.clustering());
-        Rows.collectStats(row, metadataCollector);
-
-        onRow(row);
-    }
-
-    private void addRangeTomstoneMarker(RangeTombstoneMarker marker) throws IOException
-    {
-        partitionWriter.addUnfiltered(marker);
-
-        metadataCollector.updateClusteringValuesByBoundOrBoundary(marker.clustering());
-        if (marker.isBoundary())
-        {
-            RangeTombstoneBoundaryMarker bm = (RangeTombstoneBoundaryMarker) marker;
-            metadataCollector.update(bm.endDeletionTime());
-            metadataCollector.update(bm.startDeletionTime());
-        }
-        else
-        {
-            metadataCollector.update(((RangeTombstoneBoundMarker) marker).deletionTime());
-        }
-
-        onRangeTombstoneMarker(marker);
-    }
-
-    private AbstractRowIndexEntry endPartition(DecoratedKey key, DeletionTime partitionLevelDeletion) throws IOException
-    {
-        long finishResult = partitionWriter.finish();
-
-        long endPosition = dataWriter.position();
-        long rowSize = endPosition - partitionWriter.getInitialPosition();
-        guardPartitionThreshold(Guardrails.partitionSize, key, rowSize);
-        guardPartitionThreshold(Guardrails.partitionTombstones, key, metadataCollector.totalTombstones);
-        metadataCollector.addPartitionSizeInBytes(rowSize);
-        metadataCollector.addKey(key.getKey());
-        metadataCollector.addCellPerPartitionCount();
-
-        lastWrittenKey = key;
-        last = lastWrittenKey;
-        if (first == null)
-            first = lastWrittenKey;
-
-        logger.trace("wrote {} at {}", key, endPosition);
-
-        return createRowIndexEntry(key, partitionLevelDeletion, finishResult);
-    }
-
-    protected void onStartPartition(DecoratedKey key)
-    {
-        notifyObservers(o -> o.startPartition(key, partitionWriter.getInitialPosition(), partitionWriter.getInitialPosition()));
-    }
-
-    protected void onStaticRow(Row row)
-    {
-        notifyObservers(o -> o.staticRow(row));
-    }
-
-    protected void onRow(Row row)
-    {
-        notifyObservers(o -> o.nextUnfilteredCluster(row));
-    }
-
-    protected void onRangeTombstoneMarker(RangeTombstoneMarker marker)
-    {
-        notifyObservers(o -> o.nextUnfilteredCluster(marker));
-    }
-
-    protected abstract AbstractRowIndexEntry createRowIndexEntry(DecoratedKey key, DeletionTime partitionLevelDeletion, long finishResult) throws IOException;
-
-    protected final void notifyObservers(Consumer<SSTableFlushObserver> action)
-    {
-        if (observers != null && !observers.isEmpty())
-            observers.forEach(action);
-    }
-
-    @Override
-    public void mark()
-    {
-        dataMark = dataWriter.mark();
-        indexWriter.mark();
-    }
-
-    @Override
-    public void resetAndTruncate()
-    {
-        dataWriter.resetAndTruncate(dataMark);
-        partitionWriter.reset();
-        indexWriter.resetAndTruncate();
-    }
-
-    @Override
-    protected SSTableWriter.TransactionalProxy txnProxy()
-    {
-        return new TransactionalProxy(() -> FBUtilities.immutableListWithFilteredNulls(indexWriter, dataWriter));
-    }
-
-    protected class TransactionalProxy extends SSTableWriter.TransactionalProxy
-    {
-        public TransactionalProxy(Supplier<ImmutableList<Transactional>> transactionals)
-        {
-            super(transactionals);
-        }
-
-        @Override
-        protected Throwable doPostCleanup(Throwable accumulate)
-        {
-            accumulate = Throwables.close(accumulate, partitionWriter);
-            accumulate = super.doPostCleanup(accumulate);
-            return accumulate;
-        }
-    }
-
-    @Override
-    public long getFilePointer()
-    {
-        return dataWriter.position();
-    }
-
-    @Override
-    public long getOnDiskFilePointer()
-    {
-        return dataWriter.getOnDiskFilePointer();
-    }
-
-    @Override
-    public long getEstimatedOnDiskBytesWritten()
-    {
-        return dataWriter.getEstimatedOnDiskBytesWritten();
-    }
-
-    protected FileHandle openDataFile(long lengthOverride, StatsMetadata statsMetadata)
-    {
-        int dataBufferSize = ioOptions.diskOptimizationStrategy.bufferSize(statsMetadata.estimatedPartitionSize.percentile(ioOptions.diskOptimizationEstimatePercentile));
-
-
-        FileHandle dataFile;
-        try (CompressionMetadata compressionMetadata = compression ? ((CompressedSequentialWriter) dataWriter).open(lengthOverride) : null)
-        {
-            dataFile = dataFileBuilder.mmapped(ioOptions.defaultDiskAccessMode)
-                                      .withMmappedRegionsCache(mmappedRegionsCache)
-                                      .withChunkCache(chunkCache)
-                                      .withCompressionMetadata(compressionMetadata)
-                                      .bufferSize(dataBufferSize)
-                                      .withCrcCheckChance(crcCheckChanceSupplier)
-                                      .withLengthOverride(lengthOverride)
-                                      .complete();
-        }
-
-        try
-        {
-            if (chunkCache != null)
-            {
-                if (lastEarlyOpenLength != 0 && dataFile.dataLength() > lastEarlyOpenLength)
-                    chunkCache.invalidatePosition(dataFile, lastEarlyOpenLength);
-            }
-            lastEarlyOpenLength = dataFile.dataLength();
-        }
-        catch (RuntimeException | Error ex)
-        {
-            Throwables.closeNonNullAndAddSuppressed(ex, dataFile);
-            throw ex;
-        }
-
-        return dataFile;
-    }
-
-    private void guardPartitionThreshold(Threshold guardrail, DecoratedKey key, long size)
-    {
-        if (guardrail.triggersOn(size, null))
-        {
-            String message = String.format("%s.%s:%s on sstable %s",
-                                           metadata.keyspace,
-                                           metadata.name,
-                                           metadata().partitionKeyType.getString(key.getKey()),
-                                           getFilename());
-            guardrail.guard(size, message, true, null);
-        }
-    }
-
-    private void guardCollectionSize(DecoratedKey partitionKey, Row row)
-    {
-        if (!Guardrails.collectionSize.enabled() && !Guardrails.itemsPerCollection.enabled())
+        if (isInternalKeyspace || !unfiltered.isRow())
             return;
 
-        if (row.isEmpty() || SchemaConstants.isSystemKeyspace(metadata.keyspace))
+        if (!Guardrails.collectionSize.enabled(null) && !Guardrails.itemsPerCollection.enabled(null))
             return;
 
+        Row row = (Row) unfiltered;
         for (ColumnMetadata column : row.columns())
         {
             if (!column.type.isCollection() || !column.type.isMultiCell())
@@ -417,98 +222,168 @@ public abstract class SortedTableWriter<P extends SortedTablePartitionWriter, I 
                 !Guardrails.itemsPerCollection.triggersOn(cellsCount, null))
                 continue;
 
-            String keyString = metadata.getLocal().primaryKeyAsCQLLiteral(partitionKey.getKey(), row.clustering());
-            String msg = String.format("%s in row %s in table %s",
+            String msg = String.format("%s in table %s",
                                        column.name.toString(),
-                                       keyString,
                                        metadata);
-            Guardrails.collectionSize.guard(cellsSize, msg, true, null);
-            Guardrails.itemsPerCollection.guard(cellsCount, msg, true, null);
+            Guardrails.collectionSize.guard(cellsSize, msg, false, null);
+            Guardrails.itemsPerCollection.guard(cellsCount, msg, false, null);
         }
     }
 
-    protected static abstract class AbstractIndexWriter extends AbstractTransactional implements Transactional
+    protected void addUnfilteredMetadata(Unfiltered unfiltered)
     {
-        protected final Descriptor descriptor;
-        protected final TableMetadataRef metadata;
-        protected final Set<Component> components;
-
-        protected final IFilter bf;
-
-        protected AbstractIndexWriter(Builder<?, ?, ?, ?> b)
+        guardCollectionSize(currentKey, unfiltered);
+        if (unfiltered.isRow())
         {
-            this.descriptor = b.descriptor;
-            this.metadata = b.getTableMetadataRef();
-            this.components = b.getComponents();
-
-            bf = FilterFactory.getFilter(b.getKeyCount(), b.getTableMetadataRef().getLocal().params.bloomFilterFpChance);
+            Row row = (Row) unfiltered;
+            metadataCollector.updateClusteringValues(row.clustering());
+            Rows.collectStats(row, metadataCollector);
         }
-
-        protected void flushBf()
+        else
         {
-            if (components.contains(Components.FILTER))
+            RangeTombstoneMarker marker = (RangeTombstoneMarker) unfiltered;
+            metadataCollector.updateClusteringValuesByBoundOrBoundary(marker.clustering());
+            if (marker.isBoundary())
             {
-                try
-                {
-                    FilterComponent.save(bf, descriptor, true);
-                }
-                catch (IOException ex)
-                {
-                    throw new FSWriteError(ex, descriptor.fileFor(Components.FILTER));
-                }
+                RangeTombstoneBoundaryMarker bm = (RangeTombstoneBoundaryMarker) marker;
+                metadataCollector.update(bm.endDeletionTime());
+                metadataCollector.update(bm.startDeletionTime());
+            }
+            else
+            {
+                metadataCollector.update(((RangeTombstoneBoundMarker) marker).deletionTime());
             }
         }
+    }
 
-        public abstract void mark();
+    protected void endPartitionMetadata() throws IOException
+    {
+        metadataCollector.addCellPerPartitionCount();
+        long endPosition = dataFile.position();
+        long partitionSize = endPosition - currentStartPosition;
+        maybeLogLargePartitionWarning(currentKey, partitionSize);
+        metadataCollector.addPartitionSizeInBytes(partitionSize);
+        metadataCollector.addKey(currentKey.getKey());
+        last = currentKey;
+        if (first == null)
+            first = currentKey;
 
-        public abstract void resetAndTruncate();
+        if (logger.isTraceEnabled())
+            logger.trace("wrote {} at {}", currentKey, currentStartPosition);
+    }
 
+    /**
+     * Perform sanity checks on @param decoratedKey and @return the position in the data file before any data is written
+     */
+    protected void checkKeyOrder(DecoratedKey decoratedKey)
+    {
+        assert decoratedKey != null : "Keys must not be null"; // empty keys ARE allowed b/c of indexed row values
+        if (currentKey != null && currentKey.compareTo(decoratedKey) >= 0)
+            throw new RuntimeException("Last written key " + currentKey + " >= current key " + decoratedKey + " writing into " + getDataFile());
+    }
+
+    protected void invalidateCacheAtBoundary(FileHandle dfile)
+    {
+        if (lastEarlyOpenLength != 0 && dfile.dataLength() > lastEarlyOpenLength)
+            dfile.invalidateIfCached(lastEarlyOpenLength);
+
+        lastEarlyOpenLength = dfile.dataLength();
+    }
+
+    public long getFilePointer()
+    {
+        return dataFile.position();
+    }
+
+    public long getOnDiskFilePointer()
+    {
+        return dataFile.getOnDiskFilePointer();
+    }
+
+    public long getEstimatedOnDiskBytesWritten()
+    {
+        return dataFile.getEstimatedOnDiskBytesWritten();
+    }
+
+    protected void writeMetadata(Descriptor desc, Map<MetadataType, MetadataComponent> components, SequentialWriterOption writerOption)
+    {
+        File file = desc.fileFor(Component.STATS);
+        try (SequentialWriter out = new SequentialWriter(file, writerOption))
+        {
+            desc.getMetadataSerializer().serialize(components, out, desc.version);
+            out.finish();
+        }
+        catch (IOException e)
+        {
+            throw new FSWriteError(e, file.path());
+        }
+    }
+
+    public void openResult()
+    {
+        txnProxy().openResult();
+    }
+
+    public SSTableReader finished()
+    {
+        txnProxy().finalReaderAccessed = true;
+        return txnProxy().finalReader;
+    }
+
+    abstract protected SSTableReader openFinal(SSTableReader.OpenReason reason);
+    abstract protected SequentialWriterOption writerOption();
+
+    abstract protected TransactionalProxy txnProxy();
+
+    protected class TransactionalProxy extends AbstractTransactional
+    {
+        // should be set during doPrepare()
+        private SSTableReader finalReader;
+        protected boolean finalReaderAccessed;
+
+        // finalise our state on disk, including renaming
         protected void doPrepare()
         {
-            flushBf();
+            // write sstable statistics
+            dataFile.prepareToCommit();
+            writeMetadata(descriptor, finalizeMetadata(), writerOption());
+
+            // save the table of components
+            SSTable.appendTOC(descriptor, components());
+        }
+
+        private void openResult()
+        {
+            finalReader = openFinal(SSTableReader.OpenReason.NORMAL);
+            finalReaderAccessed = false;
+        }
+
+        protected Throwable doCommit(Throwable accumulate)
+        {
+            accumulate = dataFile.commit(accumulate);
+            return accumulate;
         }
 
         @Override
         protected Throwable doPostCleanup(Throwable accumulate)
         {
-            accumulate = bf.close(accumulate);
+            accumulate = dbuilder.close(accumulate);
             return accumulate;
         }
 
-        public IFilter getFilterCopy()
+        protected Throwable doAbort(Throwable accumulate)
         {
-            return bf.sharedCopy();
-        }
-    }
+            accumulate = dataFile.abort(accumulate);
 
-    public abstract static class Builder<P extends SortedTablePartitionWriter,
-                                        I extends AbstractIndexWriter,
-                                        W extends SortedTableWriter<P, I>,
-                                        B extends Builder<P, I, W, B>> extends SSTableWriter.Builder<W, B>
-    {
-
-        public Builder(Descriptor descriptor)
-        {
-            super(descriptor);
-        }
-
-        @Override
-        public B addDefaultComponents(Collection<Index.Group> indexGroups)
-        {
-            super.addDefaultComponents(indexGroups);
-
-            if (FilterComponent.shouldUseBloomFilter(getTableMetadataRef().getLocal().params.bloomFilterFpChance))
+            if (!finalReaderAccessed && finalReader != null)
             {
-                addComponents(ImmutableSet.of(SSTableFormat.Components.FILTER));
+                accumulate = Throwables.perform(accumulate, () -> finalReader.selfRef().release());
+                finalReader = null;
+                finalReaderAccessed = false;
             }
 
-            return (B) this;
+            return accumulate;
         }
-
-        protected abstract SequentialWriter openDataWriter();
-
-        protected abstract I openIndexWriter(SequentialWriter dataWriter);
-
-        protected abstract P openPartitionWriter(SequentialWriter dataWriter, I indexWriter);
     }
+
 }

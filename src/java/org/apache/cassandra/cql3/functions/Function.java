@@ -24,18 +24,11 @@ import java.util.Optional;
 import org.apache.cassandra.cql3.AssignmentTestable;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.schema.Difference;
-import org.apache.cassandra.transport.ProtocolVersion;
 import org.github.jamm.Unmetered;
 
 @Unmetered
 public interface Function extends AssignmentTestable
 {
-    /**
-     * A marker buffer used to represent function parameters that cannot be resolved at some stage of CQL processing.
-     * This is used for partial function application in particular.
-     */
-    public static final ByteBuffer UNRESOLVED = ByteBuffer.allocate(0);
-
     public FunctionName name();
     public List<AbstractType<?>> argTypes();
     public AbstractType<?> returnType();
@@ -43,21 +36,14 @@ public interface Function extends AssignmentTestable
     /**
      * Checks whether the function is a native/hard coded one or not.
      *
-     * @return {@code true} if the function is a native/hard coded one, {@code false} otherwise.
+     * @return <code>true</code> if the function is a native/hard coded one, <code>false</code> otherwise.
      */
     public boolean isNative();
 
     /**
-     * Checks whether the function is a pure function (as in doesn't depend on, nor produces side effects) or not.
-     *
-     * @return {@code true} if the function is a pure function, {@code false} otherwise.
-     */
-    public boolean isPure();
-
-    /**
      * Checks whether the function is an aggregate function or not.
      *
-     * @return {@code true} if the function is an aggregate function, {@code false} otherwise.
+     * @return <code>true</code> if the function is an aggregate function, <code>false</code> otherwise.
      */
     public boolean isAggregate();
 
@@ -72,14 +58,6 @@ public interface Function extends AssignmentTestable
      * @return the name of the function to use within a ResultSet
      */
     public String columnName(List<String> columnNames);
-
-    /**
-     * Creates some new input arguments for this function.
-     *
-     * @param version the protocol version
-     * @return some new input arguments for this function
-     */
-    Arguments newArguments(ProtocolVersion version);
 
     public default Optional<Difference> compare(Function other)
     {

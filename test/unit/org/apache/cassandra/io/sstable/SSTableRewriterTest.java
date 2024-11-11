@@ -21,27 +21,30 @@ package org.apache.cassandra.io.sstable;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import org.apache.cassandra.UpdateBuilder;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.SerializationHeader;
-import org.apache.cassandra.db.compaction.AbstractCompactionStrategy;
 import org.apache.cassandra.db.compaction.CompactionController;
 import org.apache.cassandra.db.compaction.CompactionIterator;
 import org.apache.cassandra.db.compaction.OperationType;
@@ -49,8 +52,10 @@ import org.apache.cassandra.db.compaction.SSTableSplitter;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.db.lifecycle.View;
-import org.apache.cassandra.db.partitions.ImmutableBTreePartition;
+import org.apache.cassandra.db.partitions.Partition;
 import org.apache.cassandra.db.rows.EncodingStats;
+import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.dht.ByteOrderedPartitioner;
 import org.apache.cassandra.dht.Range;
@@ -62,11 +67,9 @@ import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.metrics.StorageMetrics;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.UUIDGen;
 
-import static java.util.Collections.singletonList;
-import static org.apache.cassandra.db.compaction.OperationType.COMPACTION;
-import static org.apache.cassandra.utils.FBUtilities.nowInSeconds;
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -91,16 +94,16 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
                 .build()
                 .apply();
         }
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         Set<SSTableReader> sstables = new HashSet<>(cfs.getLiveSSTables());
         assertEquals(1, sstables.size());
         assertEquals(sstables.iterator().next().bytesOnDisk(), cfs.metric.liveDiskSpaceUsed.getCount());
-        long nowInSec = FBUtilities.nowInSeconds();
-        try (AbstractCompactionStrategy.ScannerList scanners = cfs.getCompactionStrategyManager().getScanners(sstables);
+        int nowInSec = FBUtilities.nowInSeconds();
+        try (ScannerList scanners = cfs.getCompactionStrategy().getScanners(sstables);
              LifecycleTransaction txn = cfs.getTracker().tryModify(sstables, OperationType.UNKNOWN);
              SSTableRewriter writer = SSTableRewriter.constructKeepingOriginals(txn, false, 1000);
              CompactionController controller = new CompactionController(cfs, sstables, cfs.gcBefore(nowInSec));
-             CompactionIterator ci = new CompactionIterator(COMPACTION, scanners.scanners, controller, nowInSec, nextTimeUUID()))
+             CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, scanners.scanners, controller, nowInSec, UUIDGen.getTimeUUID()))
         {
             writer.switchWriter(getWriter(cfs, sstables.iterator().next().descriptor.directory, txn));
             while(ci.hasNext())
@@ -127,12 +130,12 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
         Set<SSTableReader> sstables = new HashSet<>(cfs.getLiveSSTables());
         assertEquals(1, sstables.size());
 
-        long nowInSec = FBUtilities.nowInSeconds();
-        try (AbstractCompactionStrategy.ScannerList scanners = cfs.getCompactionStrategyManager().getScanners(sstables);
+        int nowInSec = FBUtilities.nowInSeconds();
+        try (ScannerList scanners = cfs.getCompactionStrategy().getScanners(sstables);
              LifecycleTransaction txn = cfs.getTracker().tryModify(sstables, OperationType.UNKNOWN);
              SSTableRewriter writer = new SSTableRewriter(txn, 1000, 10000000, false, true);
              CompactionController controller = new CompactionController(cfs, sstables, cfs.gcBefore(nowInSec));
-             CompactionIterator ci = new CompactionIterator(COMPACTION, scanners.scanners, controller, nowInSec, nextTimeUUID()))
+             CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, scanners.scanners, controller, nowInSec, UUIDGen.getTimeUUID()))
         {
             writer.switchWriter(getWriter(cfs, sstables.iterator().next().descriptor.directory, txn));
             while (ci.hasNext())
@@ -159,13 +162,13 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
         Set<SSTableReader> sstables = new HashSet<>(cfs.getLiveSSTables());
         assertEquals(1, sstables.size());
 
-        long nowInSec = FBUtilities.nowInSeconds();
+        int nowInSec = FBUtilities.nowInSeconds();
         boolean checked = false;
-        try (AbstractCompactionStrategy.ScannerList scanners = cfs.getCompactionStrategyManager().getScanners(sstables);
+        try (ScannerList scanners = cfs.getCompactionStrategy().getScanners(sstables);
              LifecycleTransaction txn = cfs.getTracker().tryModify(sstables, OperationType.UNKNOWN);
              SSTableRewriter writer = new SSTableRewriter(txn, 1000, 10000000, false, true);
              CompactionController controller = new CompactionController(cfs, sstables, cfs.gcBefore(nowInSec));
-             CompactionIterator ci = new CompactionIterator(COMPACTION, scanners.scanners, controller, nowInSec, nextTimeUUID()))
+             CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, scanners.scanners, controller, nowInSec, UUIDGen.getTimeUUID()))
         {
             writer.switchWriter(getWriter(cfs, sstables.iterator().next().descriptor.directory, txn));
             while (ci.hasNext())
@@ -213,9 +216,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
         SSTableReader s = writeFile(cfs, 1000);
         cfs.addSSTable(s);
         long startStorageMetricsLoad = StorageMetrics.load.getCount();
-        long startUncompressedLoad = StorageMetrics.uncompressedLoad.getCount();
         long sBytesOnDisk = s.bytesOnDisk();
-        long sBytesOnDiskUncompressed = s.logicalBytesOnDisk();
         Set<SSTableReader> compacting = Sets.newHashSet(s);
 
         List<SSTableReader> sstables;
@@ -224,7 +225,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
              CompactionController controller = new CompactionController(cfs, compacting, 0);
              LifecycleTransaction txn = cfs.getTracker().tryModify(compacting, OperationType.UNKNOWN);
              SSTableRewriter rewriter = new SSTableRewriter(txn, 1000, 10000000, false, true);
-             CompactionIterator ci = new CompactionIterator(COMPACTION, singletonList(scanner), controller, nowInSeconds(), nextTimeUUID()))
+             CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, Collections.singletonList(scanner), controller, FBUtilities.nowInSeconds(), UUIDGen.getTimeUUID()))
         {
             rewriter.switchWriter(getWriter(cfs, s.descriptor.directory, txn));
 
@@ -246,15 +247,11 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
 
         LifecycleTransaction.waitForDeletions();
 
-        long sum = cfs.getLiveSSTables().stream().mapToLong(SSTableReader::bytesOnDisk).sum();
+        long sum = 0;
+        for (SSTableReader x : cfs.getLiveSSTables())
+            sum += x.bytesOnDisk();
         assertEquals(sum, cfs.metric.liveDiskSpaceUsed.getCount());
-        long endLoad = StorageMetrics.load.getCount();
-        assertEquals(startStorageMetricsLoad - sBytesOnDisk + sum, endLoad);
-
-        long uncompressedSum = cfs.getLiveSSTables().stream().mapToLong(t -> t.logicalBytesOnDisk()).sum();
-        long endUncompressedLoad = StorageMetrics.uncompressedLoad.getCount();
-        assertEquals(startUncompressedLoad - sBytesOnDiskUncompressed + uncompressedSum, endUncompressedLoad);
-
+        assertEquals(startStorageMetricsLoad - sBytesOnDisk + sum, StorageMetrics.load.getCount());
         assertEquals(files, sstables.size());
         assertEquals(files, cfs.getLiveSSTables().size());
         LifecycleTransaction.waitForDeletions();
@@ -283,7 +280,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
              CompactionController controller = new CompactionController(cfs, compacting, 0);
              LifecycleTransaction txn = cfs.getTracker().tryModify(compacting, OperationType.UNKNOWN);
              SSTableRewriter rewriter = new SSTableRewriter(txn, 1000, 10000000, false, true);
-             CompactionIterator ci = new CompactionIterator(COMPACTION, singletonList(scanner), controller, nowInSeconds(), nextTimeUUID()))
+             CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, Collections.singletonList(scanner), controller, FBUtilities.nowInSeconds(), UUIDGen.getTimeUUID()))
         {
             rewriter.switchWriter(getWriter(cfs, s.descriptor.directory, txn));
 
@@ -321,7 +318,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
                             SSTableRewriter rewriter,
                             LifecycleTransaction txn)
             {
-                try (CompactionIterator ci = new CompactionIterator(COMPACTION, singletonList(scanner), controller, nowInSeconds(), nextTimeUUID()))
+                try (CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, Collections.singletonList(scanner), controller, FBUtilities.nowInSeconds(), UUIDGen.getTimeUUID()))
                 {
                     int files = 1;
                     while (ci.hasNext())
@@ -352,7 +349,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
                             SSTableRewriter rewriter,
                             LifecycleTransaction txn)
             {
-                try (CompactionIterator ci = new CompactionIterator(COMPACTION, singletonList(scanner), controller, nowInSeconds(), nextTimeUUID()))
+                try (CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, Collections.singletonList(scanner), controller, FBUtilities.nowInSeconds(), UUIDGen.getTimeUUID()))
                 {
                     int files = 1;
                     while (ci.hasNext())
@@ -388,7 +385,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
                             SSTableRewriter rewriter,
                             LifecycleTransaction txn)
             {
-                try(CompactionIterator ci = new CompactionIterator(COMPACTION, singletonList(scanner), controller, nowInSeconds(), nextTimeUUID()))
+                try(CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, Collections.singletonList(scanner), controller, FBUtilities.nowInSeconds(), UUIDGen.getTimeUUID()))
                 {
                     int files = 1;
                     while (ci.hasNext())
@@ -426,8 +423,8 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
         SSTableReader s = writeFile(cfs, 1000);
         cfs.addSSTable(s);
 
-        DecoratedKey origFirst = s.getFirst();
-        DecoratedKey origLast = s.getLast();
+        DecoratedKey origFirst = s.first;
+        DecoratedKey origLast = s.last;
         long startSize = cfs.metric.liveDiskSpaceUsed.getCount();
         Set<SSTableReader> compacting = Sets.newHashSet(s);
         try (ISSTableScanner scanner = s.getScanner();
@@ -444,8 +441,8 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
         assertEquals(startSize, cfs.metric.liveDiskSpaceUsed.getCount());
         assertEquals(1, cfs.getLiveSSTables().size());
         assertFileCounts(s.descriptor.directory.tryListNames());
-        assertEquals(cfs.getLiveSSTables().iterator().next().getFirst(), origFirst);
-        assertEquals(cfs.getLiveSSTables().iterator().next().getLast(), origLast);
+        assertEquals(cfs.getLiveSSTables().iterator().next().first, origFirst);
+        assertEquals(cfs.getLiveSSTables().iterator().next().last, origLast);
         validateCFS(cfs);
     }
 
@@ -466,7 +463,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
              CompactionController controller = new CompactionController(cfs, compacting, 0);
              LifecycleTransaction txn = cfs.getTracker().tryModify(compacting, OperationType.UNKNOWN);
              SSTableRewriter rewriter = new SSTableRewriter(txn, 1000, 10000000, false, true);
-             CompactionIterator ci = new CompactionIterator(COMPACTION, singletonList(scanner), controller, nowInSeconds(), nextTimeUUID()))
+             CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, Collections.singletonList(scanner), controller, FBUtilities.nowInSeconds(), UUIDGen.getTimeUUID()))
         {
             rewriter.switchWriter(getWriter(cfs, s.descriptor.directory, txn));
             while(ci.hasNext())
@@ -512,7 +509,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
              CompactionController controller = new CompactionController(cfs, compacting, 0);
              LifecycleTransaction txn = cfs.getTracker().tryModify(compacting, OperationType.UNKNOWN);
              SSTableRewriter rewriter = new SSTableRewriter(txn, 1000, 10000000, false, true);
-             CompactionIterator ci = new CompactionIterator(COMPACTION, singletonList(scanner), controller, nowInSeconds(), nextTimeUUID()))
+             CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, Collections.singletonList(scanner), controller, FBUtilities.nowInSeconds(), UUIDGen.getTimeUUID()))
         {
             rewriter.switchWriter(getWriter(cfs, s.descriptor.directory, txn));
             while(ci.hasNext())
@@ -552,7 +549,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
              CompactionController controller = new CompactionController(cfs, compacting, 0);
              LifecycleTransaction txn = cfs.getTracker().tryModify(compacting, OperationType.UNKNOWN);
              SSTableRewriter rewriter = new SSTableRewriter(txn, 1000, 1000000, false, true);
-             CompactionIterator ci = new CompactionIterator(COMPACTION, singletonList(scanner), controller, nowInSeconds(), nextTimeUUID()))
+             CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, Collections.singletonList(scanner), controller, FBUtilities.nowInSeconds(), UUIDGen.getTimeUUID()))
         {
             rewriter.switchWriter(getWriter(cfs, s.descriptor.directory, txn));
             while(ci.hasNext())
@@ -635,10 +632,10 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
         Set<SSTableReader> compacting = Sets.newHashSet(s);
         try (ISSTableScanner scanner = compacting.iterator().next().getScanner();
              CompactionController controller = new CompactionController(cfs, compacting, 0);
-             LifecycleTransaction txn = offline ? LifecycleTransaction.offline(OperationType.UNKNOWN, compacting)
+             LifecycleTransaction txn = offline ? LifecycleTransaction.offline(OperationType.UNKNOWN, cfs.metadata, compacting)
                                        : cfs.getTracker().tryModify(compacting, OperationType.UNKNOWN);
-             SSTableRewriter rewriter = new SSTableRewriter(txn, 100, 10000000, false, true);
-             CompactionIterator ci = new CompactionIterator(COMPACTION, singletonList(scanner), controller, nowInSeconds(), nextTimeUUID())
+             SSTableRewriter rewriter = new SSTableRewriter(txn, 100, 10000000, offline, true);
+             CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, Collections.singletonList(scanner), controller, FBUtilities.nowInSeconds(), UUIDGen.getTimeUUID())
         )
         {
             rewriter.switchWriter(getWriter(cfs, s.descriptor.directory, txn));
@@ -714,7 +711,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
                     .build()
                     .apply();
         }
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         cfs.forceMajorCompaction();
         validateKeys(keyspace);
 
@@ -728,7 +725,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
              CompactionController controller = new CompactionController(cfs, compacting, 0);
              LifecycleTransaction txn = cfs.getTracker().tryModify(compacting, OperationType.UNKNOWN);
              SSTableRewriter rewriter = new SSTableRewriter(txn, 1000, 1, false, true);
-             CompactionIterator ci = new CompactionIterator(COMPACTION, singletonList(scanner), controller, nowInSeconds(), nextTimeUUID())
+             CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, Collections.singletonList(scanner), controller, FBUtilities.nowInSeconds(), UUIDGen.getTimeUUID())
         )
         {
             rewriter.switchWriter(getWriter(cfs, s.descriptor.directory, txn));
@@ -766,7 +763,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
              CompactionController controller = new CompactionController(cfs, sstables, 0);
              LifecycleTransaction txn = cfs.getTracker().tryModify(sstables, OperationType.UNKNOWN);
              SSTableRewriter writer = new SSTableRewriter(txn, 1000, 10000000, false, true);
-             CompactionIterator ci = new CompactionIterator(COMPACTION, singletonList(scanner), controller, nowInSeconds(), nextTimeUUID())
+             CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, Collections.singletonList(scanner), controller, FBUtilities.nowInSeconds(), UUIDGen.getTimeUUID())
         )
         {
             writer.switchWriter(getWriter(cfs, sstables.iterator().next().descriptor.directory, txn));
@@ -803,13 +800,13 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
         cfs.addSSTable(s);
         Set<SSTableReader> sstables = Sets.newHashSet(s);
         assertEquals(1, sstables.size());
-        long nowInSec = FBUtilities.nowInSeconds();
-        try (AbstractCompactionStrategy.ScannerList scanners = cfs.getCompactionStrategyManager().getScanners(sstables);
+        int nowInSec = FBUtilities.nowInSeconds();
+        try (ScannerList scanners = cfs.getCompactionStrategy().getScanners(sstables);
              LifecycleTransaction txn = cfs.getTracker().tryModify(sstables, OperationType.UNKNOWN);
              SSTableRewriter writer = SSTableRewriter.constructWithoutEarlyOpening(txn, false, 1000);
              SSTableRewriter writer2 = SSTableRewriter.constructWithoutEarlyOpening(txn, false, 1000);
              CompactionController controller = new CompactionController(cfs, sstables, cfs.gcBefore(nowInSec));
-             CompactionIterator ci = new CompactionIterator(COMPACTION, scanners.scanners, controller, nowInSec, nextTimeUUID())
+             CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, scanners.scanners, controller, nowInSec, UUIDGen.getTimeUUID())
              )
         {
             writer.switchWriter(getWriter(cfs, sstables.iterator().next().descriptor.directory, txn));
@@ -829,42 +826,71 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     }
 
     @Test
-    public void testCanonicalSSTables() throws ExecutionException, InterruptedException
+    public void testCanonicalSSTablesWithEarlyOpen() throws ExecutionException, InterruptedException
     {
-        Keyspace keyspace = Keyspace.open(KEYSPACE);
-        final ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
-        truncate(cfs);
+        testCanonicalSSTables(1);
+    }
 
-        cfs.addSSTable(writeFile(cfs, 100));
-        Collection<SSTableReader> allSSTables = cfs.getLiveSSTables();
-        assertEquals(1, allSSTables.size());
-        final AtomicBoolean done = new AtomicBoolean(false);
-        final AtomicBoolean failed = new AtomicBoolean(false);
-        Runnable r = () -> {
-            while (!done.get())
-            {
-                Iterable<SSTableReader> sstables = cfs.getSSTables(SSTableSet.CANONICAL);
-                if (Iterables.size(sstables) != 1)
-                {
-                    failed.set(true);
-                    return;
-                }
-            }
-        };
-        Thread t = NamedThreadFactory.createAnonymousThread(r);
+    @Test
+    public void testCanonicalSSTablesWithFinalEarlyOpen() throws ExecutionException, InterruptedException
+    {
+        testCanonicalSSTables(1000000);
+    }
+
+    @Test
+    @Ignore // This does not currently work. See View.select.
+    public void testCanonicalSSTablesNoEarlyOpen() throws ExecutionException, InterruptedException
+    {
+        testCanonicalSSTables(-1);
+    }
+
+
+    public void testCanonicalSSTables(int preemptiveOpenInterval) throws ExecutionException, InterruptedException
+    {
+        int prevPreemptiveOpenInterval = DatabaseDescriptor.getSSTablePreemptiveOpenIntervalInMB();
         try
         {
-            t.start();
-            cfs.forceMajorCompaction();
+            DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMB(preemptiveOpenInterval);
+            Keyspace keyspace = Keyspace.open(KEYSPACE);
+            final ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+            truncate(cfs);
+
+            cfs.addSSTable(writeFile(cfs, 2000));
+            Collection<SSTableReader> allSSTables = cfs.getLiveSSTables();
+            assertEquals(1, allSSTables.size());
+            final AtomicBoolean done = new AtomicBoolean(false);
+            final AtomicBoolean gotZero = new AtomicBoolean(false);
+            final AtomicInteger maxValue = new AtomicInteger(0);
+            Runnable r = () -> {
+                while (!done.get())
+                {
+                    Iterable<SSTableReader> sstables = cfs.getSSTables(SSTableSet.CANONICAL);
+                    int sstablesCount = Iterables.size(sstables);
+                    if (sstablesCount == 0)
+                        gotZero.set(true);
+                    else
+                        maxValue.updateAndGet(prev -> Math.max(prev, sstablesCount));
+                }
+            };
+            Thread t = NamedThreadFactory.createThread(r);
+            try
+            {
+                t.start();
+                cfs.forceMajorCompaction();
+            }
+            finally
+            {
+                done.set(true);
+                t.join(20);
+            }
+            // Note: the checks below can falsely succeed. Flaky failures should be treated as genuine problems.
+            assertFalse("No sstables", gotZero.get());
+            assertEquals("Too many sstables", 1, maxValue.get());
         }
         finally
         {
-            done.set(true);
-            t.join(20);
+            DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMB(prevPreemptiveOpenInterval);
         }
-        assertFalse(failed.get());
-
-
     }
 
     /**
@@ -879,6 +905,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
         Keyspace keyspace = Keyspace.open(KEYSPACE);
         ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
         File dir = cfs.getDirectories().getDirectoryForNewSSTables();
+        Row staticRow = Rows.EMPTY_STATIC_ROW;
 
         // Can't update a writer that is eagerly cleared on switch
         boolean eagerWriterMetaRelease = true;
@@ -892,18 +919,46 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
             try
             {
                 UnfilteredRowIterator uri = mock(UnfilteredRowIterator.class);
-                when(uri.partitionLevelDeletion()).thenReturn(DeletionTime.build(0, 0));
+                when(uri.partitionLevelDeletion()).thenReturn(new DeletionTime(0,0));
                 when(uri.partitionKey()).thenReturn(bopKeyFromInt(0));
+                when(uri.staticRow()).thenReturn(staticRow);
                 // should not be able to append after buffer release on switch
                 firstWriter.append(uri);
                 fail("Expected AssertionError was not thrown.");
             }
-            catch (AssertionError ae)
-            {
-                if (!ae.getMessage().contains("update is being called after releaseBuffers") && !ae.getMessage().contains("Attempt to use a closed data output"))
+            catch(AssertionError ae) {
+                if (!ae.getMessage().contains("update is being called after releaseBuffers"))
                     throw ae;
             }
         }
+
+        // The check below has been commented out as it is not clear what is the contract it attempts to verify
+        // In particular, SSTableRewriter.switchWriter calls openFinalEarly on the previous instance of writer
+        // which implies that the writer is done, as following the intuition, we should not be able to add any more
+        // data to that writer - but the below check attempts to do that
+
+//        // Can update a writer that is not eagerly cleared on switch
+//        eagerWriterMetaRelease = false;
+//        try (LifecycleTransaction txn = cfs.getTracker().tryModify(new HashSet<>(), OperationType.UNKNOWN);
+//             SSTableRewriter rewriter = new SSTableRewriter(txn, 1000, 1000000, false, eagerWriterMetaRelease)
+//        )
+//        {
+//            SSTableWriter firstWriter = getWriter(cfs, dir, txn);
+//            rewriter.switchWriter(firstWriter);
+//
+//            // At least one write so it's not aborted when switched out.
+//            UnfilteredRowIterator uri = mock(UnfilteredRowIterator.class);
+//            when(uri.partitionLevelDeletion()).thenReturn(new DeletionTime(0,0));
+//            when(uri.partitionKey()).thenReturn(bopKeyFromInt(0));
+//            when(uri.staticRow()).thenReturn(staticRow);
+//            rewriter.append(uri);
+//
+//            rewriter.switchWriter(getWriter(cfs, dir, txn));
+//
+//            // should be able to append after switch, and assert is not tripped
+//            when(uri.partitionKey()).thenReturn(bopKeyFromInt(1));
+//            firstWriter.append(uri);
+//        }
     }
 
     static DecoratedKey bopKeyFromInt(int i)
@@ -919,7 +974,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
         for (int i = 0; i < 100; i++)
         {
             DecoratedKey key = Util.dk(Integer.toString(i));
-            ImmutableBTreePartition partition = Util.getOnlyPartitionUnfiltered(Util.cmd(ks.getColumnFamilyStore(CF), key).build());
+            Partition partition = Util.getOnlyPartitionUnfiltered(Util.cmd(ks.getColumnFamilyStore(CF), key).build());
             assertTrue(partition != null && partition.rowCount() > 0);
         }
     }

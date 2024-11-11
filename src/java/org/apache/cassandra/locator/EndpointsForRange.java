@@ -71,11 +71,8 @@ public class EndpointsForRange extends Endpoints<EndpointsForRange>
     {
         if (newList.isEmpty()) return empty(range);
         ReplicaMap<InetAddressAndPort> byEndpoint = null;
-        if (this.byEndpoint != null)
-            if (list.isSubList(newList))
-                byEndpoint = this.byEndpoint.forSubList(newList);
-            else
-                byEndpoint = endpointMap(newList);
+        if (this.byEndpoint != null && list.isSubList(newList))
+            byEndpoint = this.byEndpoint.forSubList(newList);
         return new EndpointsForRange(range, newList, byEndpoint);
     }
 

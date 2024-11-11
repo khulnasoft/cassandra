@@ -29,7 +29,6 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.Pair;
 
 import static java.lang.String.format;
@@ -45,7 +44,7 @@ abstract class Ec2MetadataServiceConnector extends AbstractCloudMetadataServiceC
 
     Ec2MetadataServiceConnector(SnitchProperties properties)
     {
-        super(properties.putIfAbsent(METADATA_URL_PROPERTY, properties.get(EC2_METADATA_URL_PROPERTY, DEFAULT_EC2_METADATA_URL)));
+        super(properties.get(EC2_METADATA_URL_PROPERTY, DEFAULT_EC2_METADATA_URL));
     }
 
     enum EC2MetadataType
@@ -94,7 +93,7 @@ abstract class Ec2MetadataServiceConnector extends AbstractCloudMetadataServiceC
         @Override
         public String toString()
         {
-            return String.format("%s{%s=%s}", V1Connector.class.getName(), METADATA_URL_PROPERTY, metadataServiceUrl);
+            return String.format("%s{%s=%s}", V1Connector.class.getName(), EC2_METADATA_URL_PROPERTY, metadataServiceUrl);
         }
     }
 
@@ -156,7 +155,7 @@ abstract class Ec2MetadataServiceConnector extends AbstractCloudMetadataServiceC
             for (int retry = 0; retry <= HTTP_REQUEST_RETRIES; retry++)
             {
                 String resolvedToken;
-                if (token != null && token.right > Clock.Global.currentTimeMillis())
+                if (token != null && token.right > System.currentTimeMillis())
                     resolvedToken = token.left;
                 else
                     resolvedToken = getToken();
@@ -184,7 +183,7 @@ abstract class Ec2MetadataServiceConnector extends AbstractCloudMetadataServiceC
         {
             return String.format("%s{%s=%s,%s=%s}",
                                  V2Connector.class.getName(),
-                                 METADATA_URL_PROPERTY, metadataServiceUrl,
+                                 EC2_METADATA_URL_PROPERTY, metadataServiceUrl,
                                  AWS_EC2_METADATA_TOKEN_TTL_SECONDS_HEADER_PROPERTY,
                                  tokenTTL.getSeconds());
         }
@@ -203,7 +202,7 @@ abstract class Ec2MetadataServiceConnector extends AbstractCloudMetadataServiceC
                                                   "PUT",
                                                   ImmutableMap.of(AWS_EC2_METADATA_TOKEN_TTL_SECONDS_HEADER, String.valueOf(tokenTTL.getSeconds())),
                                                   200),
-                                    Clock.Global.currentTimeMillis() + tokenTTL.toMillis() - TimeUnit.SECONDS.toMillis(5));
+                                    System.currentTimeMillis() + tokenTTL.toMillis() - TimeUnit.SECONDS.toMillis(5));
                 return token.left;
             }
             catch (IOException e)

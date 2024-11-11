@@ -39,7 +39,6 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.quicktheories.QuickTheory.qt;
 import static org.quicktheories.generators.SourceDSL.integers;
-import static org.quicktheories.generators.SourceDSL.longs;
 import static org.quicktheories.generators.SourceDSL.lists;
 
 public class StreamingTombstoneHistogramBuilderTest
@@ -59,7 +58,7 @@ public class StreamingTombstoneHistogramBuilderTest
         // should end up (2,1),(9.5,2),(17.5,2),(23,1),(36,1)
         Map<Double, Long> expected1 = new LinkedHashMap<Double, Long>(5);
         expected1.put(2.0, 1L);
-        expected1.put(10.0, 2L);
+        expected1.put(9.0, 2L);
         expected1.put(17.0, 2L);
         expected1.put(23.0, 1L);
         expected1.put(36.0, 1L);
@@ -74,19 +73,13 @@ public class StreamingTombstoneHistogramBuilderTest
                      });
 
         // sum test
-        assertEquals(3.42, hist.sum(15), 0.01);
+        assertEquals(3.5, hist.sum(15), 0.01);
         // sum test (b > max(hist))
         assertEquals(7.0, hist.sum(50), 0.01);
     }
 
     @Test
     public void testSerDe() throws Exception
-    {
-        testSerDe(TombstoneHistogram.HistogramSerializer.instance);
-        testSerDe(TombstoneHistogram.LegacyHistogramSerializer.instance);
-    }
-
-    private void testSerDe(TombstoneHistogram.HistogramSerializer serializer) throws Exception
     {
         StreamingTombstoneHistogramBuilder builder = new StreamingTombstoneHistogramBuilder(5, 0, 1);
         int[] samples = new int[]{ 23, 19, 10, 16, 36, 2, 9 };
@@ -98,15 +91,15 @@ public class StreamingTombstoneHistogramBuilderTest
         }
         TombstoneHistogram hist = builder.build();
         DataOutputBuffer out = new DataOutputBuffer();
-        serializer.serialize(hist, out);
+        TombstoneHistogram.serializer.serialize(hist, out);
         byte[] bytes = out.toByteArray();
 
-        TombstoneHistogram deserialized = serializer.deserialize(new DataInputBuffer(bytes));
+        TombstoneHistogram deserialized = TombstoneHistogram.serializer.deserialize(new DataInputBuffer(bytes));
 
         // deserialized histogram should have following values
         Map<Double, Long> expected1 = new LinkedHashMap<Double, Long>(5);
         expected1.put(2.0, 1L);
-        expected1.put(10.0, 2L);
+        expected1.put(9.0, 2L);
         expected1.put(17.0, 2L);
         expected1.put(23.0, 1L);
         expected1.put(36.0, 1L);
@@ -120,14 +113,9 @@ public class StreamingTombstoneHistogramBuilderTest
                              });
     }
 
+
     @Test
     public void testNumericTypes() throws Exception
-    {
-        testNumericTypes(TombstoneHistogram.HistogramSerializer.instance);
-        testNumericTypes(TombstoneHistogram.LegacyHistogramSerializer.instance);
-    }
-
-    private void testNumericTypes(TombstoneHistogram.HistogramSerializer serializer) throws Exception
     {
         StreamingTombstoneHistogramBuilder builder = new StreamingTombstoneHistogramBuilder(5, 0, 1);
 
@@ -136,19 +124,21 @@ public class StreamingTombstoneHistogramBuilderTest
         builder.update(2);
         builder.update(2, Integer.MAX_VALUE); // To check that value overflow is handled correctly
         TombstoneHistogram hist = builder.build();
-        Map<Long, Integer> asMap = asMap(hist);
-        assertEquals(Integer.MAX_VALUE, asMap.get(2L).intValue());
+        Map<Integer, Integer> asMap = asMap(hist);
+
+        assertEquals(1, asMap.size());
+        assertEquals(Integer.MAX_VALUE, asMap.get(2).intValue());
 
         //Make sure it's working with Serde
         DataOutputBuffer out = new DataOutputBuffer();
-        serializer.serialize(hist, out);
+        TombstoneHistogram.serializer.serialize(hist, out);
         byte[] bytes = out.toByteArray();
 
-        TombstoneHistogram deserialized = serializer.deserialize(new DataInputBuffer(bytes));
+        TombstoneHistogram deserialized = TombstoneHistogram.serializer.deserialize(new DataInputBuffer(bytes));
 
         asMap = asMap(deserialized);
         assertEquals(1, deserialized.size());
-        assertEquals(Integer.MAX_VALUE, asMap.get(2L).intValue());
+        assertEquals(Integer.MAX_VALUE, asMap.get(2).intValue());
     }
 
     @Test
@@ -178,8 +168,8 @@ public class StreamingTombstoneHistogramBuilderTest
             builder.update(samples[i]);
         TombstoneHistogram hist = builder.build();
         assertEquals(hist.size(), 5);
-        assertEquals(asMap(hist).get(60L).intValue(), 2);
-        assertEquals(asMap(hist).get(120L).intValue(), 1);
+        assertEquals(asMap(hist).get(60).intValue(), 2);
+        assertEquals(asMap(hist).get(120).intValue(), 1);
     }
 
     @Test
@@ -193,13 +183,12 @@ public class StreamingTombstoneHistogramBuilderTest
     public void testLargeDeletionTimesAndLargeValuesDontCauseOverflow()
     {
         qt().forAll(streamingTombstoneHistogramBuilderGen(1000, 300000, 60),
-                    lists().of(longs().from(0).upTo(Cell.MAX_DELETION_TIME)).ofSize(300),
+                    lists().of(integers().from(0).upTo(Cell.MAX_DELETION_TIME)).ofSize(300),
                     lists().of(integers().allPositive()).ofSize(300))
             .checkAssert(this::updateHistogramAndCheckAllBucketsArePositive);
     }
 
-    static int iter = 0;
-    private void updateHistogramAndCheckAllBucketsArePositive(StreamingTombstoneHistogramBuilder histogramBuilder, List<Long> keys, List<Integer> values)
+    private void updateHistogramAndCheckAllBucketsArePositive(StreamingTombstoneHistogramBuilder histogramBuilder, List<Integer> keys, List<Integer> values)
     {
         for (int i = 0; i < keys.size(); i++)
         {
@@ -207,7 +196,7 @@ public class StreamingTombstoneHistogramBuilderTest
         }
 
         TombstoneHistogram histogram = histogramBuilder.build();
-        for (Map.Entry<Long, Integer> buckets : asMap(histogram).entrySet())
+        for (Map.Entry<Integer, Integer> buckets : asMap(histogram).entrySet())
         {
             assertTrue("Invalid bucket key", buckets.getKey() >= 0);
             assertTrue("Invalid bucket value", buckets.getValue() >= 0);
@@ -217,7 +206,7 @@ public class StreamingTombstoneHistogramBuilderTest
     @Test
     public void testThatPointIsNotMissedBecauseOfRoundingToNoDeletionTime() throws Exception
     {
-        long pointThatRoundedToNoDeletion = Cell.NO_DELETION_TIME - 2;
+        int pointThatRoundedToNoDeletion = Cell.NO_DELETION_TIME - 2;
         assert pointThatRoundedToNoDeletion + pointThatRoundedToNoDeletion % 3 == Cell.NO_DELETION_TIME : "test data should be valid";
 
         StreamingTombstoneHistogramBuilder builder = new StreamingTombstoneHistogramBuilder(5, 10, 3);
@@ -225,7 +214,7 @@ public class StreamingTombstoneHistogramBuilderTest
 
         TombstoneHistogram histogram = builder.build();
 
-        Map<Long, Integer> integerIntegerMap = asMap(histogram);
+        Map<Integer, Integer> integerIntegerMap = asMap(histogram);
         assertEquals(integerIntegerMap.size(), 1);
         assertEquals(integerIntegerMap.get(Cell.MAX_DELETION_TIME).intValue(), 1);
     }
@@ -339,19 +328,19 @@ public class StreamingTombstoneHistogramBuilderTest
         dataHolder.mergeNearestPoints();
         assertDataHolder(dataHolder,
                          2, 1,
-                         5, 4,
+                         4, 4,
                          7, 2);
 
         assertFalse(dataHolder.addValue(2, 1));
         assertDataHolder(dataHolder,
                          2, 2,
-                         5, 4,
+                         4, 4,
                          7, 2);
 
         dataHolder.addValue(8, 1);
         assertDataHolder(dataHolder,
                          2, 2,
-                         5, 4,
+                         4, 4,
                          7, 2,
                          8, 1);
         assertTrue(dataHolder.isFull());
@@ -360,8 +349,8 @@ public class StreamingTombstoneHistogramBuilderTest
         dataHolder.mergeNearestPoints();
         assertDataHolder(dataHolder,
                          2, 2,
-                         5, 4,
-                         8, 3);
+                         4, 4,
+                         7, 3);
     }
 
     private static void assertDataHolder(StreamingTombstoneHistogramBuilder.DataHolder dataHolder, int... pointValue)
@@ -382,9 +371,9 @@ public class StreamingTombstoneHistogramBuilderTest
     private static void assertSpool(StreamingTombstoneHistogramBuilder.Spool spool, int... pairs)
     {
         assertEquals(pairs.length / 2, spool.size);
-        Map<Long, Integer> tests = new HashMap<>();
+        Map<Integer, Integer> tests = new HashMap<>();
         for (int i = 0; i < pairs.length; i += 2)
-            tests.put((long) pairs[i], pairs[i + 1]);
+            tests.put(pairs[i], pairs[i + 1]);
 
         spool.forEach((k, v) -> {
             Integer x = tests.remove(k);
@@ -394,9 +383,9 @@ public class StreamingTombstoneHistogramBuilderTest
         AssertStatus.assertTrue(tests.isEmpty());
     }
 
-    private Map<Long, Integer> asMap(TombstoneHistogram histogram)
+    private Map<Integer, Integer> asMap(TombstoneHistogram histogram)
     {
-        Map<Long, Integer> result = new HashMap<>();
+        Map<Integer, Integer> result = new HashMap<>();
         histogram.forEach(result::put);
         return result;
     }

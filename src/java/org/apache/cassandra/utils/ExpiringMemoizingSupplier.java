@@ -25,8 +25,6 @@ import java.util.function.Supplier;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
-
 /**
  * An implementation similar to Guava's Suppliers.memoizeWithExpiration(Supplier)
  * but allowing for memoization to be skipped.
@@ -61,7 +59,7 @@ public class ExpiringMemoizingSupplier<T> implements Supplier<T>
         // the extra memory consumption and indirection are more
         // expensive than the extra volatile reads.
         long nanos = this.expirationNanos;
-        long now = nanoTime();
+        long now = System.nanoTime();
         if (nanos == 0L || now - nanos >= 0L) {
             synchronized(this) {
                 if (nanos == this.expirationNanos) {
@@ -71,7 +69,8 @@ public class ExpiringMemoizingSupplier<T> implements Supplier<T>
                     else
                         return t.value();
 
-                    this.expirationNanos = now + this.durationNanos;
+                    nanos = now + this.durationNanos;
+                    this.expirationNanos = nanos == 0L ? 1L : nanos;
                     return t.value();
                 }
             }
@@ -80,7 +79,7 @@ public class ExpiringMemoizingSupplier<T> implements Supplier<T>
     }
 
     @VisibleForTesting
-    public synchronized void expire()
+    public void expire()
     {
         this.expirationNanos = 0;
     }

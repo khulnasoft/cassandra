@@ -34,27 +34,19 @@ public class ArrayCell extends AbstractCell<byte[]>
 {
     private static final long EMPTY_SIZE = ObjectSizes.measure(new ArrayCell(ColumnMetadata.regularColumn("", "", "", ByteType.instance), 0L, 0, 0, EMPTY_BYTE_ARRAY, null));
 
-    // Careful: Adding vars here has an impact on memtable size
     private final long timestamp;
     private final int ttl;
-    private final int localDeletionTimeUnsignedInteger;
+    private final int localDeletionTime;
 
     private final byte[] value;
     private final CellPath path;
 
-    // Please keep both int/long overloaded ctros public. Otherwise silent casts will mess timestamps when one is not
-    // available.
-    public ArrayCell(ColumnMetadata column, long timestamp, int ttl, long localDeletionTime, byte[] value, CellPath path)
-    {
-        this(column, timestamp, ttl, Cell.deletionTimeLongToUnsignedInteger(localDeletionTime), value, path);
-    }
-
-    public ArrayCell(ColumnMetadata column, long timestamp, int ttl, int localDeletionTimeUnsignedInteger, byte[] value, CellPath path)
+    public ArrayCell(ColumnMetadata column, long timestamp, int ttl, int localDeletionTime, byte[] value, CellPath path)
     {
         super(column);
         this.timestamp = timestamp;
         this.ttl = ttl;
-        this.localDeletionTimeUnsignedInteger = localDeletionTimeUnsignedInteger;
+        this.localDeletionTime = localDeletionTime;
         this.value = value;
         this.path = path;
     }
@@ -67,6 +59,11 @@ public class ArrayCell extends AbstractCell<byte[]>
     public int ttl()
     {
         return ttl;
+    }
+
+    public int localDeletionTime()
+    {
+        return localDeletionTime;
     }
 
     public byte[] value()
@@ -86,15 +83,15 @@ public class ArrayCell extends AbstractCell<byte[]>
 
     public Cell<?> withUpdatedColumn(ColumnMetadata newColumn)
     {
-        return new ArrayCell(newColumn, timestamp, ttl, localDeletionTimeUnsignedInteger, value, path);
+        return new ArrayCell(newColumn, timestamp, ttl, localDeletionTime, value, path);
     }
 
     public Cell<?> withUpdatedValue(ByteBuffer newValue)
     {
-        return new ArrayCell(column, timestamp, ttl, localDeletionTimeUnsignedInteger, ByteBufferUtil.getArray(newValue), path);
+        return new ArrayCell(column, timestamp, ttl, localDeletionTime, ByteBufferUtil.getArray(newValue), path);
     }
 
-    public Cell<?> withUpdatedTimestampAndLocalDeletionTime(long newTimestamp, long newLocalDeletionTime)
+    public Cell<?> withUpdatedTimestampAndLocalDeletionTime(long newTimestamp, int newLocalDeletionTime)
     {
         return new ArrayCell(column, newTimestamp, ttl, newLocalDeletionTime, value, path);
     }
@@ -102,7 +99,7 @@ public class ArrayCell extends AbstractCell<byte[]>
     @Override
     public Cell<?> withSkippedValue()
     {
-        return new ArrayCell(column, timestamp, ttl, localDeletionTimeUnsignedInteger, EMPTY_BYTE_ARRAY, path);
+        return new ArrayCell(column, timestamp, ttl, localDeletionTime, EMPTY_BYTE_ARRAY, path);
     }
 
     @Override
@@ -114,21 +111,8 @@ public class ArrayCell extends AbstractCell<byte[]>
         return super.clone(cloner);
     }
 
-    @Override
-    public long unsharedHeapSize()
-    {
-        return EMPTY_SIZE + ObjectSizes.sizeOfArray(value) + (path == null ? 0 : path.unsharedHeapSize());
-    }
-
-    @Override
     public long unsharedHeapSizeExcludingData()
     {
         return EMPTY_SIZE + ObjectSizes.sizeOfArray(value) - value.length + (path == null ? 0 : path.unsharedHeapSizeExcludingData());
-    }
-
-    @Override
-    protected int localDeletionTimeAsUnsignedInt()
-    {
-        return localDeletionTimeUnsignedInteger;
     }
 }

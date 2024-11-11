@@ -32,7 +32,6 @@ import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.index.sai.disk.v1.segment.Segment;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -46,7 +45,7 @@ public class SegmentTest
     @BeforeClass
     public static void init()
     {
-        DatabaseDescriptor.toolInitialization();
+        DatabaseDescriptor.daemonInitialization();
         DatabaseDescriptor.setPartitionerUnsafe(Murmur3Partitioner.instance);
         partitioner = DatabaseDescriptor.getPartitioner();
         min = partitioner.getMinimumToken();
@@ -157,6 +156,7 @@ public class SegmentTest
 
     private static AbstractBounds<PartitionPosition> keyRange(Token left, boolean inclusiveLeft, Token right, boolean inclusiveRight)
     {
+        // See StatementRestrictions#getPartitionKeyBoundsForTokenRestrictions
         return Bounds.bounds(inclusiveLeft ? left.minKeyBound() : left.maxKeyBound(), inclusiveLeft,
                              inclusiveRight ? right.maxKeyBound() : right.minKeyBound(), inclusiveRight);
     }

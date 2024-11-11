@@ -19,27 +19,22 @@
 package org.apache.cassandra.repair.messages;
 
 import java.io.IOException;
+import java.util.UUID;
 
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.UUIDSerializer;
 
 public class FailSession extends RepairMessage
 {
-    public final TimeUUID sessionID;
+    public final UUID sessionID;
 
-    public FailSession(TimeUUID sessionID)
+    public FailSession(UUID sessionID)
     {
         super(null);
         assert sessionID != null;
         this.sessionID = sessionID;
-    }
-
-    @Override
-    public TimeUUID parentRepairSession()
-    {
-        return sessionID;
     }
 
     public boolean equals(Object o)
@@ -61,17 +56,17 @@ public class FailSession extends RepairMessage
     {
         public void serialize(FailSession msg, DataOutputPlus out, int version) throws IOException
         {
-            msg.sessionID.serialize(out);
+            UUIDSerializer.serializer.serialize(msg.sessionID, out, version);
         }
 
         public FailSession deserialize(DataInputPlus in, int version) throws IOException
         {
-            return new FailSession(TimeUUID.deserialize(in));
+            return new FailSession(UUIDSerializer.serializer.deserialize(in, version));
         }
 
         public long serializedSize(FailSession msg, int version)
         {
-            return TimeUUID.sizeInBytes();
+            return UUIDSerializer.serializer.serializedSize(msg.sessionID, version);
         }
     };
 }

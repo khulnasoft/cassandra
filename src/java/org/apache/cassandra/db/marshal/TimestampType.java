@@ -20,9 +20,9 @@ package org.apache.cassandra.db.marshal;
 import java.nio.ByteBuffer;
 import java.util.Date;
 
-import org.apache.cassandra.cql3.terms.Constants;
+import org.apache.cassandra.cql3.Constants;
 import org.apache.cassandra.cql3.Duration;
-import org.apache.cassandra.cql3.terms.Term;
+import org.apache.cassandra.cql3.Term;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,8 +50,6 @@ public class TimestampType extends TemporalType<Date>
     private static final Logger logger = LoggerFactory.getLogger(TimestampType.class);
 
     public static final TimestampType instance = new TimestampType();
-
-    private static final ByteBuffer MASKED_VALUE = instance.decompose(new Date(0));
 
     private TimestampType() {super(ComparisonType.CUSTOM);} // singleton
 
@@ -124,7 +122,7 @@ public class TimestampType extends TemporalType<Date>
 
     private String toString(Date date)
     {
-        return date != null ? TimestampSerializer.getJsonDateFormatter().format(date.toInstant()) : "";
+        return date != null ? TimestampSerializer.getJsonDateFormatter().format(date) : "";
     }
 
     @Override
@@ -177,11 +175,5 @@ public class TimestampType extends TemporalType<Date>
     {
         if (!duration.hasMillisecondPrecision())
             throw invalidRequest("The duration must have a millisecond precision. Was: %s", duration);
-    }
-
-    @Override
-    public ByteBuffer getMaskedValue()
-    {
-        return MASKED_VALUE;
     }
 }

@@ -18,85 +18,241 @@
 
 package org.apache.cassandra.index.sai;
 
-import java.util.Collection;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.LongAdder;
 import javax.annotation.concurrent.NotThreadSafe;
 
-import org.apache.cassandra.db.ReadCommand;
-import org.apache.cassandra.exceptions.QueryCancelledException;
-import org.apache.cassandra.index.sai.plan.FilterTree;
-import org.apache.cassandra.index.sai.plan.QueryController;
-import org.apache.cassandra.utils.Clock;
+import com.google.common.annotations.VisibleForTesting;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.SAI_TEST_DISABLE_TIMEOUT;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.index.sai.utils.AbortedOperationException;
+
+import static java.lang.Math.max;
 
 /**
  * Tracks state relevant to the execution of a single query, including metrics and timeout monitoring.
- * <p>
- * Fields here are non-volatile, as they are accessed from a single thread.
  */
 @NotThreadSafe
 public class QueryContext
 {
-    private static final boolean DISABLE_TIMEOUT = SAI_TEST_DISABLE_TIMEOUT.getBoolean();
+    private static final boolean DISABLE_TIMEOUT = Boolean.getBoolean("cassandra.sai.test.disable.timeout");
 
-    private final ReadCommand readCommand;
-    private final long queryStartTimeNanos;
+    protected final long queryStartTimeNanos;
 
     public final long executionQuotaNano;
 
-    public long sstablesHit = 0;
-    public long segmentsHit = 0;
-    public long partitionsRead = 0;
-    public long rowsFiltered = 0;
+    private final LongAdder sstablesHit = new LongAdder();
+    private final LongAdder segmentsHit = new LongAdder();
+    private final LongAdder partitionsRead = new LongAdder();
+    private final LongAdder rowsPreFiltered = new LongAdder();
+    private final LongAdder rowsFiltered = new LongAdder();
+    private final LongAdder trieSegmentsHit = new LongAdder();
 
-    public long trieSegmentsHit = 0;
-    public long triePostingsSkips = 0;
-    public long triePostingsDecodes = 0;
+    private final LongAdder bkdPostingListsHit = new LongAdder();
+    private final LongAdder bkdSegmentsHit = new LongAdder();
 
-    public long balancedTreePostingListsHit = 0;
-    public long balancedTreeSegmentsHit = 0;
-    public long balancedTreePostingsSkips = 0;
-    public long balancedTreePostingsDecodes = 0;
+    private final LongAdder bkdPostingsSkips = new LongAdder();
+    private final LongAdder bkdPostingsDecodes = new LongAdder();
 
-    public boolean queryTimedOut = false;
+    private final LongAdder triePostingsSkips = new LongAdder();
+    private final LongAdder triePostingsDecodes = new LongAdder();
 
-    /**
-     * {@code true} if the local query for this context has matches from Memtable-attached indexes or indexes on
-     * unrepaired SSTables, and {@code false} otherwise. When this is {@code false}, {@link FilterTree} can ignore the
-     * coordinator suggestion to downgrade to non-strict filtering, potentially reducing the number of false positives.
-     *
-     * @see QueryController#getIndexQueryResults(Collection)
-     * */
-    public boolean hasUnrepairedMatches = false;
+    private final LongAdder queryTimeouts = new LongAdder();
 
-    private VectorQueryContext vectorContext;
+    private final LongAdder annNodesVisited = new LongAdder();
+    private float annRerankFloor = 0.0f; // only called from single-threaded setup code
 
-    public QueryContext(ReadCommand readCommand, long executionQuotaMs)
+    private final LongAdder shadowedPrimaryKeyCount = new LongAdder();
+
+    // Determines the order of using indexes for filtering and sorting.
+    // Null means the query execution order hasn't been decided yet.
+    private FilterSortOrder filterSortOrder = null;
+
+    @VisibleForTesting
+    public QueryContext()
     {
-        this.readCommand = readCommand;
-        executionQuotaNano = TimeUnit.MILLISECONDS.toNanos(executionQuotaMs);
-        queryStartTimeNanos = Clock.Global.nanoTime();
+        this(DatabaseDescriptor.getRangeRpcTimeout(TimeUnit.MILLISECONDS));
+    }
+
+    public QueryContext(long executionQuotaMs)
+    {
+        this.executionQuotaNano = TimeUnit.MILLISECONDS.toNanos(executionQuotaMs);
+        this.queryStartTimeNanos = System.nanoTime();
     }
 
     public long totalQueryTimeNs()
     {
-        return Clock.Global.nanoTime() - queryStartTimeNanos;
+        return System.nanoTime() - queryStartTimeNanos;
+    }
+
+    // setters
+    public void addSstablesHit(long val)
+    {
+        sstablesHit.add(val);
+    }
+    public void addSegmentsHit(long val) {
+        segmentsHit.add(val);
+    }
+    public void addPartitionsRead(long val)
+    {
+        partitionsRead.add(val);
+    }
+    public void addRowsFiltered(long val)
+    {
+        rowsFiltered.add(val);
+    }
+    public void addRowsPreFiltered(long val)
+    {
+        rowsPreFiltered.add(val);
+    }
+    public void addTrieSegmentsHit(long val)
+    {
+        trieSegmentsHit.add(val);
+    }
+    public void addBkdPostingListsHit(long val)
+    {
+        bkdPostingListsHit.add(val);
+    }
+    public void addBkdSegmentsHit(long val)
+    {
+        bkdSegmentsHit.add(val);
+    }
+    public void addBkdPostingsSkips(long val)
+    {
+        bkdPostingsSkips.add(val);
+    }
+    public void addBkdPostingsDecodes(long val)
+    {
+        bkdPostingsDecodes.add(val);
+    }
+    public void addTriePostingsSkips(long val)
+    {
+        triePostingsSkips.add(val);
+    }
+    public void addTriePostingsDecodes(long val)
+    {
+        triePostingsDecodes.add(val);
+    }
+    public void addQueryTimeouts(long val)
+    {
+        queryTimeouts.add(val);
+    }
+    public void addAnnNodesVisited(long val)
+    {
+        annNodesVisited.add(val);
+    }
+
+    public void setFilterSortOrder(FilterSortOrder filterSortOrder)
+    {
+        this.filterSortOrder = filterSortOrder;
+    }
+
+    // getters
+
+    public long sstablesHit()
+    {
+        return sstablesHit.longValue();
+    }
+    public long segmentsHit() {
+        return segmentsHit.longValue();
+    }
+    public long partitionsRead()
+    {
+        return partitionsRead.longValue();
+    }
+    public long rowsFiltered()
+    {
+        return rowsFiltered.longValue();
+    }
+    public long rowsPreFiltered()
+    {
+        return rowsPreFiltered.longValue();
+    }
+    public long trieSegmentsHit()
+    {
+        return trieSegmentsHit.longValue();
+    }
+    public long bkdPostingListsHit()
+    {
+        return bkdPostingListsHit.longValue();
+    }
+    public long bkdSegmentsHit()
+    {
+        return bkdSegmentsHit.longValue();
+    }
+    public long bkdPostingsSkips()
+    {
+        return bkdPostingsSkips.longValue();
+    }
+    public long bkdPostingsDecodes()
+    {
+        return bkdPostingsDecodes.longValue();
+    }
+    public long triePostingsSkips()
+    {
+        return triePostingsSkips.longValue();
+    }
+    public long triePostingsDecodes()
+    {
+        return triePostingsDecodes.longValue();
+    }
+    public long queryTimeouts()
+    {
+        return queryTimeouts.longValue();
+    }
+    public long annNodesVisited()
+    {
+        return annNodesVisited.longValue();
+    }
+
+    public FilterSortOrder filterSortOrder()
+    {
+        return filterSortOrder;
     }
 
     public void checkpoint()
     {
         if (totalQueryTimeNs() >= executionQuotaNano && !DISABLE_TIMEOUT)
         {
-            queryTimedOut = true;
-            throw new QueryCancelledException(readCommand);
+            addQueryTimeouts(1);
+            throw new AbortedOperationException();
         }
     }
 
-    public VectorQueryContext vectorContext()
+    public void addShadowed(long count)
     {
-        if (vectorContext == null)
-            vectorContext = new VectorQueryContext(readCommand);
-        return vectorContext;
+        shadowedPrimaryKeyCount.add(count);
+    }
+
+    /**
+     * @return shadowed primary keys, in ascending order
+     */
+    public long getShadowedPrimaryKeyCount()
+    {
+        return shadowedPrimaryKeyCount.longValue();
+    }
+
+    public float getAnnRerankFloor()
+    {
+        return annRerankFloor;
+    }
+
+    public void updateAnnRerankFloor(float observedFloor)
+    {
+        if (observedFloor < Float.POSITIVE_INFINITY)
+            annRerankFloor = max(annRerankFloor, observedFloor);
+    }
+
+    /**
+     * Determines the order of filtering and sorting operations.
+     * Currently used only by vector search.
+     */
+    public enum FilterSortOrder
+    {
+        /** First get the matching keys from the non-vector indexes, then use vector index to return the top K by similarity order */
+        SEARCH_THEN_ORDER,
+
+        /** First get the candidates in ANN order from the vector index, then fetch the rows and filter them until we find K matching the predicates */
+        SCAN_THEN_FILTER
     }
 }

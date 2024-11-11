@@ -18,46 +18,64 @@
 
 package org.apache.cassandra.db.compaction;
 
+import java.util.List;
 import java.util.Set;
-import java.util.stream.Collectors;
 
-import com.google.common.collect.ImmutableList;
-
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DiskBoundaries;
 import org.apache.cassandra.db.PartitionPosition;
+import org.apache.cassandra.db.SortedLocalRanges;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.locator.AbstractReplicationStrategy;
 
 public interface ShardManager
 {
     /**
      * Single-partition, and generally sstables with very few partitions, can cover very small sections of the token
      * space, resulting in very high densities.
-     * Additionally, sstables that have completely fallen outside of the local token ranges will end up with a zero
+     * When the number of partitions in an sstable is smaller than this threshold, we will use a per-partition minimum
+     * span, calculated from the total number of partitions in this table.
+     */
+    static final long PER_PARTITION_SPAN_THRESHOLD = 100;
+
+    /**
+     * Additionally, sstables that have completely fallen outside the local token ranges will end up with a zero
      * coverage.
-     * To avoid problems with both we check if coverage is below the minimum, and replace it with 1.
+     * To avoid problems with this we check if coverage is below the minimum, and replace it using the per-partition
+     * calculation.
      */
     static final double MINIMUM_TOKEN_COVERAGE = Math.scalb(1.0, -48);
 
-    static ShardManager create(ColumnFamilyStore cfs)
+    static ShardManager create(DiskBoundaries diskBoundaries, AbstractReplicationStrategy rs, boolean isReplicaAware)
     {
-        final ImmutableList<PartitionPosition> diskPositions = cfs.getDiskBoundaries().positions;
-        ColumnFamilyStore.VersionedLocalRanges localRanges = cfs.localRangesWeighted();
-        IPartitioner partitioner = cfs.getPartitioner();
+        List<Token> diskPositions = diskBoundaries.getPositions();
+
+        SortedLocalRanges localRanges = diskBoundaries.getLocalRanges();
+        IPartitioner partitioner = localRanges.getRealm().getPartitioner();
+        // this should only happen in tests that change partitioners, but we don't want UCS to throw
+        // where other strategies work even if the situations are unrealistic.
+        if (localRanges.getRanges().isEmpty() || !localRanges.getRanges()
+                                                             .get(0)
+                                                             .range()
+                                                             .left
+                                                             .getPartitioner()
+                                                             .equals(localRanges.getRealm().getPartitioner()))
+            localRanges = new SortedLocalRanges(localRanges.getRealm(),
+                                                localRanges.getRingVersion(),
+                                                null);
+
 
         if (diskPositions != null && diskPositions.size() > 1)
-            return new ShardManagerDiskAware(localRanges, diskPositions.stream()
-                                                                       .map(PartitionPosition::getToken)
-                                                                       .collect(Collectors.toList()));
+            return new ShardManagerDiskAware(localRanges, diskPositions);
         else if (partitioner.splitter().isPresent())
-            return new ShardManagerNoDisks(localRanges);
+            if (isReplicaAware)
+                return new ShardManagerReplicaAware(rs, localRanges.getRealm());
+            else
+                return new ShardManagerNoDisks(localRanges);
         else
             return new ShardManagerTrivial(partitioner);
     }
-
-    boolean isOutOfDate(long ringVersion);
 
     /**
      * The token range fraction spanned by the given range, adjusted for the local range ownership.
@@ -77,6 +95,12 @@ public interface ShardManager
     double shardSetCoverage();
 
     /**
+     * The minimum token space share per partition that should be assigned to sstables with small numbers of partitions
+     * or which have fallen outside the local token ranges.
+     */
+    double minimumPerPartitionSpan();
+
+    /**
      * Construct a boundary/shard iterator for the given number of shards.
      *
      * Note: This does not offer a method of listing the shard boundaries it generates, just to advance to the
@@ -85,7 +109,7 @@ public interface ShardManager
      */
     ShardTracker boundaries(int shardCount);
 
-    static Range<Token> coveringRange(SSTableReader sstable)
+    static Range<Token> coveringRange(CompactionSSTable sstable)
     {
         return coveringRange(sstable.getFirst(), sstable.getLast());
     }
@@ -101,22 +125,25 @@ public interface ShardManager
      * Return the token space share that the given SSTable spans, excluding any non-locally owned space.
      * Returns a positive floating-point number between 0 and 1.
      */
-    default double rangeSpanned(SSTableReader rdr)
+    default double rangeSpanned(CompactionSSTable rdr)
     {
         double reported = rdr.tokenSpaceCoverage();
+
         double span;
         if (reported > 0)   // also false for NaN
             span = reported;
         else
             span = rangeSpanned(rdr.getFirst(), rdr.getLast());
 
-        if (span >= MINIMUM_TOKEN_COVERAGE)
+        long partitionCount = rdr.estimatedKeys();
+        if (partitionCount >= PER_PARTITION_SPAN_THRESHOLD && span >= MINIMUM_TOKEN_COVERAGE)
             return span;
 
-        // Too small ranges are expected to be the result of either a single-partition sstable or falling outside
-        // of the local token ranges. In these cases we substitute it with 1 because for them sharding and density
-        // tiering does not make sense.
-        return 1.0;  // This will be chosen if span is NaN too.
+        // Too small ranges are expected to be the result of either an sstable with a very small number of partitions,
+        // or falling outside the local token ranges. In these cases we apply a per-partition minimum calculated from
+        // the number of partitions in the table.
+        double perPartitionMinimum = Math.min(partitionCount * minimumPerPartitionSpan(), 1.0);
+        return span > perPartitionMinimum ? span : perPartitionMinimum; // The latter will be chosen if span is NaN too.
     }
 
     default double rangeSpanned(PartitionPosition first, PartitionPosition last)
@@ -131,12 +158,12 @@ public interface ShardManager
      * but share shrinks), UCS-like compactions (where size may grow and covered shards i.e. share may decrease)
      * and can reproduce levelling structure that corresponds to all, including their mixtures.
      */
-    default double density(SSTableReader rdr)
+    default double density(CompactionSSTable rdr)
     {
         return rdr.onDiskLength() / rangeSpanned(rdr);
     }
 
-    default int compareByDensity(SSTableReader a, SSTableReader b)
+    default int compareByDensity(CompactionSSTable a, CompactionSSTable b)
     {
         return Double.compare(density(a), density(b));
     }
@@ -144,14 +171,14 @@ public interface ShardManager
     /**
      * Estimate the density of the sstable that will be the result of compacting the given sources.
      */
-    default double calculateCombinedDensity(Set<? extends SSTableReader> sstables)
+    default double calculateCombinedDensity(Set<? extends CompactionSSTable> sstables)
     {
         if (sstables.isEmpty())
             return 0;
         long onDiskLength = 0;
         PartitionPosition min = null;
         PartitionPosition max = null;
-        for (SSTableReader sstable : sstables)
+        for (CompactionSSTable sstable : sstables)
         {
             onDiskLength += sstable.onDiskLength();
             min = min == null || min.compareTo(sstable.getFirst()) > 0 ? sstable.getFirst() : min;

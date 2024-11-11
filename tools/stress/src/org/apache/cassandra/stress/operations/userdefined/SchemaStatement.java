@@ -24,11 +24,11 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 
-import com.datastax.driver.core.BoundStatement;
-import com.datastax.driver.core.ColumnDefinitions;
-import com.datastax.driver.core.DataType;
-import com.datastax.driver.core.LocalDate;
-import com.datastax.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.BoundStatement;
+import com.khulnasoft.driver.core.ColumnDefinitions;
+import com.khulnasoft.driver.core.DataType;
+import com.khulnasoft.driver.core.LocalDate;
+import com.khulnasoft.driver.core.PreparedStatement;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.stress.generate.Row;
 import org.apache.cassandra.stress.operations.PartitionOperation;
@@ -81,7 +81,7 @@ public abstract class SchemaStatement extends PartitionOperation
             Object value = row.get(argumentIndex[i]);
             if (definitions.getType(i).getName().equals(DataType.date().getName()))
             {
-                // the java driver only accepts com.datastax.driver.core.LocalDate for CQL type "DATE"
+                // the java driver only accepts com.khulnasoft.driver.core.LocalDate for CQL type "DATE"
                 value= LocalDate.fromDaysSinceEpoch((Integer) value);
             }
             bindBuffer[i] = value;

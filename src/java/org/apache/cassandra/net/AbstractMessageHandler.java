@@ -33,7 +33,6 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.EventLoop;
-import org.apache.cassandra.metrics.ClientMetrics;
 import org.apache.cassandra.net.FrameDecoder.CorruptFrame;
 import org.apache.cassandra.net.FrameDecoder.Frame;
 import org.apache.cassandra.net.FrameDecoder.FrameProcessor;
@@ -44,7 +43,7 @@ import org.apache.cassandra.net.ResourceLimits.Limit;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static org.apache.cassandra.net.Crc.InvalidCrc;
-import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
+import static org.apache.cassandra.utils.MonotonicClock.approxTime;
 
 /**
  * Core logic for handling inbound message deserialization and execution (in tandem with {@link FrameDecoder}).
@@ -219,6 +218,11 @@ public abstract class AbstractMessageHandler extends ChannelInboundHandlerAdapte
         return true;
     }
 
+    /**
+     * React to the decoder being reactivated
+     */
+    protected abstract void onDecoderReactivated();
+
     private boolean processIntactFrame(IntactFrame frame, Limit endpointReserve, Limit globalReserve) throws IOException
     {
         if (frame.isSelfContained)
@@ -311,7 +315,7 @@ public abstract class AbstractMessageHandler extends ChannelInboundHandlerAdapte
                 decoder.reactivate();
 
                 if (decoder.isActive())
-                    ClientMetrics.instance.unpauseConnection();
+                    onDecoderReactivated();
             }
         }
         catch (Throwable t)

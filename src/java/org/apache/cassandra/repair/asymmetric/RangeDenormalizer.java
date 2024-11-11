@@ -20,6 +20,7 @@ package org.apache.cassandra.repair.asymmetric;
 
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 
@@ -59,11 +60,8 @@ public class RangeDenormalizer
                     incoming.put(r, entry.getValue().copy(r));
             }
         }
-        if (logger.isTraceEnabled())
-        {
-            logger.trace("denormalized {} to {}", range, newInput);
-            logger.trace("denormalized incoming to {}", incoming);
-        }
+        logger.trace("denormalized {} to {}", range, newInput);
+        logger.trace("denormalized incoming to {}", incoming);
         return newInput;
     }
 

@@ -1,1 +1,0 @@
-SELECT * FROM cyclist_career_teams WHERE teams CONTAINS 'Rabobank-Liv Woman Cycling Team';

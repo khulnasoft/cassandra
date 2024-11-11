@@ -19,6 +19,7 @@
 package org.apache.cassandra.db;
 
 import org.apache.cassandra.db.partitions.PartitionUpdate;
+import org.apache.cassandra.index.transactions.UpdateTransaction;
 import org.apache.cassandra.tracing.Tracing;
 
 public class CassandraTableWriteHandler implements TableWriteHandler
@@ -31,6 +32,7 @@ public class CassandraTableWriteHandler implements TableWriteHandler
     }
 
     @Override
+    @SuppressWarnings("resource")
     public void write(PartitionUpdate update, WriteContext context, boolean updateIndexes)
     {
         CassandraWriteContext ctx = CassandraWriteContext.fromContext(context);

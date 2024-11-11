@@ -19,12 +19,14 @@
 package org.apache.cassandra.io.util;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 import org.junit.Test;
 
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 public class WrappingRebuffererTest
@@ -33,9 +35,7 @@ public class WrappingRebuffererTest
     public void testRebufferRelease()
     {
         TestRebufferer mock = new TestRebufferer();
-        try (WrappingRebufferer rebufferer = new WrappingRebufferer(mock)
-        {
-        })
+        try (WrappingRebufferer rebufferer = new WrappingRebufferer(mock) {})
         {
             Rebufferer.BufferHolder ret = rebufferer.rebuffer(0);
             assertNotNull(ret);
@@ -51,9 +51,7 @@ public class WrappingRebuffererTest
     public void testRebufferReleaseFailingContract()
     {
         TestRebufferer mock = new TestRebufferer();
-        try (WrappingRebufferer rebufferer = new WrappingRebufferer(mock)
-        {
-        })
+        try (WrappingRebufferer rebufferer = new WrappingRebufferer(mock) {})
         {
             Rebufferer.BufferHolder ret1 = rebufferer.rebuffer(0);
             assertNotNull(ret1);
@@ -74,9 +72,7 @@ public class WrappingRebuffererTest
     {
         assertThatExceptionOfType(AssertionError.class).isThrownBy(() -> {
             TestRebufferer mock = new TestRebufferer();
-            try (WrappingRebufferer rebufferer = new WrappingRebufferer(mock)
-            {
-            })
+            try (WrappingRebufferer rebufferer = new WrappingRebufferer(mock) {})
             {
                 Rebufferer.BufferHolder ret1 = rebufferer.rebuffer(0);
                 assertNotNull(ret1);
@@ -110,6 +106,12 @@ public class WrappingRebuffererTest
         public ByteBuffer buffer()
         {
             return buffer;
+        }
+
+        @Override
+        public ByteOrder order()
+        {
+            return buffer.order();
         }
 
         public long fileLength()

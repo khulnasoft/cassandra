@@ -24,24 +24,24 @@ import org.junit.Test;
 
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.index.IndexNotAvailableException;
+import org.apache.cassandra.index.sai.IndexContext;
 import org.apache.cassandra.index.sai.SAITester;
 import org.apache.cassandra.index.sai.SSTableContext;
-import org.apache.cassandra.index.sai.utils.IndexIdentifier;
-import org.apache.cassandra.index.sai.utils.IndexTermType;
+import org.apache.cassandra.index.sai.utils.SuppressLeakCheck;
 import org.apache.cassandra.inject.Injection;
 import org.apache.cassandra.inject.Injections;
 import org.assertj.core.api.Assertions;
 
 import static org.junit.Assert.assertEquals;
 
+@SuppressLeakCheck(reason="The SSTableContext.<init> error is synthetic and can't happen in a live environment")
 public class FailureTest extends SAITester
 {
     @Test
     public void shouldMakeIndexNonQueryableOnSSTableContextFailureDuringFlush() throws Throwable
     {
         createTable(CREATE_TABLE_TEMPLATE);
-        IndexIdentifier indexIdentifier = createIndexIdentifier(createIndex(String.format(CREATE_INDEX_TEMPLATE, "v1")));
-        IndexTermType indexTermType = createIndexTermType(Int32Type.instance);
+        IndexContext numericIndexContext = createIndexContext(createIndex(String.format(CREATE_INDEX_TEMPLATE, "v1")), Int32Type.instance);
 
         execute("INSERT INTO %s (id1, v1) VALUES ('1', 1)");
         execute("INSERT INTO %s (id1, v1) VALUES ('2', 2)");
@@ -49,8 +49,8 @@ public class FailureTest extends SAITester
 
         assertEquals(1, execute("SELECT id1 FROM %s WHERE v1 > 1").size());
 
-        verifyIndexFiles(indexTermType, indexIdentifier, 1, 1, 1);
-        verifySSTableIndexes(indexIdentifier, 1, 1);
+        verifyIndexFiles(numericIndexContext, null, 1, 1, 0, 1, 0);
+        verifySSTableIndexes(numericIndexContext.getIndexName(), 1, 1);
 
         execute("INSERT INTO %s (id1, v1) VALUES ('3', 3)");
 
@@ -68,8 +68,8 @@ public class FailureTest extends SAITester
         // Now verify that a restart actually repairs the index...
         simulateNodeRestart();
 
-        verifyIndexFiles(indexTermType, indexIdentifier, 2, 2, 2);
-        verifySSTableIndexes(indexIdentifier, 2, 2);
+        verifyIndexComponentFiles(numericIndexContext, null);
+        verifySSTableIndexes(numericIndexContext.getIndexName(), 2, 2);
 
         assertEquals(2, execute("SELECT id1 FROM %s WHERE v1 > 1").size());
     }
@@ -78,8 +78,7 @@ public class FailureTest extends SAITester
     public void shouldMakeIndexNonQueryableOnSSTableContextFailureDuringCompaction() throws Throwable
     {
         createTable(CREATE_TABLE_TEMPLATE);
-        IndexIdentifier indexIdentifier = createIndexIdentifier(createIndex(String.format(CREATE_INDEX_TEMPLATE, "v1")));
-        IndexTermType indexTermType = createIndexTermType(Int32Type.instance);
+        IndexContext numericIndexContext = createIndexContext(createIndex(String.format(CREATE_INDEX_TEMPLATE, "v1")), Int32Type.instance);
 
         execute("INSERT INTO %s (id1, v1) VALUES ('1', 1)");
         flush();
@@ -89,8 +88,8 @@ public class FailureTest extends SAITester
 
         assertEquals(1, execute("SELECT id1 FROM %s WHERE v1 > 1").size());
 
-        verifyIndexFiles(indexTermType, indexIdentifier, 2, 2, 2);
-        verifySSTableIndexes(indexIdentifier, 2, 2);
+        verifyIndexFiles(numericIndexContext, null, 2, 2, 0, 2, 0);
+        verifySSTableIndexes(numericIndexContext.getIndexName(), 2, 2);
 
         Injection ssTableContextCreationFailure = newFailureOnEntry("context_failure_on_compaction", SSTableContext.class, "<init>", RuntimeException.class);
         Injections.inject(ssTableContextCreationFailure);
@@ -117,13 +116,12 @@ public class FailureTest extends SAITester
         Injection ssTableContextCreationFailure = newFailureOnEntry("context_failure_on_creation", SSTableContext.class, "<init>", RuntimeException.class);
         Injections.inject(ssTableContextCreationFailure);
 
-        IndexIdentifier indexIdentifier = createIndexIdentifier(createIndexAsync(String.format(CREATE_INDEX_TEMPLATE, "v2")));
+        String v2IndexName = createIndexAsync(String.format(CREATE_INDEX_TEMPLATE, "v2"));
 
         // Verify that the initial index build fails...
-        verifyInitialIndexFailed(indexIdentifier.indexName);
+        verifyInitialIndexFailed(v2IndexName);
 
-        verifyNoIndexFiles();
-        verifySSTableIndexes(indexIdentifier, 0);
+        verifySSTableIndexes(v2IndexName, 0);
 
         // ...and then verify that, while the node is still operational, the index is not.
         Assertions.assertThatThrownBy(() -> execute("SELECT * FROM %s WHERE v2 = '1'"))

@@ -17,8 +17,6 @@
  */
 package org.apache.cassandra.net;
 
-import java.util.Map;
-
 import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.locator.InetAddressAndPort;
 
@@ -43,12 +41,6 @@ public interface RequestCallback<T>
     }
 
     /**
-     * Returns true if the callback handles failure reporting - in which case the remove host will be asked to
-     * report failures to us in the event of a problem processing the request.
-     *
-     * TODO: this is an error prone method, and we should be handling failures everywhere
-     *       so we should probably just start doing that, and remove this method
-     *
      * @return true if the callback should be invoked on failure
      */
     default boolean invokeOnFailure()
@@ -64,20 +56,4 @@ public interface RequestCallback<T>
     {
         return false;
     }
-
-    static boolean isTimeout(Map<InetAddressAndPort, RequestFailureReason> failureReasonByEndpoint)
-    {
-        // The reason that all must be timeout to be called a timeout is as follows
-        // Assume RF=6, QUORUM, and failureReasonByEndpoint.size() == 3
-        // R1 -> TIMEOUT
-        // R2 -> TIMEOUT
-        // R3 -> READ_TOO_MANY_TOMBSTONES
-        // Since we got a reply back, and that was a failure, we should return a failure letting the user know.
-        // When all failures are a timeout, then this is a race condition with
-        // org.apache.cassandra.utils.concurrent.Awaitable.await(long, java.util.concurrent.TimeUnit)
-        // The race is that the message expire path runs and expires all messages, this then casues the condition
-        // to signal telling the caller "got all replies!".
-        return failureReasonByEndpoint.values().stream().allMatch(RequestFailureReason.TIMEOUT::equals);
-    }
-
 }

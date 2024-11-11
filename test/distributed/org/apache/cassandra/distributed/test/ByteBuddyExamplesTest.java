@@ -20,9 +20,7 @@ package org.apache.cassandra.distributed.test;
 
 import java.io.IOException;
 import java.util.concurrent.Callable;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
 
 import org.junit.Test;
 
@@ -30,16 +28,13 @@ import net.bytebuddy.ByteBuddy;
 import net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
 import net.bytebuddy.implementation.MethodDelegation;
 import net.bytebuddy.implementation.bind.annotation.SuperCall;
-import org.apache.cassandra.cql3.ColumnSpecification;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.statements.ModificationStatement;
 import org.apache.cassandra.cql3.statements.SelectStatement;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
 import org.apache.cassandra.service.QueryState;
-import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.messages.ResultMessage;
-import org.apache.cassandra.transport.messages.ResultMessage.Rows;
 
 import static net.bytebuddy.matcher.ElementMatchers.named;
 import static net.bytebuddy.matcher.ElementMatchers.takesArguments;
@@ -56,7 +51,6 @@ public class ByteBuddyExamplesTest extends TestBaseImpl
                                           .start()))
         {
             cluster.schemaChange("create table " + KEYSPACE + ".tbl (id int primary key, t int)");
-            cluster.get(1).runOnInstance(() -> BBFailHelper.enabled.set(true));
             try
             {
                 cluster.coordinator(1).execute("insert into " + KEYSPACE + ".tbl (id, t) values (1, 1)", ConsistencyLevel.ALL);
@@ -73,21 +67,15 @@ public class ByteBuddyExamplesTest extends TestBaseImpl
     {
         static void install(ClassLoader cl, int nodeNumber)
         {
-            new ByteBuddy().rebase(ModificationStatement.class)
+            new ByteBuddy().redefine(ModificationStatement.class)
                            .method(named("execute"))
                            .intercept(MethodDelegation.to(BBFailHelper.class))
                            .make()
                            .load(cl, ClassLoadingStrategy.Default.INJECTION);
         }
-
-        public static AtomicBoolean enabled = new AtomicBoolean(false);
-
-        public static ResultMessage execute(QueryState v1, QueryOptions v2, Dispatcher.RequestTime v3, @SuperCall Callable<ResultMessage> zuper) throws Exception
+        public static ResultMessage execute()
         {
-            if (enabled.get())
-                throw new RuntimeException();
-
-            return zuper.call();
+            throw new RuntimeException();
         }
     }
 
@@ -98,8 +86,7 @@ public class ByteBuddyExamplesTest extends TestBaseImpl
                                           .withInstanceInitializer(BBCountHelper::install)
                                           .start()))
         {
-            cluster.schemaChange("create table " + KEYSPACE + ".tbl (id int primary key, bytebuddy_test_column int)");
-            cluster.get(1).runOnInstance(() -> BBCountHelper.count.set(0));
+            cluster.schemaChange("create table " + KEYSPACE + ".tbl (id int primary key, t int)");
             cluster.coordinator(1).execute("select * from " + KEYSPACE + ".tbl;", ConsistencyLevel.ALL);
             cluster.coordinator(2).execute("select * from " + KEYSPACE + ".tbl;", ConsistencyLevel.ALL);
             cluster.get(1).runOnInstance(() -> {
@@ -126,14 +113,10 @@ public class ByteBuddyExamplesTest extends TestBaseImpl
                            .load(cl, ClassLoadingStrategy.Default.INJECTION);
         }
 
-        public static ResultMessage.Rows execute(QueryState state, QueryOptions options, Dispatcher.RequestTime request3Time, @SuperCall Callable<ResultMessage.Rows> r) throws Exception
+        public static ResultMessage.Rows execute(QueryState state, QueryOptions options, long queryStartNanoTime, @SuperCall Callable<ResultMessage.Rows> r) throws Exception
         {
-            Rows res = r.call();
-
-            if (res.result.metadata.names.stream().map(ColumnSpecification::toString).collect(Collectors.toList()).contains("bytebuddy_test_column"))
-                count.incrementAndGet();
-
-            return res;
+            count.incrementAndGet();
+            return r.call();
         }
     }
 

@@ -21,24 +21,15 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import org.junit.Test;
-
-import org.apache.cassandra.Util;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.restrictions.StatementRestrictions;
+
+import org.junit.Test;
 
 public class SelectSingleColumnRelationTest extends CQLTester
 {
     @Test
-    public void textInvalidMapEntryPredicate()  throws Throwable
-    {
-        createTable("CREATE TABLE %s (pk int, ck frozen<map<int, int>>, v int, PRIMARY KEY(pk, ck)) WITH CLUSTERING ORDER BY (ck DESC)");
-        assertInvalidMessage("Map-entry predicates on frozen map column ck are not supported",
-                             "SELECT * FROM %s WHERE pk=? AND ck[0] = ?", 0, 0);
-    }
-
-    @Test
-    public void testInvalidCollectionEqualityRelation() throws Throwable
+    public void testInvalidCollectionEqualityRelation()
     {
         createTable("CREATE TABLE %s (a int PRIMARY KEY, b set<int>, c list<int>, d map<int, int>)");
         createIndex("CREATE INDEX ON %s (b)");
@@ -46,15 +37,15 @@ public class SelectSingleColumnRelationTest extends CQLTester
         createIndex("CREATE INDEX ON %s (d)");
 
         assertInvalidMessage("Collection column 'b' (set<int>) cannot be restricted by a '=' relation",
-                             "SELECT * FROM %s WHERE a = 0 AND b = ?", set(0));
+                             "SELECT * FROM %s WHERE a = 0 AND b=?", set(0));
         assertInvalidMessage("Collection column 'c' (list<int>) cannot be restricted by a '=' relation",
-                             "SELECT * FROM %s WHERE a = 0 AND c = ?", list(0));
+                             "SELECT * FROM %s WHERE a = 0 AND c=?", list(0));
         assertInvalidMessage("Collection column 'd' (map<int, int>) cannot be restricted by a '=' relation",
-                             "SELECT * FROM %s WHERE a = 0 AND d = ?", map(0, 0));
+                             "SELECT * FROM %s WHERE a = 0 AND d=?", map(0, 0));
     }
 
     @Test
-    public void testInvalidCollectionNonEQRelation() throws Throwable
+    public void testInvalidCollectionNonEQRelation()
     {
         createTable("CREATE TABLE %s (a int PRIMARY KEY, b set<int>, c int)");
         createIndex("CREATE INDEX ON %s (c)");
@@ -71,12 +62,10 @@ public class SelectSingleColumnRelationTest extends CQLTester
                              "SELECT * FROM %s WHERE c = 0 AND b <= ?", set(0));
         assertInvalidMessage("Collection column 'b' (set<int>) cannot be restricted by a 'IN' relation",
                              "SELECT * FROM %s WHERE c = 0 AND b IN (?)", set(0));
-        assertInvalidMessage("Collection column 'b' (set<int>) cannot be restricted by a 'BETWEEN' relation",
-                             "SELECT * FROM %s WHERE c = 0 AND b BETWEEN ? AND ?", set(0), set(0));
         assertInvalidMessage("Collection column 'b' (set<int>) cannot be restricted by a 'NOT IN' relation",
                              "SELECT * FROM %s WHERE c = 0 AND b NOT IN (?)", set(0));
         assertInvalidMessage("Collection column 'b' (set<int>) cannot be restricted by a '!=' relation",
-                             "SELECT * FROM %s WHERE c = 0 AND b != 5");
+                "SELECT * FROM %s WHERE c = 0 AND b != 5");
         assertInvalidMessage("Unsupported restriction: b IS NOT NULL",
                 "SELECT * FROM %s WHERE c = 0 AND b IS NOT NULL");
     }
@@ -152,10 +141,7 @@ public class SelectSingleColumnRelationTest extends CQLTester
 
         assertEmpty(execute("select * from %s where a = ? and c > ? and c < ? and b in (?, ?)", "first", 6, 7, 3, 2));
 
-        assertRows(execute("SELECT * FROM %s WHERE a = ? AND b = ? AND c BETWEEN ? AND ?", "first", 1, 4, 5),
-                   row("first", 1, 5, 1));
-
-        assertInvalidMessage("c cannot be restricted by more than one relation if it includes an Equal",
+        assertInvalidMessage("Column \"c\" cannot be restricted by both an equality and an inequality relation",
                              "select * from %s where a = ? and c > ? and c = ? and b in (?, ?)", "first", 6, 7, 3, 2);
 
         assertInvalidMessage("c cannot be restricted by more than one relation if it includes an Equal",
@@ -171,16 +157,10 @@ public class SelectSingleColumnRelationTest extends CQLTester
 
         assertInvalidMessage("More than one restriction was found for the end bound on b",
                              "select * from %s where a = ? and b < ? and b <= ?", "first", 6, 3, 2);
-
-        assertInvalidMessage("More than one restriction was found for the start bound on b",
-                             "SELECT * FROM %s WHERE a = ? AND b > ? AND b BETWEEN ? AND ?", "first", 6, 3, 2);
-
-        assertInvalidMessage("More than one restriction was found for the end bound on b",
-                             "SELECT * FROM %s WHERE a = ? AND b < ? AND b BETWEEN ? AND ?", "first", 6, 3, 2);
     }
 
     @Test
-    public void testPartitionKeyColumnRelations() throws Throwable
+    public void testPartitionKeyColumnRelations()
     {
         createTable("CREATE TABLE %s (a text, b int, c int, d int, primary key((a, b), c))");
         execute("insert into %s (a, b, c, d) values (?, ?, ?, ?)", "first", 1, 1, 1);
@@ -243,20 +223,10 @@ public class SelectSingleColumnRelationTest extends CQLTester
                            "first", 7, 6, 3, 2),
                    row("first", 2, 6, 2),
                    row("first", 3, 7, 3));
-
-        assertRows(execute("select * from %s where a = ? and b between ? and ? order by b ASC",
-                           "first", 1, 2),
-                   row("first", 1, 5, 1),
-                   row("first", 2, 6, 2));
-
-        assertRows(execute("select * from %s where a = ? and b between ? and ? order by b DESC",
-                           "first", 1, 2),
-                   row("first", 2, 6, 2),
-                   row("first", 1, 5, 1));
     }
 
     @Test
-    public void testAllowFilteringWithClusteringColumn() throws Throwable
+    public void testAllowFilteringWithClusteringColumn()
     {
         createTable("CREATE TABLE %s (k int, c int, v int, PRIMARY KEY (k, c))");
 
@@ -286,23 +256,16 @@ public class SelectSingleColumnRelationTest extends CQLTester
                              "SELECT * FROM %s WHERE c = ?", 2);
         assertInvalidMessage(StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE,
                              "SELECT * FROM %s WHERE c > ? AND c <= ?", 2, 4);
-        assertInvalidMessage(StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE,
-                             "SELECT * FROM %s WHERE c BETWEEN ? AND ?", 2, 4);
 
         assertRows(execute("SELECT * FROM %s WHERE c = ? ALLOW FILTERING", 2),
                    row(1, 2, 1),
                    row(2, 2, 3));
 
         assertRows(execute("SELECT * FROM %s WHERE c > ? AND c <= ? ALLOW FILTERING", 2, 4), row(1, 3, 2));
-
-        assertRows(execute("SELECT * FROM %s WHERE c BETWEEN ? AND ? ALLOW FILTERING", 2, 3),
-                   row(1, 2, 1),
-                   row(1, 3, 2),
-                   row(2, 2, 3));
     }
 
     @Test
-    public void testAllowFilteringWithIndexedColumn() throws Throwable
+    public void testAllowFilteringWithIndexedColumn()
     {
         createTable("CREATE TABLE %s (k int PRIMARY KEY, a int, b int)");
         createIndex("CREATE INDEX ON %s(a)");
@@ -336,14 +299,6 @@ public class SelectSingleColumnRelationTest extends CQLTester
         assertRows(execute("SELECT * FROM %s WHERE c = ? AND s > ? ALLOW FILTERING", 1, 1),
                    row(2, 1, 2, 1));
 
-        assertRows(execute("SELECT * FROM %s WHERE c = ? AND s >= ? AND s <= ? ALLOW FILTERING", 1, 1, 1),
-                   row(1, 1, 1, 1),
-                   row(1, 2, 1, 1));
-
-        assertRows(execute("SELECT * FROM %s WHERE c = ? AND s BETWEEN ? AND ? ALLOW FILTERING", 1, 1, 1),
-                   row(1, 1, 1, 1),
-                   row(1, 2, 1, 1));
-
         assertRows(execute("SELECT * FROM %s WHERE c = ? AND s < ? ALLOW FILTERING", 1, 2),
                    row(1, 1, 1, 1),
                    row(1, 2, 1, 1));
@@ -373,7 +328,7 @@ public class SelectSingleColumnRelationTest extends CQLTester
     }
 
     @Test
-    public void testIndexOnClusteringColumns() throws Throwable
+    public void testIndexOnClusteringColumns()
     {
         createTable("CREATE TABLE %s (id1 int, id2 int, author text, time bigint, v1 text, v2 text, PRIMARY KEY ((id1, id2), author, time))");
         createIndex("CREATE INDEX ON %s(time)");
@@ -398,17 +353,9 @@ public class SelectSingleColumnRelationTest extends CQLTester
 
         assertRows(execute("SELECT v1 FROM %s WHERE time = 1"), row("B"), row("E"));
 
-        // Checks that IN restrictions are not used for index queries
-        assertInvalidMessage("PRIMARY KEY column \"time\" cannot be restricted as preceding column \"author\" is not restricted",
-                            "SELECT v1 FROM %s WHERE time IN (1, 2)");
-        assertInvalidMessage(StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE,
-                             "SELECT v1 FROM %s WHERE id2 IN (0, 2)");
+        assertRows(execute("SELECT v1 FROM %s WHERE id2 = 0 and time IN (1, 2) ALLOW FILTERING"),
+                   row("B"));
 
-        // Checks that the IN queries works with filtering
-        assertRows(execute("SELECT v1 FROM %s WHERE time IN (1, 2) ALLOW FILTERING"), row("B"), row("C"), row("E"));
-        assertRows(execute("SELECT v1 FROM %s WHERE id2 IN (0, 2) ALLOW FILTERING"), row("A"), row("B"), row("D"));
-
-        // Checks index query with filtering
         assertRows(execute("SELECT v1 FROM %s WHERE author > 'ted' AND time = 1 ALLOW FILTERING"), row("E"));
         assertRows(execute("SELECT v1 FROM %s WHERE author > 'amy' AND author < 'zoe' AND time = 0 ALLOW FILTERING"),
                            row("A"), row("D"));
@@ -437,14 +384,13 @@ public class SelectSingleColumnRelationTest extends CQLTester
                    row(2, "baz"));
         assertEmpty(execute("SELECT content FROM %s WHERE time1 = 1 AND time2 = 1 AND author='foo' ALLOW FILTERING"));
         assertEmpty(execute("SELECT content FROM %s WHERE time1 = 1 AND time2 > 0 AND author='foo' ALLOW FILTERING"));
-        assertEmpty(execute("SELECT content FROM %s WHERE time1 = 1 AND time2 BETWEEN 1 AND 2 AND author='foo' ALLOW FILTERING"));
 
         assertInvalidMessage(StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE,
                              "SELECT content FROM %s WHERE time2 >= 0 AND author='foo'");
     }
 
     @Test
-    public void testRangeQueryOnIndex() throws Throwable
+    public void testRangeQueryOnIndex()
     {
         createTable("CREATE TABLE %s (id int primary key, row int, setid int);");
         createIndex("CREATE INDEX ON %s (setid)");
@@ -502,10 +448,8 @@ public class SelectSingleColumnRelationTest extends CQLTester
     }
 
     @Test
-    public void testMultiplePartitionKeyWithIndex() throws Throwable
+    public void testMultiplePartitionKeyWithIndex()
     {
-        Util.assumeLegacySecondaryIndex(); // SAI does not allow multi-column slice restrictions
-
         createTable("CREATE TABLE %s (a int, b int, c int, d int, e int, f int, PRIMARY KEY ((a, b), c, d, e))");
         createIndex("CREATE INDEX ON %s (c)");
         createIndex("CREATE INDEX ON %s (f)");
@@ -542,18 +486,18 @@ public class SelectSingleColumnRelationTest extends CQLTester
                 row(0, 0, 1, 1, 1, 5),
                 row(0, 0, 2, 0, 0, 5));
 
-        assertInvalidMessage(StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE,
+        assertInvalidMessage(String.format(StatementRestrictions.HAS_UNSUPPORTED_INDEX_RESTRICTION_MESSAGE_SINGLE, 'c'),
                              "SELECT * FROM %s WHERE a = ? AND c IN (?, ?) AND f = ?", 0, 0, 1, 5);
         assertRows(execute("SELECT * FROM %s WHERE a = ? AND c IN (?, ?) AND f = ? ALLOW FILTERING", 0, 1, 3, 5),
                    row(0, 0, 1, 1, 1, 5));
 
-        assertInvalidMessage(StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE,
+        assertInvalidMessage(String.format(StatementRestrictions.HAS_UNSUPPORTED_INDEX_RESTRICTION_MESSAGE_SINGLE, 'c'),
                              "SELECT * FROM %s WHERE a = ? AND c IN (?, ?) AND f = ?", 0, 1, 2, 5);
         assertRows(execute("SELECT * FROM %s WHERE a = ? AND c IN (?, ?) AND f = ? ALLOW FILTERING", 0, 1, 2, 5),
                    row(0, 0, 1, 1, 1, 5),
                    row(0, 0, 2, 0, 0, 5));
 
-        assertInvalidMessage(StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE,
+        assertInvalidMessage(String.format(StatementRestrictions.HAS_UNSUPPORTED_INDEX_RESTRICTION_MESSAGE_SINGLE, 'c'),
                              "SELECT * FROM %s WHERE a = ? AND c IN (?, ?) AND d IN (?) AND f = ?", 0, 1, 3, 0, 3);
         assertRows(execute("SELECT * FROM %s WHERE a = ? AND c IN (?, ?) AND d IN (?) AND f = ? ALLOW FILTERING", 0, 1, 3, 0, 3),
                    row(0, 0, 1, 0, 0, 3));
@@ -564,7 +508,7 @@ public class SelectSingleColumnRelationTest extends CQLTester
                 row(0, 0, 1, 1, 1, 5),
                 row(0, 0, 2, 0, 0, 5));
 
-        assertInvalidMessage(StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE,
+        assertInvalidMessage(String.format(StatementRestrictions.HAS_UNSUPPORTED_INDEX_RESTRICTION_MESSAGE_SINGLE, 'c'),
                              "SELECT * FROM %s WHERE a = ? AND c >= ? AND f = ?", 0, 1, 5);
         assertRows(execute("SELECT * FROM %s WHERE a = ? AND b = ? AND c >= ? AND f = ?", 0, 0, 1, 5),
                    row(0, 0, 1, 1, 1, 5),
@@ -582,26 +526,17 @@ public class SelectSingleColumnRelationTest extends CQLTester
 
         assertRows(execute("SELECT * FROM %s WHERE a = ? AND c = ? AND d >= ? AND f = ? ALLOW FILTERING", 0, 1, 1, 5),
                    row(0, 0, 1, 1, 1, 5));
-
-        assertInvalidMessage(StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE,
-                             "SELECT * FROM %s WHERE a = ? AND c = ? AND d BETWEEN ? AND ? AND f = ?", 0, 1, 1, 5, 0);
-
-        assertRows(execute("SELECT * FROM %s WHERE a = ? AND b = ? AND c = ? AND d BETWEEN ? AND ? AND f = ?", 0, 0, 1, 1, 0, 5),
-                   row(0, 0, 1, 1, 1, 5));
-
-        assertRows(execute("SELECT * FROM %s WHERE a = ? AND c = ? AND d BETWEEN ? AND ? AND f = ? ALLOW FILTERING", 0, 1, 1, 0, 5),
-                   row(0, 0, 1, 1, 1, 5));
     }
 
     @Test
-    public void testFunctionCallWithUnset() throws Throwable
+    public void testFunctionCallWithUnset()
     {
         createTable("CREATE TABLE %s (k int PRIMARY KEY, s text, i int)");
 
         assertInvalidMessage("Invalid unset value for argument in call to function token",
                              "SELECT * FROM %s WHERE token(k) >= token(?)", unset());
-        assertInvalidMessage("Invalid unset value for argument in call to function blob_as_int",
-                             "SELECT * FROM %s WHERE k = blob_as_int(?)", unset());
+        assertInvalidMessage("Invalid unset value for argument in call to function blobasint",
+                             "SELECT * FROM %s WHERE k = blobAsInt(?)", unset());
     }
 
     @Test
@@ -617,7 +552,7 @@ public class SelectSingleColumnRelationTest extends CQLTester
     }
 
     @Test
-    public void testWithUnsetValues() throws Throwable
+    public void testWithUnsetValues()
     {
         createTable("CREATE TABLE %s (k int, i int, j int, s text, PRIMARY KEY(k,i,j))");
         createIndex("CREATE INDEX s_index ON %s (s)");
@@ -627,38 +562,35 @@ public class SelectSingleColumnRelationTest extends CQLTester
         assertInvalidMessage("Invalid unset value for column k", "SELECT * from %s WHERE k IN(?)", unset());
         assertInvalidMessage("Invalid unset value for column k", "SELECT * from %s WHERE k IN(?,?)", 1, unset());
         assertInvalidMessage("Invalid unset value for column k", "SELECT * from %s WHERE k NOT IN ? ALLOW FILTERING", unset());
-        assertInvalidMessage("Invalid unset value for column k", "SELECT * from %s WHERE k NOT IN(?) ALLOW FILTERING", unset());
-        assertInvalidMessage("Invalid unset value for column k", "SELECT * from %s WHERE k NOT IN(?,?) ALLOW FILTERING", 1, unset());
+        assertInvalidMessage("Unsupported unset value for column k", "SELECT * from %s WHERE k NOT IN(?) ALLOW FILTERING", unset());
+        assertInvalidMessage("Unsupported unset value for column k", "SELECT * from %s WHERE k NOT IN(?,?) ALLOW FILTERING", 1, unset());
         // clustering column
         assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE k = 1 AND i = ?", unset());
         assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE k = 1 AND i IN ?", unset());
         assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE k = 1 AND i IN(?)", unset());
         assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE k = 1 AND i IN(?,?)", 1, unset());
-        assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE i = ? ALLOW FILTERING", unset());
         assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE k = 1 AND i NOT IN ?", unset());
         assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE k = 1 AND i NOT IN(?)", unset());
         assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE k = 1 AND i NOT IN(?,?)", 1, unset());
+        assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE i = ? ALLOW FILTERING", unset());
         // indexed column
-        assertInvalidMessage("Invalid unset value for column s", "SELECT * from %s WHERE s = ?", unset());
+        assertInvalidMessage("Unsupported unset value for column s", "SELECT * from %s WHERE s = ?", unset());
         // range
         assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE k = 1 AND i > ?", unset());
-        assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE k = 1 AND i BETWEEN ? AND ?", 1, unset());
     }
 
     @Test
-    public void testInvalidSliceRestrictionOnPartitionKey() throws Throwable
+    public void testInvalidSliceRestrictionOnPartitionKey()
     {
         createTable("CREATE TABLE %s (a int PRIMARY KEY, b int, c text)");
         assertInvalidMessage(StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE,
                              "SELECT * FROM %s WHERE a >= 1 and a < 4");
         assertInvalidMessage("Multi-column relations can only be applied to clustering columns but was applied to: a",
                              "SELECT * FROM %s WHERE (a) >= (1) and (a) < (4)");
-        assertInvalidMessage("Multi-column relations can only be applied to clustering columns but was applied to: a",
-                             "SELECT * FROM %s WHERE (a) BETWEEN (1) AND (4)");
     }
 
     @Test
-    public void testInvalidMulticolumnSliceRestrictionOnPartitionKey() throws Throwable
+    public void testInvalidMulticolumnSliceRestrictionOnPartitionKey()
     {
         createTable("CREATE TABLE %s (a int, b int, c text, PRIMARY KEY ((a, b)))");
         assertInvalidMessage("Multi-column relations can only be applied to clustering columns but was applied to: a",
@@ -673,12 +605,10 @@ public class SelectSingleColumnRelationTest extends CQLTester
                              "SELECT * FROM %s WHERE (b) < (4) and (a, b) >= (1, 1)");
         assertInvalidMessage("Multi-column relations can only be applied to clustering columns but was applied to: a",
                              "SELECT * FROM %s WHERE (a, b) >= (1, 1) and a = 1");
-        assertInvalidMessage("Multi-column relations can only be applied to clustering columns but was applied to: a",
-                             "SELECT * FROM %s WHERE (a, b) BETWEEN (1, 1) AND (4, 5) and a = 1");
     }
 
     @Test
-    public void testInvalidColumnNames() throws Throwable
+    public void testInvalidColumnNames()
     {
         createTable("CREATE TABLE %s (a int, b int, c map<int, int>, PRIMARY KEY (a, b))");
         assertInvalidMessage("Undefined column name d", "SELECT * FROM %s WHERE d = 0");
@@ -697,14 +627,13 @@ public class SelectSingleColumnRelationTest extends CQLTester
         assertInvalidMessage("Undefined column name d", "SELECT c AS d FROM %s WHERE d NOT CONTAINS 0");
         assertInvalidMessage("Undefined column name d", "SELECT c AS d FROM %s WHERE d NOT CONTAINS KEY 0");
         assertInvalidMessage("Undefined column name d", "SELECT d FROM %s WHERE a = 0");
-        assertInvalidMessage("Undefined column name d", "SELECT d FROM %s WHERE b BETWEEN 0 AND 0");
     }
 
     @Test
-    public void testInvalidNonFrozenUDTRelation() throws Throwable
+    public void testInvalidNonFrozenUDTRelation()
     {
         String type = createType("CREATE TYPE %s (a int)");
-        createTable("CREATE TABLE %s (a int PRIMARY KEY, b " + type + ")");
+        createTable("CREATE TABLE %s (a int PRIMARY KEY, b " + type + ')');
         Object udt = userType("a", 1);
 
         // All operators
@@ -714,11 +643,9 @@ public class SelectSingleColumnRelationTest extends CQLTester
         assertInvalidMessage(msg, "SELECT * FROM %s WHERE b < ?", udt);
         assertInvalidMessage(msg, "SELECT * FROM %s WHERE b >= ?", udt);
         assertInvalidMessage(msg, "SELECT * FROM %s WHERE b <= ?", udt);
-        assertInvalidMessage(msg, "SELECT * FROM %s WHERE b BETWEEN ? AND ?", udt, udt);
         assertInvalidMessage(msg, "SELECT * FROM %s WHERE b IN (?)", udt);
         assertInvalidMessage(msg, "SELECT * FROM %s WHERE b NOT IN (?)", udt);
         assertInvalidMessage(msg, "SELECT * FROM %s WHERE b LIKE ?", udt);
-        assertInvalidMessage(msg, "SELECT * FROM %s WHERE b != {a: 0}", udt);
         assertInvalidMessage(msg, "SELECT * FROM %s WHERE b != {a: 0}", udt);
         assertInvalidMessage("Unsupported restriction: b IS NOT NULL",
                              "SELECT * FROM %s WHERE b IS NOT NULL", udt);
@@ -726,12 +653,10 @@ public class SelectSingleColumnRelationTest extends CQLTester
                              "SELECT * FROM %s WHERE b CONTAINS ?", udt);
         assertInvalidMessage("Cannot use NOT CONTAINS on non-collection column b",
                              "SELECT * FROM %s WHERE b NOT CONTAINS ?", udt);
-        assertInvalidMessage("Cannot use NOT CONTAINS on non-collection column b",
-                             "SELECT * FROM %s WHERE b NOT CONTAINS ?", udt);
     }
 
     @Test
-    public void testInRestrictionWithClusteringColumn() throws Throwable
+    public void testInRestrictionWithClusteringColumn()
     {
         createTable("CREATE TABLE %s (key int, c1 int, c2 int, s1 text static, PRIMARY KEY ((key, c1), c2))");
 
@@ -760,7 +685,7 @@ public class SelectSingleColumnRelationTest extends CQLTester
                                 row(20, 21, 1, "s1"),
                                 row(20, 22, 2, "s3"));
 
-        assertInvalidMessage("Invalid null value for column c2",
+        assertInvalidMessage("Invalid null value in condition for column c2",
                              "SELECT * from %s WHERE key = 10 AND c2 IN (1, null) ALLOW FILTERING");
     }
 
@@ -862,30 +787,6 @@ public class SelectSingleColumnRelationTest extends CQLTester
         assertRows(execute("SELECT * FROM %s WHERE v IN (?, ?) ALLOW FILTERING", 0L, 1L),
                    row(1, 1L),
                    row(3, 1L));
-    }
-
-    @Test
-    public void testSliceRestrictionWithNegativeClusteringColumnValues()
-    {
-        createTable("CREATE TABLE %s (pk int, c int, v int, PRIMARY KEY (pk, c))");
-
-        execute("INSERT INTO %s (pk, c, v) VALUES (1, -2, -2)");
-        execute("INSERT INTO %s (pk, c, v) VALUES (1, -1, -1)");
-        execute("INSERT INTO %s (pk, c, v) VALUES (1, 0, 0)");
-        execute("INSERT INTO %s (pk, c, v) VALUES (1, 1, 1)");
-        execute("INSERT INTO %s (pk, c, v) VALUES (1, 2, 2)");
-
-        assertRows(execute("SELECT * from %s WHERE pk = ? AND c > ? AND c <= ?", 1, 0, 2),
-                   row(1, 1, 1),
-                   row(1, 2, 2));
-
-        assertRows(execute("SELECT * from %s WHERE pk = ? AND c > ? AND c <= ?", 1, -4, -1),
-                   row(1, -2, -2),
-                   row(1, -1, -1));
-
-        assertRows(execute("SELECT * from %s WHERE pk = ? AND c BETWEEN ? AND ?", 1, -4, -1),
-                   row(1, -2, -2),
-                   row(1, -1, -1));
     }
 
     @Test
@@ -1020,7 +921,7 @@ public class SelectSingleColumnRelationTest extends CQLTester
                    row("key", 4, 1, 7),
                    row("key", 4, 2, 8));
 
-        // NOT IN value outside the slice range:
+        // NOT IN value outside of the slice range:
         assertRows(execute("select * from %s where a = ? and b not in ? and b > ? and b < ?", "key", list(0), 2, 4),
                    row("key", 3, 8, 5),
                    row("key", 3, 9, 6));
@@ -1043,6 +944,7 @@ public class SelectSingleColumnRelationTest extends CQLTester
         assertRows(execute("select * from %s where a = ? and b in ? and c not in ?", "key", list(2, 3), list(5, 6, 9)),
                    row("key", 2, 7, 4),
                    row("key", 3, 8, 5));
+
     }
 
     @Test
@@ -1167,7 +1069,7 @@ public class SelectSingleColumnRelationTest extends CQLTester
                    row("key", 3, 9, 6),
                    row("key", 3, 8, 5));
 
-        // NOT IN value outside the slice range:
+        // NOT IN value outside of the slice range:
         assertRows(execute("select * from %s where a = ? and b not in ? and b > ? and b < ?", "key", list(0), 2, 4),
                    row("key", 3, 9, 6),
                    row("key", 3, 8, 5));
@@ -1283,7 +1185,80 @@ public class SelectSingleColumnRelationTest extends CQLTester
                    row(1, 1, 1),
                    row(1, 4, 4),
                    row(1, 5, 5));
+
     }
+
+    @Test
+    public void testNotInRestrictionsWithOrAndAllowFiltering()
+    {
+        createTable("CREATE TABLE %s (pk int, c int, v int, PRIMARY KEY(pk, c))");
+        execute("INSERT INTO %s (pk, c, v) VALUES (?, ?, ?)", 1, 1, 1);
+        execute("INSERT INTO %s (pk, c, v) VALUES (?, ?, ?)", 1, 2, 2);
+        execute("INSERT INTO %s (pk, c, v) VALUES (?, ?, ?)", 1, 3, 3);
+        execute("INSERT INTO %s (pk, c, v) VALUES (?, ?, ?)", 1, 4, 4);
+        execute("INSERT INTO %s (pk, c, v) VALUES (?, ?, ?)", 1, 5, 5);
+
+        assertRows(execute("SELECT * FROM %s WHERE v = ? OR v not in ? ALLOW FILTERING", 0, list()),
+                   row(1, 1, 1),
+                   row(1, 2, 2),
+                   row(1, 3, 3),
+                   row(1, 4, 4),
+                   row(1, 5, 5));
+
+        assertRows(execute("SELECT * FROM %s WHERE v NOT IN ? OR v NOT IN ? ALLOW FILTERING", list(), list(1, 2)),
+                   row(1, 1, 1),
+                   row(1, 2, 2),
+                   row(1, 3, 3),
+                   row(1, 4, 4),
+                   row(1, 5, 5));
+
+        assertRows(execute("SELECT * FROM %s WHERE v = ? OR v NOT IN ? ALLOW FILTERING", 0, list(1, 2, 3)),
+                   row(1, 4, 4),
+                   row(1, 5, 5));
+
+        assertRows(execute("SELECT * FROM %s WHERE v = ? OR v NOT IN ? ALLOW FILTERING", 1, list(1, 2, 3)),
+                   row(1, 1, 1),
+                   row(1, 4, 4),
+                   row(1, 5, 5));
+
+        // Multiple NOT IN:
+        assertRows(execute("SELECT * FROM %s WHERE v NOT IN ? OR v NOT IN ? ALLOW FILTERING", list(1, 2), list(3, 4)),
+                   row(1, 1, 1),
+                   row(1, 2, 2),
+                   row(1, 3, 3),
+                   row(1, 4, 4),
+                   row(1, 5, 5));
+        assertRows(execute("SELECT * FROM %s WHERE v NOT IN ? OR v NOT IN ? ALLOW FILTERING", list(1, 2, 3, 4), list()),
+                   row(1, 1, 1),
+                   row(1, 2, 2),
+                   row(1, 3, 3),
+                   row(1, 4, 4),
+                   row(1, 5, 5));
+
+
+        // Mixed IN / NOT IN with AND and OR:
+        assertRows(execute("SELECT * FROM %s WHERE v IN ? OR v NOT IN ? AND v NOT IN ? ALLOW FILTERING", list(1), list(1, 2, 3), list(2, 3, 4)),
+                   row(1, 1, 1),
+                   row(1, 5, 5));
+
+        assertRows(execute("SELECT * FROM %s WHERE v NOT IN ? AND (v IN ? OR v NOT IN ?) ALLOW FILTERING", list(), list(3), list(5)),
+                   row(1, 1, 1),
+                   row(1, 2, 2),
+                   row(1, 3, 3),
+                   row(1, 4, 4));
+
+        assertRows(execute("SELECT * FROM %s WHERE v NOT IN ? AND (v IN ? OR v NOT IN ?) ALLOW FILTERING", list(1, 2), list(3), list(5)),
+                   row(1, 3, 3),
+                   row(1, 4, 4));
+
+        assertRows(execute("SELECT * FROM %s WHERE v IN ? AND (v IN ? OR v NOT IN ?) ALLOW FILTERING", list(1, 3), list(5), list(3)),
+                   row(1, 1, 1));
+
+        assertRows(execute("SELECT * FROM %s WHERE v IN ? AND (v IN ? OR v NOT IN ?) ALLOW FILTERING", list(1, 3), list(5), list()),
+                   row(1, 1, 1),
+                   row(1, 3, 3));
+    }
+
 
     @Test
     public void testNonEqualsRelationWithFiltering()
@@ -1337,41 +1312,4 @@ public class SelectSingleColumnRelationTest extends CQLTester
         );
     }
 
-    @Test
-    public void testBetweenFilteringWithReversedOrdering() throws Throwable
-    {
-        createTable("CREATE TABLE %s(p int, c int, c2 int, abbreviation ascii, PRIMARY KEY (p, c, c2))");
-
-        beforeAndAfterFlush(() -> {
-            execute("INSERT INTO %s(p, c, c2, abbreviation) VALUES (0, 1, 1, 'CA')");
-            execute("INSERT INTO %s(p, c, c2, abbreviation) VALUES (0, 2, 2, 'MA')");
-            execute("INSERT INTO %s(p, c, c2, abbreviation) VALUES (0, 3, 3, 'MA')");
-            execute("INSERT INTO %s(p, c, c2, abbreviation) VALUES (0, 4, 4, 'TX')");
-
-            assertRows(execute("SELECT * FROM %s WHERE c2 BETWEEN 2 AND 3 ALLOW FILTERING"),
-                       row (0, 2, 2, "MA"),
-                       row (0, 3, 3, "MA"));
-
-            assertRows(execute("SELECT * FROM %s WHERE c2 BETWEEN 3 AND 2 ALLOW FILTERING"),
-                       row (0, 2, 2, "MA"),
-                       row (0, 3, 3, "MA"));
-        });
-
-        createTable("CREATE TABLE %s(p int, c int, c2 int, abbreviation ascii, PRIMARY KEY (p, c, c2)) WITH CLUSTERING ORDER BY (c DESC, c2 DESC)");
-
-        beforeAndAfterFlush(() -> {
-            execute("INSERT INTO %s(p, c, c2, abbreviation) VALUES (0, 1, 1, 'CA')");
-            execute("INSERT INTO %s(p, c, c2, abbreviation) VALUES (0, 2, 2, 'MA')");
-            execute("INSERT INTO %s(p, c, c2, abbreviation) VALUES (0, 3, 3, 'MA')");
-            execute("INSERT INTO %s(p, c, c2, abbreviation) VALUES (0, 4, 4, 'TX')");
-
-            assertRows(execute("SELECT * FROM %s WHERE c2 BETWEEN 2 AND 3 ALLOW FILTERING"),
-                       row(0, 3, 3, "MA"),
-                       row(0, 2, 2, "MA"));
-
-            assertRows(execute("SELECT * FROM %s WHERE c2 BETWEEN 3 AND 2 ALLOW FILTERING"),
-                       row(0, 3, 3, "MA"),
-                       row(0, 2, 2, "MA"));
-        });
-    }
 }

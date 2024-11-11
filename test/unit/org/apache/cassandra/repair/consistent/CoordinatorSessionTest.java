@@ -19,64 +19,44 @@
 package org.apache.cassandra.repair.consistent;
 
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.SettableFuture;
+
 import org.junit.Assert;
-import org.junit.BeforeClass;
 import org.junit.Test;
 
-import org.apache.cassandra.net.Verb;
-import org.apache.cassandra.repair.SharedContext;
-import org.apache.cassandra.dht.Range;
-import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.repair.AbstractRepairTest;
-import org.apache.cassandra.repair.CoordinatedRepairResult;
 import org.apache.cassandra.repair.RepairSessionResult;
 import org.apache.cassandra.repair.messages.FailSession;
 import org.apache.cassandra.repair.messages.FinalizeCommit;
-import org.apache.cassandra.repair.messages.FinalizePromise;
 import org.apache.cassandra.repair.messages.FinalizePropose;
 import org.apache.cassandra.repair.messages.PrepareConsistentRequest;
-import org.apache.cassandra.repair.messages.PrepareConsistentResponse;
 import org.apache.cassandra.repair.messages.RepairMessage;
-import org.apache.cassandra.utils.concurrent.AsyncPromise;
-import org.apache.cassandra.utils.concurrent.Future;
-import org.apache.cassandra.utils.concurrent.Promise;
+import org.apache.cassandra.utils.UUIDGen;
 
-import static org.apache.cassandra.repair.consistent.ConsistentSession.State.FAILED;
-import static org.apache.cassandra.repair.consistent.ConsistentSession.State.FINALIZE_PROMISED;
-import static org.apache.cassandra.repair.consistent.ConsistentSession.State.PREPARED;
-import static org.apache.cassandra.repair.consistent.ConsistentSession.State.PREPARING;
-import static org.apache.cassandra.repair.consistent.ConsistentSession.State.REPAIRING;
-
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
+import static org.apache.cassandra.repair.consistent.ConsistentSession.State.*;
 
 public class CoordinatorSessionTest extends AbstractRepairTest
 {
-    @BeforeClass
-    public static void beforeClass()
-    {
-        ClusterMetadataTestHelper.setInstanceForTest();
-    }
+
     static CoordinatorSession.Builder createBuilder()
     {
-        CoordinatorSession.Builder builder = CoordinatorSession.builder(SharedContext.Global.instance);
+        CoordinatorSession.Builder builder = CoordinatorSession.builder();
         builder.withState(PREPARING);
-        builder.withSessionID(nextTimeUUID());
+        builder.withSessionID(UUIDGen.getTimeUUID());
         builder.withCoordinator(COORDINATOR);
-        builder.withUUIDTableIds(Sets.newHashSet(UUID.randomUUID(), UUID.randomUUID()));
+        builder.withUUIDTableIds(Sets.newHashSet(UUIDGen.getTimeUUID(), UUIDGen.getTimeUUID()));
         builder.withRepairedAt(System.currentTimeMillis());
         builder.withRanges(Sets.newHashSet(RANGE1, RANGE2, RANGE3));
         builder.withParticipants(Sets.newHashSet(PARTICIPANT1, PARTICIPANT2, PARTICIPANT3));
@@ -90,10 +70,7 @@ public class CoordinatorSessionTest extends AbstractRepairTest
 
     static InstrumentedCoordinatorSession createInstrumentedSession()
     {
-        MockMessaging msg = new MockMessaging();
-        CoordinatorSession.Builder builder = createBuilder();
-        builder.withContext(SharedContext.Global.instance.withMessaging(msg));
-        return new InstrumentedCoordinatorSession(msg, builder);
+        return new InstrumentedCoordinatorSession(createBuilder());
     }
 
     private static RepairSessionResult createResult(CoordinatorSession coordinator)
@@ -110,11 +87,20 @@ public class CoordinatorSessionTest extends AbstractRepairTest
 
     private static class InstrumentedCoordinatorSession extends CoordinatorSession
     {
-        private final Map<InetAddressAndPort, List<RepairMessage>> sentMessages;
-        public InstrumentedCoordinatorSession(MockMessaging messaging, Builder builder)
+        public InstrumentedCoordinatorSession(Builder builder)
         {
             super(builder);
-            this.sentMessages = messaging.sentMessages;
+        }
+
+        Map<InetAddressAndPort, List<RepairMessage>> sentMessages = new HashMap<>();
+
+        protected void sendMessage(InetAddressAndPort destination, Message<RepairMessage> message)
+        {
+            if (!sentMessages.containsKey(destination))
+            {
+                sentMessages.put(destination, new ArrayList<>());
+            }
+            sentMessages.get(destination).add(message.payload);
         }
 
         Runnable onSetRepairing = null;
@@ -223,17 +209,18 @@ public class CoordinatorSessionTest extends AbstractRepairTest
     {
         InstrumentedCoordinatorSession coordinator = createInstrumentedSession();
         AtomicBoolean repairSubmitted = new AtomicBoolean(false);
-        Promise<CoordinatedRepairResult> repairFuture = AsyncPromise.uncancellable();
-        Supplier<Future<CoordinatedRepairResult>> sessionSupplier = () ->
+        SettableFuture<List<RepairSessionResult>> repairFuture = SettableFuture.create();
+        Supplier<ListenableFuture<List<RepairSessionResult>>> sessionSupplier = () ->
         {
             repairSubmitted.set(true);
             return repairFuture;
         };
 
         // coordinator sends prepare requests to create local session and perform anticompaction
+        AtomicBoolean hasFailures = new AtomicBoolean(false);
         Assert.assertFalse(repairSubmitted.get());
         Assert.assertTrue(coordinator.sentMessages.isEmpty());
-        Future<CoordinatedRepairResult> sessionResult = coordinator.execute(sessionSupplier);
+        ListenableFuture sessionResult = coordinator.execute(sessionSupplier, hasFailures);
 
         for (InetAddressAndPort participant : PARTICIPANTS)
         {
@@ -244,17 +231,17 @@ public class CoordinatorSessionTest extends AbstractRepairTest
 
         // participants respond to coordinator, and repair begins once all participants have responded with success
         Assert.assertEquals(ConsistentSession.State.PREPARING, coordinator.getState());
-        
-        coordinator.handlePrepareResponse(Message.out(Verb.PREPARE_CONSISTENT_RSP, new PrepareConsistentResponse(coordinator.sessionID, PARTICIPANT1, true)));
+
+        coordinator.handlePrepareResponse(PARTICIPANT1, true);
         Assert.assertEquals(ConsistentSession.State.PREPARING, coordinator.getState());
-        
-        coordinator.handlePrepareResponse(Message.out(Verb.PREPARE_CONSISTENT_RSP, new PrepareConsistentResponse(coordinator.sessionID, PARTICIPANT2, true)));
+
+        coordinator.handlePrepareResponse(PARTICIPANT2, true);
         Assert.assertEquals(ConsistentSession.State.PREPARING, coordinator.getState());
 
         // set the setRepairing callback to verify the correct state when it's called
         Assert.assertFalse(coordinator.setRepairingCalled);
         coordinator.onSetRepairing = () -> Assert.assertEquals(PREPARED, coordinator.getState());
-        coordinator.handlePrepareResponse(Message.out(Verb.PREPARE_CONSISTENT_RSP, new PrepareConsistentResponse(coordinator.sessionID, PARTICIPANT3, true)));
+        coordinator.handlePrepareResponse(PARTICIPANT3, true);
         Assert.assertTrue(coordinator.setRepairingCalled);
         Assert.assertTrue(repairSubmitted.get());
 
@@ -265,7 +252,7 @@ public class CoordinatorSessionTest extends AbstractRepairTest
                                                                     createResult(coordinator));
 
         coordinator.sentMessages.clear();
-        repairFuture.trySuccess(CoordinatedRepairResult.success(results));
+        repairFuture.set(results);
 
         // propose messages should have been sent once all repair sessions completed successfully
         for (InetAddressAndPort participant : PARTICIPANTS)
@@ -278,16 +265,16 @@ public class CoordinatorSessionTest extends AbstractRepairTest
         coordinator.sentMessages.clear();
         Assert.assertEquals(ConsistentSession.State.REPAIRING, coordinator.getState());
 
-        coordinator.handleFinalizePromise(Message.out(Verb.FINALIZE_PROMISE_MSG, new FinalizePromise(coordinator.sessionID, PARTICIPANT1, true)));
+        coordinator.handleFinalizePromise(PARTICIPANT1, true);
         Assert.assertEquals(ConsistentSession.State.REPAIRING, coordinator.getState());
 
-        coordinator.handleFinalizePromise(Message.out(Verb.FINALIZE_PROMISE_MSG, new FinalizePromise(coordinator.sessionID, PARTICIPANT2, true)));
+        coordinator.handleFinalizePromise(PARTICIPANT2, true);
         Assert.assertEquals(ConsistentSession.State.REPAIRING, coordinator.getState());
 
         // set the finalizeCommit callback so we can verify the state when it's called
         Assert.assertFalse(coordinator.finalizeCommitCalled);
         coordinator.onFinalizeCommit = () -> Assert.assertEquals(FINALIZE_PROMISED, coordinator.getState());
-        coordinator.handleFinalizePromise(Message.out(Verb.FINALIZE_PROMISE_MSG, new FinalizePromise(coordinator.sessionID, PARTICIPANT3, true)));
+        coordinator.handleFinalizePromise(PARTICIPANT3, true);
         Assert.assertTrue(coordinator.finalizeCommitCalled);
 
         Assert.assertEquals(ConsistentSession.State.FINALIZED, coordinator.getState());
@@ -298,7 +285,7 @@ public class CoordinatorSessionTest extends AbstractRepairTest
         }
 
         Assert.assertTrue(sessionResult.isDone());
-        sessionResult.syncUninterruptibly();
+        Assert.assertFalse(hasFailures.get());
     }
 
     @Test
@@ -306,17 +293,18 @@ public class CoordinatorSessionTest extends AbstractRepairTest
     {
         InstrumentedCoordinatorSession coordinator = createInstrumentedSession();
         AtomicBoolean repairSubmitted = new AtomicBoolean(false);
-        Promise<CoordinatedRepairResult> repairFuture = AsyncPromise.uncancellable();
-        Supplier<Future<CoordinatedRepairResult>> sessionSupplier = () ->
+        SettableFuture<List<RepairSessionResult>> repairFuture = SettableFuture.create();
+        Supplier<ListenableFuture<List<RepairSessionResult>>> sessionSupplier = () ->
         {
             repairSubmitted.set(true);
             return repairFuture;
         };
 
         // coordinator sends prepare requests to create local session and perform anticompaction
+        AtomicBoolean hasFailures = new AtomicBoolean(false);
         Assert.assertFalse(repairSubmitted.get());
         Assert.assertTrue(coordinator.sentMessages.isEmpty());
-        Future<CoordinatedRepairResult> sessionResult = coordinator.execute(sessionSupplier);
+        ListenableFuture sessionResult = coordinator.execute(sessionSupplier, hasFailures);
         for (InetAddressAndPort participant : PARTICIPANTS)
         {
             PrepareConsistentRequest expected = new PrepareConsistentRequest(coordinator.sessionID, COORDINATOR, new HashSet<>(PARTICIPANTS));
@@ -326,22 +314,21 @@ public class CoordinatorSessionTest extends AbstractRepairTest
         // participants respond to coordinator, and repair begins once all participants have responded with success
         Assert.assertEquals(ConsistentSession.State.PREPARING, coordinator.getState());
 
-        coordinator.handlePrepareResponse(Message.out(Verb.PREPARE_CONSISTENT_RSP, new PrepareConsistentResponse(coordinator.sessionID, PARTICIPANT1, true)));
+        coordinator.handlePrepareResponse(PARTICIPANT1, true);
         Assert.assertEquals(ConsistentSession.State.PREPARING, coordinator.getState());
 
-        coordinator.handlePrepareResponse(Message.out(Verb.PREPARE_CONSISTENT_RSP, new PrepareConsistentResponse(coordinator.sessionID, PARTICIPANT2, true)));
+        coordinator.handlePrepareResponse(PARTICIPANT2, true);
         Assert.assertEquals(ConsistentSession.State.PREPARING, coordinator.getState());
 
         // set the setRepairing callback to verify the correct state when it's called
         Assert.assertFalse(coordinator.setRepairingCalled);
         coordinator.onSetRepairing = () -> Assert.assertEquals(PREPARED, coordinator.getState());
-        coordinator.handlePrepareResponse(Message.out(Verb.PREPARE_CONSISTENT_RSP, new PrepareConsistentResponse(coordinator.sessionID, PARTICIPANT3, true)));
+        coordinator.handlePrepareResponse(PARTICIPANT3, true);
         Assert.assertTrue(coordinator.setRepairingCalled);
         Assert.assertTrue(repairSubmitted.get());
 
         Assert.assertEquals(ConsistentSession.State.REPAIRING, coordinator.getState());
 
-        List<Collection<Range<Token>>> ranges = Arrays.asList(coordinator.ranges, coordinator.ranges, coordinator.ranges);
         ArrayList<RepairSessionResult> results = Lists.newArrayList(createResult(coordinator),
                                                                     null,
                                                                     createResult(coordinator));
@@ -349,7 +336,7 @@ public class CoordinatorSessionTest extends AbstractRepairTest
         coordinator.sentMessages.clear();
         Assert.assertFalse(coordinator.failCalled);
         coordinator.onFail = () -> Assert.assertEquals(REPAIRING, coordinator.getState());
-        repairFuture.trySuccess(CoordinatedRepairResult.create(ranges, results));
+        repairFuture.set(results);
         Assert.assertTrue(coordinator.failCalled);
 
         // all participants should have been notified of session failure
@@ -360,7 +347,7 @@ public class CoordinatorSessionTest extends AbstractRepairTest
         }
 
         Assert.assertTrue(sessionResult.isDone());
-        Assert.assertNotNull(sessionResult.cause());
+        Assert.assertTrue(hasFailures.get());
     }
 
     @Test
@@ -368,17 +355,18 @@ public class CoordinatorSessionTest extends AbstractRepairTest
     {
         InstrumentedCoordinatorSession coordinator = createInstrumentedSession();
         AtomicBoolean repairSubmitted = new AtomicBoolean(false);
-        Promise<CoordinatedRepairResult> repairFuture = AsyncPromise.uncancellable();
-        Supplier<Future<CoordinatedRepairResult>> sessionSupplier = () ->
+        SettableFuture<List<RepairSessionResult>> repairFuture = SettableFuture.create();
+        Supplier<ListenableFuture<List<RepairSessionResult>>> sessionSupplier = () ->
         {
             repairSubmitted.set(true);
             return repairFuture;
         };
 
         // coordinator sends prepare requests to create local session and perform anticompaction
+        AtomicBoolean hasFailures = new AtomicBoolean(false);
         Assert.assertFalse(repairSubmitted.get());
         Assert.assertTrue(coordinator.sentMessages.isEmpty());
-        Future<CoordinatedRepairResult> sessionResult = coordinator.execute(sessionSupplier);
+        ListenableFuture sessionResult = coordinator.execute(sessionSupplier, hasFailures);
         for (InetAddressAndPort participant : PARTICIPANTS)
         {
             PrepareConsistentRequest expected = new PrepareConsistentRequest(coordinator.sessionID, COORDINATOR, new HashSet<>(PARTICIPANTS));
@@ -390,14 +378,14 @@ public class CoordinatorSessionTest extends AbstractRepairTest
         // participants respond to coordinator, and repair begins once all participants have responded
         Assert.assertEquals(ConsistentSession.State.PREPARING, coordinator.getState());
 
-        coordinator.handlePrepareResponse(Message.out(Verb.PREPARE_CONSISTENT_RSP, new PrepareConsistentResponse(coordinator.sessionID, PARTICIPANT1, true)));
+        coordinator.handlePrepareResponse(PARTICIPANT1, true);
         Assert.assertEquals(ConsistentSession.State.PREPARING, coordinator.getState());
         Assert.assertEquals(PREPARED, coordinator.getParticipantState(PARTICIPANT1));
         Assert.assertFalse(sessionResult.isDone());
 
         // participant 2 fails to prepare for consistent repair
         Assert.assertFalse(coordinator.failCalled);
-        coordinator.handlePrepareResponse(Message.out(Verb.PREPARE_CONSISTENT_RSP, new PrepareConsistentResponse(coordinator.sessionID, PARTICIPANT2, false)));
+        coordinator.handlePrepareResponse(PARTICIPANT2, false);
         Assert.assertEquals(ConsistentSession.State.PREPARING, coordinator.getState());
         // we should have sent failure messages to the other participants, but not yet marked them failed internally
         assertMessageSent(coordinator, PARTICIPANT1, new FailSession(coordinator.sessionID));
@@ -413,7 +401,7 @@ public class CoordinatorSessionTest extends AbstractRepairTest
         // last outstanding response should cause repair to complete in failed state
         Assert.assertFalse(coordinator.setRepairingCalled);
         coordinator.onSetRepairing = Assert::fail;
-        coordinator.handlePrepareResponse(Message.out(Verb.PREPARE_CONSISTENT_RSP, new PrepareConsistentResponse(coordinator.sessionID, PARTICIPANT3, true)));
+        coordinator.handlePrepareResponse(PARTICIPANT3, true);
         Assert.assertTrue(coordinator.failCalled);
         Assert.assertFalse(coordinator.setRepairingCalled);
         Assert.assertFalse(repairSubmitted.get());
@@ -425,7 +413,7 @@ public class CoordinatorSessionTest extends AbstractRepairTest
         Assert.assertFalse(coordinator.sentMessages.containsKey(PARTICIPANT2));
 
         Assert.assertTrue(sessionResult.isDone());
-        Assert.assertNotNull(sessionResult.cause());
+        Assert.assertTrue(hasFailures.get());
     }
 
     @Test
@@ -433,17 +421,18 @@ public class CoordinatorSessionTest extends AbstractRepairTest
     {
         InstrumentedCoordinatorSession coordinator = createInstrumentedSession();
         AtomicBoolean repairSubmitted = new AtomicBoolean(false);
-        Promise<CoordinatedRepairResult> repairFuture = AsyncPromise.uncancellable();
-        Supplier<Future<CoordinatedRepairResult>> sessionSupplier = () ->
+        SettableFuture<List<RepairSessionResult>> repairFuture = SettableFuture.create();
+        Supplier<ListenableFuture<List<RepairSessionResult>>> sessionSupplier = () ->
         {
             repairSubmitted.set(true);
             return repairFuture;
         };
 
         // coordinator sends prepare requests to create local session and perform anticompaction
+        AtomicBoolean hasFailures = new AtomicBoolean(false);
         Assert.assertFalse(repairSubmitted.get());
         Assert.assertTrue(coordinator.sentMessages.isEmpty());
-        Future<CoordinatedRepairResult> sessionResult = coordinator.execute(sessionSupplier);
+        ListenableFuture sessionResult = coordinator.execute(sessionSupplier, hasFailures);
 
         for (InetAddressAndPort participant : PARTICIPANTS)
         {
@@ -455,16 +444,16 @@ public class CoordinatorSessionTest extends AbstractRepairTest
         // participants respond to coordinator, and repair begins once all participants have responded with success
         Assert.assertEquals(ConsistentSession.State.PREPARING, coordinator.getState());
 
-        coordinator.handlePrepareResponse(Message.out(Verb.PREPARE_CONSISTENT_RSP, new PrepareConsistentResponse(coordinator.sessionID, PARTICIPANT1, true)));
+        coordinator.handlePrepareResponse(PARTICIPANT1, true);
         Assert.assertEquals(ConsistentSession.State.PREPARING, coordinator.getState());
 
-        coordinator.handlePrepareResponse(Message.out(Verb.PREPARE_CONSISTENT_RSP, new PrepareConsistentResponse(coordinator.sessionID, PARTICIPANT2, true)));
+        coordinator.handlePrepareResponse(PARTICIPANT2, true);
         Assert.assertEquals(ConsistentSession.State.PREPARING, coordinator.getState());
 
         // set the setRepairing callback to verify the correct state when it's called
         Assert.assertFalse(coordinator.setRepairingCalled);
         coordinator.onSetRepairing = () -> Assert.assertEquals(PREPARED, coordinator.getState());
-        coordinator.handlePrepareResponse(Message.out(Verb.PREPARE_CONSISTENT_RSP, new PrepareConsistentResponse(coordinator.sessionID, PARTICIPANT3, true)));
+        coordinator.handlePrepareResponse(PARTICIPANT3, true);
         Assert.assertTrue(coordinator.setRepairingCalled);
         Assert.assertTrue(repairSubmitted.get());
 
@@ -475,7 +464,7 @@ public class CoordinatorSessionTest extends AbstractRepairTest
                                                                     createResult(coordinator));
 
         coordinator.sentMessages.clear();
-        repairFuture.trySuccess(CoordinatedRepairResult.success(results));
+        repairFuture.set(results);
 
         // propose messages should have been sent once all repair sessions completed successfully
         for (InetAddressAndPort participant : PARTICIPANTS)
@@ -488,18 +477,18 @@ public class CoordinatorSessionTest extends AbstractRepairTest
         coordinator.sentMessages.clear();
         Assert.assertEquals(ConsistentSession.State.REPAIRING, coordinator.getState());
 
-        coordinator.handleFinalizePromise(Message.out(Verb.FINALIZE_PROMISE_MSG, new FinalizePromise(coordinator.sessionID, PARTICIPANT1, true)));
+        coordinator.handleFinalizePromise(PARTICIPANT1, true);
         Assert.assertEquals(ConsistentSession.State.REPAIRING, coordinator.getState());
 
         Assert.assertFalse(coordinator.failCalled);
-        coordinator.handleFinalizePromise(Message.out(Verb.FINALIZE_PROMISE_MSG, new FinalizePromise(coordinator.sessionID, PARTICIPANT2, false)));
+        coordinator.handleFinalizePromise(PARTICIPANT2, false);
         Assert.assertEquals(ConsistentSession.State.FAILED, coordinator.getState());
         Assert.assertTrue(coordinator.failCalled);
 
         // additional success messages should be ignored
         Assert.assertFalse(coordinator.finalizeCommitCalled);
         coordinator.onFinalizeCommit = Assert::fail;
-        coordinator.handleFinalizePromise(Message.out(Verb.FINALIZE_PROMISE_MSG, new FinalizePromise(coordinator.sessionID, PARTICIPANT3, true)));
+        coordinator.handleFinalizePromise(PARTICIPANT3, true);
         Assert.assertFalse(coordinator.finalizeCommitCalled);
         Assert.assertEquals(ConsistentSession.State.FAILED, coordinator.getState());
 
@@ -511,6 +500,6 @@ public class CoordinatorSessionTest extends AbstractRepairTest
         }
 
         Assert.assertTrue(sessionResult.isDone());
-        Assert.assertNotNull(sessionResult.cause());
+        Assert.assertTrue(hasFailures.get());
     }
 }

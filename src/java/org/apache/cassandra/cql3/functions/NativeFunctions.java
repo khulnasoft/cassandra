@@ -23,8 +23,6 @@ import java.util.Collection;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Multimap;
 
-import org.apache.cassandra.cql3.functions.masking.MaskingFcts;
-
 /**
  * A container of native functions. It stores both pre-built function overloads ({@link NativeFunction}) and
  * dynamic generators of functions ({@link FunctionFactory}).
@@ -42,12 +40,9 @@ public class NativeFunctions
             FromJsonFct.addFunctionsTo(this);
             OperationFcts.addFunctionsTo(this);
             AggregateFcts.addFunctionsTo(this);
-            CollectionFcts.addFunctionsTo(this);
             BytesConversionFcts.addFunctionsTo(this);
-            MathFcts.addFunctionsTo(this);
-            MaskingFcts.addFunctionsTo(this);
             VectorFcts.addFunctionsTo(this);
-            ClusterMetadataFcts.addFunctionsTo(this);
+            IndexFcts.addFunctionsTo(this);
         }
     };
 
@@ -60,9 +55,6 @@ public class NativeFunctions
     public void add(NativeFunction function)
     {
         functions.put(function.name(), function);
-        NativeFunction legacyFunction = function.withLegacyName();
-        if (legacyFunction != null)
-            functions.put(legacyFunction.name(), legacyFunction);
     }
 
     public void addAll(NativeFunction... functions)
@@ -104,14 +96,6 @@ public class NativeFunctions
     public Collection<FunctionFactory> getFactories(FunctionName name)
     {
         return factories.get(name);
-    }
-
-    /**
-     * @return all the registered functions factories.
-     */
-    public Collection<FunctionFactory> getFactories()
-    {
-        return factories.values();
     }
 
     /**

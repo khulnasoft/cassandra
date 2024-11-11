@@ -19,17 +19,18 @@
 package org.apache.cassandra.repair.messages;
 
 import java.io.IOException;
+import java.util.UUID;
 
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.UUIDSerializer;
 
 public class StatusRequest extends RepairMessage
 {
-    public final TimeUUID sessionID;
+    public final UUID sessionID;
 
-    public StatusRequest(TimeUUID sessionID)
+    public StatusRequest(UUID sessionID)
     {
         super(null);
         this.sessionID = sessionID;
@@ -61,17 +62,17 @@ public class StatusRequest extends RepairMessage
     {
         public void serialize(StatusRequest msg, DataOutputPlus out, int version) throws IOException
         {
-            msg.sessionID.serialize(out);
+            UUIDSerializer.serializer.serialize(msg.sessionID, out, version);
         }
 
         public StatusRequest deserialize(DataInputPlus in, int version) throws IOException
         {
-            return new StatusRequest(TimeUUID.deserialize(in));
+            return new StatusRequest(UUIDSerializer.serializer.deserialize(in, version));
         }
 
         public long serializedSize(StatusRequest msg, int version)
         {
-            return TimeUUID.sizeInBytes();
+            return UUIDSerializer.serializer.serializedSize(msg.sessionID, version);
         }
     };
 }

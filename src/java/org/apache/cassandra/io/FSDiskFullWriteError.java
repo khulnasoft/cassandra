@@ -28,4 +28,10 @@ public class FSDiskFullWriteError extends FSWriteError
                                             mutationSize,
                                             keyspace)));
     }
+
+    @Override
+    public String toString()
+    {
+        return "FSDiskFullWriteError";
+    }
 }

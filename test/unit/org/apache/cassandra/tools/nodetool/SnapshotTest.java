@@ -18,11 +18,12 @@
 
 package org.apache.cassandra.tools.nodetool;
 
+import java.io.File;
+
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.tools.ToolRunner;
 
 import static org.apache.cassandra.tools.ToolRunner.invokeNodetool;
@@ -36,7 +37,6 @@ public class SnapshotTest extends CQLTester
     @BeforeClass
     public static void setup() throws Exception
     {
-        requireNetwork();
         startJMXServer();
     }
 
@@ -83,9 +83,9 @@ public class SnapshotTest extends CQLTester
     @Test
     public void testInvalidSnapshotName()
     {
-        ToolRunner.ToolResult tool = invokeNodetool("snapshot", "-t", "invalid" + File.pathSeparator() + "name");
+        ToolRunner.ToolResult tool = invokeNodetool("snapshot", "-t", "invalid" + File.pathSeparatorChar + "name");
         assertThat(tool.getExitCode()).isEqualTo(2);
-        assertThat(tool.getStderr()).contains("Snapshot name cannot contain " + File.pathSeparator());
+        assertThat(tool.getStderr()).contains("Snapshot name cannot contain " + File.pathSeparatorChar);
     }
 
     @Test
@@ -96,24 +96,6 @@ public class SnapshotTest extends CQLTester
 
         assertThat(tool.getExitCode()).isEqualTo(0);
         assertThat(tool.getStdout()).contains("Requested creating snapshot(s) for [all keyspaces] with snapshot name [skip_flush] and options {skipFlush=true}");
-    }
-
-    @Test
-    public void testTTLOption()
-    {
-        ToolRunner.ToolResult tool = invokeNodetool("snapshot", "-t", "ttl", "--ttl", "5h");
-        tool.assertOnCleanExit();
-
-        assertThat(tool.getExitCode()).isEqualTo(0);
-        assertThat(tool.getStdout()).contains("Requested creating snapshot(s) for [all keyspaces] with snapshot name [ttl] and options {skipFlush=false, ttl=5h}");
-    }
-
-    @Test
-    public void testInvalidTTLOption()
-    {
-        ToolRunner.ToolResult tool = invokeNodetool("snapshot", "-t", "ttl", "--ttl", "infinity");
-        assertThat(tool.getExitCode()).isEqualTo(1);
-        assertThat(tool.getStdout()).contains("Invalid duration: infinity");
     }
 
     @Test

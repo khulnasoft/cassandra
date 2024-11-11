@@ -20,21 +20,18 @@ package org.apache.cassandra.tools;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.text.SimpleDateFormat;
+import java.util.concurrent.locks.Condition;
 
-import org.apache.cassandra.utils.concurrent.Condition;
+import org.apache.cassandra.utils.concurrent.SimpleCondition;
 import org.apache.cassandra.utils.progress.ProgressEvent;
 import org.apache.cassandra.utils.progress.ProgressEventType;
 import org.apache.cassandra.utils.progress.jmx.JMXNotificationProgressListener;
-
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
-import static org.apache.cassandra.utils.concurrent.Condition.newOneTimeCondition;
 
 public class BootstrapMonitor extends JMXNotificationProgressListener
 {
     private final SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss,SSS");
     private final PrintStream out;
-    private final Condition condition = newOneTimeCondition();
-    private volatile Exception error;
+    private final Condition condition = new SimpleCondition();
 
     public BootstrapMonitor(PrintStream out)
     {
@@ -67,7 +64,7 @@ public class BootstrapMonitor extends JMXNotificationProgressListener
     @Override
     public void handleConnectionFailed(long timestamp, String message)
     {
-        error = new IOException(String.format("[%s] JMX connection closed. (%s)",
+        Exception error = new IOException(String.format("[%s] JMX connection closed. (%s)",
                                               format.format(timestamp), message));
         out.println(error.getMessage());
         condition.signalAll();
@@ -77,25 +74,15 @@ public class BootstrapMonitor extends JMXNotificationProgressListener
     public void progress(String tag, ProgressEvent event)
     {
         ProgressEventType type = event.getType();
-        String message = String.format("[%s] %s", format.format(currentTimeMillis()), event.getMessage());
+        String message = String.format("[%s] %s", format.format(System.currentTimeMillis()), event.getMessage());
         if (type == ProgressEventType.PROGRESS)
         {
             message = message + " (progress: " + (int)event.getProgressPercentage() + "%)";
         }
         out.println(message);
-        if (type == ProgressEventType.ERROR)
-        {
-            error = new RuntimeException(String.format("Bootstrap resume has failed with error: %s", message));
-            condition.signalAll();
-        }
         if (type == ProgressEventType.COMPLETE)
         {
             condition.signalAll();
         }
-    }
-
-    public Exception getError()
-    {
-        return error;
     }
 }

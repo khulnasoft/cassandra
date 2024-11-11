@@ -21,12 +21,9 @@ import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
-import com.google.common.collect.Iterables;
 import org.junit.Test;
 
 import org.junit.Assert;
-
-import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -37,12 +34,33 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.utils.FBUtilities;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
+
+
 public class CrcCheckChanceTest extends CQLTester
 {
+
+
     @Test
-    public void testChangingCrcCheckChance()
+    public void testChangingCrcCheckChanceNewFormat() throws Throwable
     {
-        createTable("CREATE TABLE %s (p text, c text, v text, s text static, PRIMARY KEY (p, c)) WITH compression = {'class': 'LZ4Compressor'} AND crc_check_chance = 0.99;");
+        testChangingCrcCheckChance(true);
+    }
+
+    @Test
+    public void testChangingCrcCheckChanceOldFormat() throws Throwable
+    {
+        testChangingCrcCheckChance(false);
+    }
+
+
+    public void testChangingCrcCheckChance(boolean newFormat) throws Throwable
+    {
+        //Start with crc_check_chance of 99%
+        if (newFormat)
+            createTable("CREATE TABLE %s (p text, c text, v text, s text static, PRIMARY KEY (p, c)) WITH compression = {'sstable_compression': 'LZ4Compressor'} AND crc_check_chance = 0.99;");
+        else
+            createTable("CREATE TABLE %s (p text, c text, v text, s text static, PRIMARY KEY (p, c)) WITH compression = {'sstable_compression': 'LZ4Compressor', 'crc_check_chance' : 0.99}");
 
         execute("CREATE INDEX foo ON %s(v)");
 
@@ -51,20 +69,22 @@ public class CrcCheckChanceTest extends CQLTester
         execute("INSERT INTO %s(p, s) values (?, ?)", "p2", "sv2");
 
         ColumnFamilyStore cfs = Keyspace.open(CQLTester.KEYSPACE).getColumnFamilyStore(currentTable());
-        ColumnFamilyStore indexCfs = Iterables.getFirst(cfs.indexManager.getAllIndexColumnFamilyStores(), null);
-        Util.flush(cfs);
+        ColumnFamilyStore indexCfs = cfs.indexManager.getAllIndexColumnFamilyStores().iterator().next();
+        cfs.disableAutoCompaction();
+        indexCfs.disableAutoCompaction();
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         Assert.assertEquals(0.99, cfs.getCrcCheckChance(), 0.0);
         Assert.assertEquals(0.99, cfs.getLiveSSTables().iterator().next().getCrcCheckChance(), 0.0);
 
-        if (indexCfs != null)
-        {
-            Assert.assertEquals(0.99, indexCfs.getCrcCheckChance(), 0.0);
-            Assert.assertEquals(0.99, indexCfs.getLiveSSTables().iterator().next().getCrcCheckChance(), 0.0);
-        }
+        Assert.assertEquals(0.99, indexCfs.getCrcCheckChance(), 0.0);
+        Assert.assertEquals(0.99, indexCfs.getLiveSSTables().iterator().next().getCrcCheckChance(), 0.0);
 
         //Test for stack overflow
-        alterTable("ALTER TABLE %s WITH crc_check_chance = 0.99");
+        if (newFormat)
+            alterTable("ALTER TABLE %s WITH crc_check_chance = 0.99");
+        else
+            alterTable("ALTER TABLE %s WITH compression = {'sstable_compression': 'LZ4Compressor', 'crc_check_chance': 0.99}");
 
         assertRows(execute("SELECT * FROM %s WHERE p=?", "p1"),
                    row("p1", "k1", "sv1", "v1"),
@@ -80,19 +100,19 @@ public class CrcCheckChanceTest extends CQLTester
         execute("INSERT INTO %s(p, c, v) values (?, ?, ?)", "p1", "k2", "v2");
         execute("INSERT INTO %s(p, s) values (?, ?)", "p2", "sv2");
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         execute("INSERT INTO %s(p, c, v, s) values (?, ?, ?, ?)", "p1", "k1", "v1", "sv1");
         execute("INSERT INTO %s(p, c, v) values (?, ?, ?)", "p1", "k2", "v2");
         execute("INSERT INTO %s(p, s) values (?, ?)", "p2", "sv2");
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         execute("INSERT INTO %s(p, c, v, s) values (?, ?, ?, ?)", "p1", "k1", "v1", "sv1");
         execute("INSERT INTO %s(p, c, v) values (?, ?, ?)", "p1", "k2", "v2");
         execute("INSERT INTO %s(p, s) values (?, ?)", "p2", "sv2");
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         cfs.forceMajorCompaction();
 
         //Now let's change via JMX
@@ -100,11 +120,8 @@ public class CrcCheckChanceTest extends CQLTester
 
         Assert.assertEquals(0.01, cfs.getCrcCheckChance(), 0.0);
         Assert.assertEquals(0.01, cfs.getLiveSSTables().iterator().next().getCrcCheckChance(), 0.0);
-        if (indexCfs != null)
-        {
-            Assert.assertEquals(0.01, indexCfs.getCrcCheckChance(), 0.0);
-            Assert.assertEquals(0.01, indexCfs.getLiveSSTables().iterator().next().getCrcCheckChance(), 0.0);
-        }
+        Assert.assertEquals(0.01, indexCfs.getCrcCheckChance(), 0.0);
+        Assert.assertEquals(0.01, indexCfs.getLiveSSTables().iterator().next().getCrcCheckChance(), 0.0);
 
         assertRows(execute("SELECT * FROM %s WHERE p=?", "p1"),
                    row("p1", "k1", "sv1", "v1"),
@@ -116,64 +133,49 @@ public class CrcCheckChanceTest extends CQLTester
         );
 
         //Alter again via schema
-        alterTable("ALTER TABLE %s WITH crc_check_chance = 0.5");
+        if (newFormat)
+            alterTable("ALTER TABLE %s WITH crc_check_chance = 0.5");
+        else
+            alterTable("ALTER TABLE %s WITH compression = {'sstable_compression': 'LZ4Compressor', 'crc_check_chance': 0.5}");
 
         //We should be able to get the new value by accessing directly the schema metadata
         Assert.assertEquals(0.5, cfs.metadata().params.crcCheckChance, 0.0);
 
         //but previous JMX-set value will persist until next restart
         Assert.assertEquals(0.01, cfs.getLiveSSTables().iterator().next().getCrcCheckChance(), 0.0);
-        if (indexCfs != null)
-        {
-            Assert.assertEquals(0.01, indexCfs.getCrcCheckChance(), 0.0);
-            Assert.assertEquals(0.01, indexCfs.getLiveSSTables().iterator().next().getCrcCheckChance(), 0.0);
-        }
+        Assert.assertEquals(0.01, indexCfs.getCrcCheckChance(), 0.0);
+        Assert.assertEquals(0.01, indexCfs.getLiveSSTables().iterator().next().getCrcCheckChance(), 0.0);
 
         //Verify the call used by JMX still works
         cfs.setCrcCheckChance(0.03);
         Assert.assertEquals(0.03, cfs.getCrcCheckChance(), 0.0);
         Assert.assertEquals(0.03, cfs.getLiveSSTables().iterator().next().getCrcCheckChance(), 0.0);
-        if (indexCfs != null)
-        {
-            Assert.assertEquals(0.03, indexCfs.getCrcCheckChance(), 0.0);
-            Assert.assertEquals(0.03, indexCfs.getLiveSSTables().iterator().next().getCrcCheckChance(), 0.0);
-        }
+        Assert.assertEquals(0.03, indexCfs.getCrcCheckChance(), 0.0);
+        Assert.assertEquals(0.03, indexCfs.getLiveSSTables().iterator().next().getCrcCheckChance(), 0.0);
 
         // Also check that any open readers also use the updated value
         // note: only compressed files currently perform crc checks, so only the dfile reader is relevant here
         SSTableReader baseSSTable = cfs.getLiveSSTables().iterator().next();
-        if (indexCfs != null)
+        SSTableReader idxSSTable = indexCfs.getLiveSSTables().iterator().next();
+        try (RandomAccessReader baseDataReader = baseSSTable.openDataReader();
+             RandomAccessReader idxDataReader = idxSSTable.openDataReader())
         {
-            SSTableReader idxSSTable = indexCfs.getLiveSSTables().iterator().next();
-            try (RandomAccessReader baseDataReader = baseSSTable.openDataReader();
-                 RandomAccessReader idxDataReader = idxSSTable.openDataReader())
-            {
-                Assert.assertEquals(0.03, baseDataReader.getCrcCheckChance(), 0.0);
-                Assert.assertEquals(0.03, idxDataReader.getCrcCheckChance(), 0.0);
+            Assert.assertEquals(0.03, baseDataReader.getCrcCheckChance(), 0.0);
+            Assert.assertEquals(0.03, idxDataReader.getCrcCheckChance(), 0.0);
 
-                cfs.setCrcCheckChance(0.31);
-                Assert.assertEquals(0.31, baseDataReader.getCrcCheckChance(), 0.0);
-                Assert.assertEquals(0.31, idxDataReader.getCrcCheckChance(), 0.0);
-            }
-        }
-        else
-        {
-            try (RandomAccessReader baseDataReader = baseSSTable.openDataReader())
-            {
-                Assert.assertEquals(0.03, baseDataReader.getCrcCheckChance(), 0.0);
-                cfs.setCrcCheckChance(0.31);
-                Assert.assertEquals(0.31, baseDataReader.getCrcCheckChance(), 0.0);
-            }
+            cfs.setCrcCheckChance(0.31);
+            Assert.assertEquals(0.31, baseDataReader.getCrcCheckChance(), 0.0);
+            Assert.assertEquals(0.31, idxDataReader.getCrcCheckChance(), 0.0);
         }
     }
 
     @Test
-    public void testDropDuringCompaction()
+    public void testDropDuringCompaction() throws Throwable
     {
         CompactionManager.instance.disableAutoCompaction();
 
         //Start with crc_check_chance of 99%
-        createTable("CREATE TABLE %s (p text, c text, v text, s text static, PRIMARY KEY (p, c)) WITH compression = {'class': 'LZ4Compressor'} AND crc_check_chance = 0.99");
+        createTable("CREATE TABLE %s (p text, c text, v text, s text static, PRIMARY KEY (p, c)) WITH compression = {'sstable_compression': 'LZ4Compressor', 'crc_check_chance' : 0.99}");
 
         ColumnFamilyStore cfs = Keyspace.open(CQLTester.KEYSPACE).getColumnFamilyStore(currentTable());
 
@@ -184,11 +186,11 @@ public class CrcCheckChanceTest extends CQLTester
             execute("INSERT INTO %s(p, c, v) values (?, ?, ?)", "p1", "k2", "v2");
             execute("INSERT INTO %s(p, s) values (?, ?)", "p2", "sv2");
 
-            Util.flush(cfs);
+            cfs.forceBlockingFlush(UNIT_TESTS);
         }
 
-        DatabaseDescriptor.setCompactionThroughputMebibytesPerSec(1);
-        List<? extends Future<?>> futures = CompactionManager.instance.submitMaximal(cfs, CompactionManager.getDefaultGcBefore(cfs, FBUtilities.nowInSeconds()), false);
+        DatabaseDescriptor.setCompactionThroughputMbPerSec(1);
+        List<Future<?>> futures = CompactionManager.instance.submitMaximal(cfs, CompactionManager.getDefaultGcBefore(cfs, FBUtilities.nowInSeconds()), false); 
         execute("DROP TABLE %s");
 
         try
@@ -202,3 +204,4 @@ public class CrcCheckChanceTest extends CQLTester
         }
     }
 }
+

@@ -24,51 +24,52 @@ import java.util.Comparator;
 import org.apache.cassandra.db.ClusteringBound;
 import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.ClusteringPrefix;
-import org.apache.cassandra.io.sstable.AbstractSSTableIterator;
-import org.apache.cassandra.io.sstable.IndexInfo;
+import org.apache.cassandra.io.sstable.format.AbstractSSTableIterator.RowReader;
 import org.apache.cassandra.io.util.DataPosition;
 import org.apache.cassandra.io.util.FileHandle;
 
 // Used by indexed readers to store where they are of the index.
 public class IndexState implements AutoCloseable
 {
-    private final AbstractSSTableIterator<RowIndexEntry>.AbstractReader reader;
+    private final RowReader reader;
     private final ClusteringComparator comparator;
 
-    private final RowIndexEntry indexEntry;
-    private final RowIndexEntry.IndexInfoRetriever indexInfoRetriever;
+    private final BigTableRowIndexEntry indexEntry;
+    private final BigTableRowIndexEntry.IndexInfoRetriever indexInfoRetriever;
     private final boolean reversed;
 
     private int currentIndexIdx;
 
-    private int cachedIndexIdx = Integer.MIN_VALUE;
-    private IndexInfo cachedIndexInfo;
-
     // Marks the beginning of the block corresponding to currentIndexIdx.
     private DataPosition mark;
 
-    public IndexState(AbstractSSTableIterator<RowIndexEntry>.AbstractReader reader, ClusteringComparator comparator, RowIndexEntry indexEntry, boolean reversed, FileHandle indexFile)
+    public IndexState(RowReader reader,
+                      ClusteringComparator comparator,
+                      BigTableRowIndexEntry indexEntry,
+                      boolean reversed,
+                      FileHandle indexFile)
     {
         this.reader = reader;
         this.comparator = comparator;
         this.indexEntry = indexEntry;
         this.indexInfoRetriever = indexEntry.openWithIndex(indexFile);
         this.reversed = reversed;
-        this.currentIndexIdx = reversed ? indexEntry.blockCount() : -1;
+        this.currentIndexIdx = reversed ? indexEntry.columnsIndexCount() : -1;
     }
 
     public boolean isDone()
     {
-        return reversed ? currentIndexIdx < 0 : currentIndexIdx >= indexEntry.blockCount();
+        return reversed ? currentIndexIdx < 0 : currentIndexIdx >= indexEntry.columnsIndexCount();
     }
 
     // Sets the reader to the beginning of blockIdx.
     public void setToBlock(int blockIdx) throws IOException
     {
-        if (blockIdx >= 0 && blockIdx < indexEntry.blockCount())
+        if (blockIdx >= 0 && blockIdx < indexEntry.columnsIndexCount())
         {
             reader.seekToPosition(columnOffset(blockIdx));
             mark = reader.file.mark();
+            reader.deserializer.clearState();
         }
 
         currentIndexIdx = blockIdx;
@@ -82,7 +83,7 @@ public class IndexState implements AutoCloseable
 
     public int blocksCount()
     {
-        return indexEntry.blockCount();
+        return indexEntry.columnsIndexCount();
     }
 
     // Update the block idx based on the current reader position if we're past the current block.
@@ -101,7 +102,7 @@ public class IndexState implements AutoCloseable
             return;
         }
 
-        while (currentIndexIdx + 1 < indexEntry.blockCount() && isPastCurrentBlock())
+        while (currentIndexIdx + 1 < indexEntry.columnsIndexCount() && isPastCurrentBlock())
         {
             reader.openMarker = currentIndex().endOpenMarker;
             ++currentIndexIdx;
@@ -116,9 +117,9 @@ public class IndexState implements AutoCloseable
             }
             else
             {
-                reader.file.seek(startOfBlock);
+                reader.seekToPosition(startOfBlock);
                 mark = reader.file.mark();
-                reader.file.seek(currentFilePointer);
+                reader.seekToPosition(currentFilePointer);
             }
         }
     }
@@ -142,15 +143,7 @@ public class IndexState implements AutoCloseable
 
     public IndexInfo index(int i) throws IOException
     {
-        // during an iteration we retrieve the same IndexInfo many times sequentially, for each row
-        // caching of the last retreived IndexInfo can save a lot of IO in case of ShallowIndexedEntry
-        if (i == cachedIndexIdx)
-        {
-            return cachedIndexInfo;
-        }
-        cachedIndexInfo = indexInfoRetriever.columnsIndex(i);
-        cachedIndexIdx = i;
-        return cachedIndexInfo;
+        return indexInfoRetriever.columnsIndex(i);
     }
 
     // Finds the index of the first block containing the provided bound, starting at the provided index.
@@ -182,7 +175,7 @@ public class IndexState implements AutoCloseable
         first slot where firstName > start ([20..25] here), so we subtract an extra one to get the slot just before.
         */
         int startIdx = 0;
-        int endIdx = indexEntry.blockCount() - 1;
+        int endIdx = indexEntry.columnsIndexCount() - 1;
 
         if (reversed)
         {
@@ -224,7 +217,7 @@ public class IndexState implements AutoCloseable
     @Override
     public String toString()
     {
-        return String.format("IndexState(indexSize=%d, currentBlock=%d, reversed=%b)", indexEntry.blockCount(), currentIndexIdx, reversed);
+        return String.format("IndexState(indexSize=%d, currentBlock=%d, reversed=%b)", indexEntry.columnsIndexCount(), currentIndexIdx, reversed);
     }
 
     @Override

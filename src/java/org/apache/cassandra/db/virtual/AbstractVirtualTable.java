@@ -38,8 +38,6 @@ import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.schema.TableMetadata;
 
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
-
 /**
  * An abstract virtual table implementation that builds the resultset on demand.
  */
@@ -50,7 +48,7 @@ public abstract class AbstractVirtualTable implements VirtualTable
     protected AbstractVirtualTable(TableMetadata metadata)
     {
         if (!metadata.isVirtual())
-            throw new IllegalArgumentException("Cannot instantiate a non-virtual table");
+            throw new IllegalArgumentException();
 
         this.metadata = metadata;
     }
@@ -75,6 +73,7 @@ public abstract class AbstractVirtualTable implements VirtualTable
     }
 
     @Override
+    @SuppressWarnings("resource")
     public final UnfilteredPartitionIterator select(DecoratedKey partitionKey, ClusteringIndexFilter clusteringIndexFilter, ColumnFilter columnFilter)
     {
         Partition partition = data(partitionKey).getPartition(partitionKey);
@@ -82,7 +81,7 @@ public abstract class AbstractVirtualTable implements VirtualTable
         if (null == partition)
             return EmptyIterators.unfilteredPartition(metadata);
 
-        long now = currentTimeMillis();
+        long now = System.currentTimeMillis();
         UnfilteredRowIterator rowIterator = partition.toRowIterator(metadata(), clusteringIndexFilter, columnFilter, now);
         return new SingletonUnfilteredPartitionIterator(rowIterator);
     }
@@ -97,7 +96,7 @@ public abstract class AbstractVirtualTable implements VirtualTable
 
         Iterator<Partition> iterator = data.getPartitions(dataRange);
 
-        long now = currentTimeMillis();
+        long now = System.currentTimeMillis();
 
         return new AbstractUnfilteredPartitionIterator()
         {
@@ -126,18 +125,6 @@ public abstract class AbstractVirtualTable implements VirtualTable
     public void apply(PartitionUpdate update)
     {
         throw new InvalidRequestException("Modification is not supported by table " + metadata);
-    }
-
-    @Override
-    public void truncate()
-    {
-        throw new InvalidRequestException("Truncation is not supported by table " + metadata);
-    }
-
-    @Override
-    public String toString()
-    {
-        return metadata().toString();
     }
 
     public interface DataSet

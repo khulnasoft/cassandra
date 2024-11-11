@@ -17,17 +17,10 @@
  */
 package org.apache.cassandra.db.commitlog;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 
-import net.openhft.chronicle.core.util.ThrowingFunction;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.compress.ICompressor;
-import org.apache.cassandra.io.util.SimpleCachedBufferPool;
 
 /**
  * Compressed commit log segment. Provides an in-memory buffer for the mutation threads. On sync compresses the written
@@ -48,10 +41,15 @@ public class CompressedSegment extends FileDirectSegment
     /**
      * Constructs a new segment file.
      */
-    CompressedSegment(AbstractCommitLogSegmentManager manager, ThrowingFunction<Path, FileChannel, IOException> channelFactory)
+    CompressedSegment(CommitLog commitLog, AbstractCommitLogSegmentManager manager)
     {
-        super(manager, channelFactory);
-        this.compressor = manager.getConfiguration().getCompressor();
+        super(commitLog, manager);
+        this.compressor = commitLog.configuration.getCompressor();
+    }
+
+    ByteBuffer createBuffer(CommitLog commitLog)
+    {
+        return manager.getBufferPool().createBuffer();
     }
 
     @Override
@@ -93,28 +91,5 @@ public class CompressedSegment extends FileDirectSegment
     public long onDiskSize()
     {
         return lastWrittenPos;
-    }
-
-    protected static class CompressedSegmentBuilder extends CommitLogSegment.Builder
-    {
-        public CompressedSegmentBuilder(AbstractCommitLogSegmentManager segmentManager)
-        {
-            super(segmentManager);
-        }
-
-        @Override
-        public CompressedSegment build()
-        {
-            return new CompressedSegment(segmentManager,
-                                         path -> FileChannel.open(path, StandardOpenOption.WRITE, StandardOpenOption.READ, StandardOpenOption.CREATE));
-        }
-
-        @Override
-        public SimpleCachedBufferPool createBufferPool()
-        {
-            return new SimpleCachedBufferPool(DatabaseDescriptor.getCommitLogMaxCompressionBuffersInPool(),
-                                              DatabaseDescriptor.getCommitLogSegmentSize(),
-                                              segmentManager.getConfiguration().getCompressor().preferredBufferType());
-        }
     }
 }

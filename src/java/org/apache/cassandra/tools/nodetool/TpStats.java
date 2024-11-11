@@ -22,6 +22,8 @@ import io.airlift.airline.Command;
 import io.airlift.airline.Option;
 import org.apache.cassandra.tools.NodeProbe;
 import org.apache.cassandra.tools.NodeTool.NodeToolCmd;
+import org.apache.cassandra.tools.nodetool.stats.TpStatsHolder;
+import org.apache.cassandra.tools.nodetool.stats.TpStatsPrinter;
 import org.apache.cassandra.tools.nodetool.stats.*;
 
 
@@ -33,11 +35,6 @@ public class TpStats extends NodeToolCmd
             description = "Output format (json, yaml)")
     private String outputFormat = "";
 
-    @Option(title = "verbose",
-            name = {"-v", "--verbose"},
-            description = "Display detailed metrics about thread pool's sizes")
-    private boolean verbose = false;
-
     @Override
     public void execute(NodeProbe probe)
     {
@@ -48,6 +45,6 @@ public class TpStats extends NodeToolCmd
 
         StatsHolder data = new TpStatsHolder(probe);
         StatsPrinter printer = TpStatsPrinter.from(outputFormat);
-        printer.print(data, probe.output().out, verbose);
+        printer.print(data, probe.output().out);
     }
 }

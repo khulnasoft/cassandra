@@ -24,12 +24,10 @@ import com.google.common.annotations.VisibleForTesting;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.RangesAtEndpoint;
 import org.apache.cassandra.locator.Replica;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.UUIDGen;
 
 import static com.google.common.collect.Iterables.all;
 import static org.apache.cassandra.service.ActiveRepairService.NO_PENDING_REPAIR;
-import static org.apache.cassandra.streaming.StreamingChannel.Factory.Global.streamingFactory;
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 
 /**
  * {@link StreamPlan} is a helper class that builds StreamOperation of given configuration.
@@ -39,7 +37,7 @@ import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 public class StreamPlan
 {
     private static final String[] EMPTY_COLUMN_FAMILIES = new String[0];
-    private final TimeUUID planId = nextTimeUUID();
+    private final UUID planId = UUIDGen.getTimeUUID();
     private final StreamOperation streamOperation;
     private final List<StreamEventHandler> handlers = new ArrayList<>();
     private final StreamCoordinator coordinator;
@@ -62,10 +60,10 @@ public class StreamPlan
     }
 
     public StreamPlan(StreamOperation streamOperation, int connectionsPerHost,
-                      boolean connectSequentially, TimeUUID pendingRepair, PreviewKind previewKind)
+                      boolean connectSequentially, UUID pendingRepair, PreviewKind previewKind)
     {
         this.streamOperation = streamOperation;
-        this.coordinator = new StreamCoordinator(streamOperation, connectionsPerHost, streamingFactory(),
+        this.coordinator = new StreamCoordinator(streamOperation, connectionsPerHost, new DefaultConnectionFactory(),
                                                  false, connectSequentially, pendingRepair, previewKind);
     }
 
@@ -109,7 +107,7 @@ public class StreamPlan
         assert all(fullRanges, Replica::isSelf) || RangesAtEndpoint.isDummyList(fullRanges) : fullRanges.toString();
         assert all(transientRanges, Replica::isSelf) || RangesAtEndpoint.isDummyList(transientRanges) : transientRanges.toString();
 
-        StreamSession session = coordinator.getOrCreateOutboundSession(from);
+        StreamSession session = coordinator.getOrCreateNextSession(from);
         session.addStreamRequest(keyspace, fullRanges, transientRanges, Arrays.asList(columnFamilies));
         return this;
     }
@@ -125,7 +123,7 @@ public class StreamPlan
      */
     public StreamPlan transferRanges(InetAddressAndPort to, String keyspace, RangesAtEndpoint replicas, String... columnFamilies)
     {
-        StreamSession session = coordinator.getOrCreateOutboundSession(to);
+        StreamSession session = coordinator.getOrCreateNextSession(to);
         session.addTransferRanges(keyspace, replicas, Arrays.asList(columnFamilies), flushBeforeTransfer);
         return this;
     }
@@ -151,29 +149,13 @@ public class StreamPlan
         return this;
     }
 
-    public TimeUUID planId()
-    {
-        return planId;
-    }
-
-    public StreamOperation streamOperation()
-    {
-        return streamOperation;
-    }
-
-    @VisibleForTesting
-    public List<StreamEventHandler> handlers()
-    {
-        return handlers;
-    }
-
     /**
      * Set custom StreamConnectionFactory to be used for establishing connection
      *
      * @param factory StreamConnectionFactory to use
      * @return self
      */
-    public StreamPlan connectionFactory(StreamingChannel.Factory factory)
+    public StreamPlan connectionFactory(StreamConnectionFactory factory)
     {
         this.coordinator.setConnectionFactory(factory);
         return this;
@@ -210,9 +192,14 @@ public class StreamPlan
         return this;
     }
 
-    public TimeUUID getPendingRepair()
+    public UUID getPendingRepair()
     {
         return coordinator.getPendingRepair();
+    }
+
+    public UUID getPlanId()
+    {
+        return planId;
     }
 
     public boolean getFlushBeforeTransfer()

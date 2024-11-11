@@ -1,13 +1,11 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Copyright KhulnaSoft, Ltd.
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,15 +19,16 @@ package org.apache.cassandra.db.compaction.unified;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.UUID;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.commitlog.CommitLogPosition;
 import org.apache.cassandra.db.commitlog.IntervalSet;
+import org.apache.cassandra.db.compaction.CompactionRealm;
 import org.apache.cassandra.db.compaction.ShardTracker;
 import org.apache.cassandra.db.lifecycle.LifecycleNewTracker;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
@@ -41,25 +40,26 @@ import org.apache.cassandra.io.sstable.format.SSTableWriter;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.TimeUUID;
 
 /**
  * A {@link SSTableMultiWriter} that splits the output sstable at the partition boundaries of the compaction
- * shards used by {@link org.apache.cassandra.db.compaction.UnifiedCompactionStrategy}.
+ * shards used by {@link org.apache.cassandra.db.compaction.UnifiedCompactionStrategy} as long as the size of
+ * the sstable so far is sufficiently large.
  * <p/>
- * This is class is similar to {@link ShardedCompactionWriter} but for flushing. Unfortunately
+ * This is class is similar to {@link ShardedMultiWriter} but for flushing. Unfortunately
  * we currently have 2 separate writers hierarchy that are not compatible and so we must
- * duplicate the functionality.
+ * duplicate the functionality of splitting sstables over compaction shards if they have
+ * reached a minimum size.
  */
 public class ShardedMultiWriter implements SSTableMultiWriter
 {
     protected final static Logger logger = LoggerFactory.getLogger(ShardedMultiWriter.class);
 
-    private final ColumnFamilyStore cfs;
+    private final CompactionRealm realm;
     private final Descriptor descriptor;
     private final long keyCount;
     private final long repairedAt;
-    private final TimeUUID pendingRepair;
+    private final UUID pendingRepair;
     private final boolean isTransient;
     private final IntervalSet<CommitLogPosition> commitLogPositions;
     private final SerializationHeader header;
@@ -69,19 +69,19 @@ public class ShardedMultiWriter implements SSTableMultiWriter
     private final SSTableWriter[] writers;
     private int currentWriter;
 
-    public ShardedMultiWriter(ColumnFamilyStore cfs,
-                              Descriptor descriptor,
-                              long keyCount,
-                              long repairedAt,
-                              TimeUUID pendingRepair,
-                              boolean isTransient,
-                              IntervalSet<CommitLogPosition> commitLogPositions,
-                              SerializationHeader header,
-                              Collection<Index.Group> indexGroups,
-                              LifecycleNewTracker lifecycleNewTracker,
-                              ShardTracker boundaries)
+    public ShardedMultiWriter(CompactionRealm realm,
+                                Descriptor descriptor,
+                                long keyCount,
+                                long repairedAt,
+                                UUID pendingRepair,
+                                boolean isTransient,
+                                IntervalSet<CommitLogPosition> commitLogPositions,
+                                SerializationHeader header,
+                                Collection<Index.Group> indexGroups,
+                                LifecycleNewTracker lifecycleNewTracker,
+                                ShardTracker boundaries)
     {
-        this.cfs = cfs;
+        this.realm = realm;
         this.descriptor = descriptor;
         this.keyCount = keyCount;
         this.repairedAt = repairedAt;
@@ -100,25 +100,22 @@ public class ShardedMultiWriter implements SSTableMultiWriter
 
     private SSTableWriter createWriter()
     {
-        Descriptor newDesc = cfs.newSSTableDescriptor(descriptor.directory);
+        Descriptor newDesc = realm.newSSTableDescriptor(descriptor.directory);
         return createWriter(newDesc);
     }
 
-    private SSTableWriter createWriter(Descriptor descriptor)
+    private SSTableWriter createWriter(Descriptor desc)
     {
-        MetadataCollector metadataCollector = new MetadataCollector(cfs.metadata().comparator)
-                                              .commitLogIntervals(commitLogPositions != null ? commitLogPositions : IntervalSet.empty());
-        return descriptor.getFormat().getWriterFactory().builder(descriptor)
-                         .setKeyCount(forSplittingKeysBy(boundaries.count()))
-                         .setRepairedAt(repairedAt)
-                         .setPendingRepair(pendingRepair)
-                         .setTransientSSTable(isTransient)
-                         .setTableMetadataRef(cfs.metadata)
-                         .setMetadataCollector(metadataCollector)
-                         .setSerializationHeader(header)
-                         .addDefaultComponents(indexGroups)
-                         .setSecondaryIndexGroups(indexGroups)
-                         .build(lifecycleNewTracker, cfs);
+        return SSTableWriter.create(desc,
+                                    forSplittingKeysBy(boundaries.count()),
+                                    repairedAt,
+                                    pendingRepair,
+                                    isTransient,
+                                    realm.metadataRef(),
+                                    new MetadataCollector(realm.metadata().comparator).commitLogIntervals(commitLogPositions),
+                                    header,
+                                    indexGroups,
+                                    lifecycleNewTracker);
     }
 
     private long forSplittingKeysBy(long splits) {
@@ -137,12 +134,25 @@ public class ShardedMultiWriter implements SSTableMultiWriter
             logger.debug("Switching writer at boundary {}/{} index {}, with uncompressed size {} for {}.{}",
                          key.getToken(), boundaries.shardStart(), currentWriter,
                          FBUtilities.prettyPrintMemory(currentUncompressedSize),
-                         cfs.getKeyspaceName(), cfs.getTableName());
+                         realm.getKeyspaceName(), realm.getTableName());
 
             writers[++currentWriter] = createWriter();
         }
 
         writers[currentWriter].append(partition);
+    }
+
+    @Override
+    public Collection<SSTableReader> finish(long repairedAt, long maxDataAge, boolean openResult)
+    {
+        List<SSTableReader> sstables = new ArrayList<>(writers.length);
+        for (SSTableWriter writer : writers)
+            if (writer != null)
+            {
+                boundaries.applyTokenSpaceCoverage(writer);
+                sstables.add(writer.finish(repairedAt, maxDataAge, openResult));
+            }
+        return sstables;
     }
 
     @Override
@@ -169,12 +179,11 @@ public class ShardedMultiWriter implements SSTableMultiWriter
     }
 
     @Override
-    public SSTableMultiWriter setOpenResult(boolean openResult)
+    public void openResult()
     {
         for (SSTableWriter writer : writers)
             if (writer != null)
-                writer.setOpenResult(openResult);
-        return this;
+                writer.openResult();
     }
 
     @Override
@@ -204,10 +213,15 @@ public class ShardedMultiWriter implements SSTableMultiWriter
         return bytesWritten;
     }
 
+    public int getSegmentCount()
+    {
+        return currentWriter + 1;
+    }
+
     @Override
     public TableId getTableId()
     {
-        return cfs.metadata().id;
+        return realm.metadata().id;
     }
 
     @Override
@@ -241,7 +255,7 @@ public class ShardedMultiWriter implements SSTableMultiWriter
             {
                 boundaries.applyTokenSpaceCoverage(writer);
                 writer.prepareToCommit();
-    }
+            }
     }
 
     @Override

@@ -17,9 +17,7 @@
  */
 package org.apache.cassandra.fql;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -28,10 +26,8 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
-
 import javax.annotation.Nullable;
 
-import org.apache.cassandra.io.util.File;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.After;
 import org.junit.BeforeClass;
@@ -39,9 +35,9 @@ import org.junit.Test;
 
 import io.netty.buffer.Unpooled;
 import net.openhft.chronicle.queue.ChronicleQueue;
-import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
 import net.openhft.chronicle.queue.ExcerptTailer;
 import net.openhft.chronicle.queue.RollCycles;
+import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
 import net.openhft.chronicle.wire.ValueIn;
 import net.openhft.chronicle.wire.WireOut;
 import org.apache.cassandra.Util;
@@ -53,6 +49,7 @@ import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.fql.FullQueryLogger.Query;
 import org.apache.cassandra.fql.FullQueryLogger.Batch;
 import org.apache.cassandra.cql3.statements.BatchStatement.Type;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
@@ -60,10 +57,6 @@ import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ObjectSizes;
 import org.apache.cassandra.utils.binlog.BinLogTest;
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
 
 import static org.apache.cassandra.fql.FullQueryLogger.BATCH;
 import static org.apache.cassandra.fql.FullQueryLogger.BATCH_TYPE;
@@ -79,6 +72,9 @@ import static org.apache.cassandra.fql.FullQueryLogger.TYPE;
 import static org.apache.cassandra.fql.FullQueryLogger.VALUES;
 import static org.apache.cassandra.fql.FullQueryLogger.VERSION;
 import static org.junit.Assert.fail;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 public class FullQueryLoggerTest extends CQLTester
 {
@@ -523,7 +519,7 @@ public class FullQueryLoggerTest extends CQLTester
                 compareQueryOptions(QueryOptions.DEFAULT, queryOptions);
 
                 assertEquals(Long.MIN_VALUE, wire.read(GENERATED_TIMESTAMP).int64());
-                assertEquals(Integer.MIN_VALUE, wire.read(GENERATED_NOW_IN_SECONDS).int64());
+                assertEquals(Integer.MIN_VALUE, wire.read(GENERATED_NOW_IN_SECONDS).int32());
                 assertEquals(keyspace, wire.read(FullQueryLogger.KEYSPACE).text());
                 assertEquals("UNLOGGED", wire.read(BATCH_TYPE).text());
                 ValueIn in = wire.read(QUERIES);
@@ -676,7 +672,7 @@ public class FullQueryLoggerTest extends CQLTester
     }
 
     @Test
-    public void testJMXArchiveCommand() throws IOException
+    public void testJMXArchiveCommand()
     {
         FullQueryLoggerOptions options = new FullQueryLoggerOptions();
 
@@ -693,8 +689,7 @@ public class FullQueryLoggerTest extends CQLTester
 
         options.allow_nodetool_archive_command = true;
         options.archive_command = "/xyz/not/null";
-        Path tmpDir = Files.createTempDirectory("FullQueryLoggerTest");
-        options.log_dir = tmpDir.resolve("abc").toString();
+        options.log_dir = "/tmp/abc";
         DatabaseDescriptor.setFullQueryLogOptions(options);
         StorageService.instance.enableFullQueryLogger(options.log_dir, options.roll_cycle, false, 1000, 1000, null, 0);
         assertTrue(FullQueryLogger.instance.isEnabled());
@@ -709,7 +704,7 @@ public class FullQueryLoggerTest extends CQLTester
         assertEquals(a.getConsistency(), b.getConsistency());
         assertEquals(a.getPagingState(), b.getPagingState());
         assertEquals(a.getValues(), b.getValues());
-        assertEquals(a.getSerialConsistency(), b.getSerialConsistency());
+        assertEquals(a.getSerialConsistency(null), b.getSerialConsistency(null));
     }
 
     private void configureFQL() throws Exception

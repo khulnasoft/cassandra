@@ -22,20 +22,20 @@ import java.util.concurrent.TimeUnit;
 
 import org.junit.Test;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
+import static junit.framework.Assert.assertEquals;
+import static junit.framework.Assert.assertFalse;
 
 public class LatencyMetricsTest
 {
     private final MetricNameFactory factory = new TestMetricsNameFactory();
 
-    private static class TestMetricsNameFactory implements MetricNameFactory
+    private class TestMetricsNameFactory implements MetricNameFactory
     {
 
         @Override
         public CassandraMetricsRegistry.MetricName createMetricName(String metricName)
         {
-            return new CassandraMetricsRegistry.MetricName(DefaultNameFactory.GROUP_NAME, ClientRequestMetrics.TYPE_NAME, metricName);
+            return new CassandraMetricsRegistry.MetricName(TestMetricsNameFactory.class, metricName);
         }
     }
 
@@ -45,7 +45,7 @@ public class LatencyMetricsTest
     @Test
     public void testGetRecentLatency()
     {
-        final LatencyMetrics l = new LatencyMetrics(ClientRequestMetrics.TYPE_NAME, "test");
+        final LatencyMetrics l = new LatencyMetrics("test", "test");
         Runnable r = () -> {
             for (int i = 0; i < 10000; i++)
             {
@@ -67,7 +67,7 @@ public class LatencyMetricsTest
     @Test
     public void testReadMerging()
     {
-        final LatencyMetrics parent = new LatencyMetrics(ClientRequestMetrics.TYPE_NAME, "testMerge");
+        final LatencyMetrics parent = new LatencyMetrics("testMerge", "testMerge");
         final LatencyMetrics child = new LatencyMetrics(factory, "testChild", parent);
 
         for (int i = 0; i < 100; i++)
@@ -86,7 +86,7 @@ public class LatencyMetricsTest
     @Test
     public void testRelease()
     {
-        final LatencyMetrics parent = new LatencyMetrics(ClientRequestMetrics.TYPE_NAME, "testRelease");
+        final LatencyMetrics parent = new LatencyMetrics("testRelease", "testRelease");
         final LatencyMetrics child = new LatencyMetrics(factory, "testChildRelease", parent);
 
         for (int i = 0; i < 100; i++)

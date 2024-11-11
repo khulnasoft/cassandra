@@ -17,23 +17,32 @@
  */
 package org.apache.cassandra.cql3;
 
-import com.datastax.driver.core.BatchStatement;
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.exceptions.InvalidQueryException;
+import com.khulnasoft.driver.core.BatchStatement;
+import com.khulnasoft.driver.core.Cluster;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.Session;
+import com.khulnasoft.driver.core.exceptions.InvalidQueryException;
 import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.service.EmbeddedCassandraService;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import java.nio.ByteBuffer;
+import java.util.Collections;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.Assert.assertSame;
+
 import java.io.IOException;
 
-public class BatchTest
+public class BatchTest extends CQLTester
 {
     private static EmbeddedCassandraService cassandra;
 
@@ -47,6 +56,12 @@ public class BatchTest
     @BeforeClass()
     public static void setup() throws ConfigurationException, IOException
     {
+        // Set batch sizes for guardrails to the same values as in Apache
+        // Needed for testOversizedBatch()
+        DatabaseDescriptor.daemonInitialization();
+
+        DatabaseDescriptor.getGuardrailsConfig().setBatchSizeWarnThresholdInKB(5);
+        DatabaseDescriptor.getGuardrailsConfig().setBatchSizeFailThresholdInKB(50);
         cassandra = ServerTestUtils.startEmbeddedCassandraService();
 
         cluster = Cluster.builder().addContactPoint("127.0.0.1").withPort(DatabaseDescriptor.getNativeTransportPort()).build();
@@ -169,6 +184,28 @@ public class BatchTest
             b.add(noncounter.bind(i, "foobar"));
         }
         session.execute(b);
+    }
+
+    @Test
+    public void testQueryOptionConsistency()
+    {
+        BatchQueryOptions queryOptions = BatchQueryOptions.withoutPerStatementVariables(QueryOptions.DEFAULT);
+        assertSame(ConsistencyLevel.ONE, queryOptions.getConsistency());
+        queryOptions.updateConsistency(ConsistencyLevel.ALL);
+        assertSame(ConsistencyLevel.ALL, queryOptions.getConsistency());
+    }
+
+    @Test
+    public void testGetVariables()
+    {
+        BatchQueryOptions queryOptions = BatchQueryOptions.withoutPerStatementVariables(QueryOptions.DEFAULT);
+        assertThat(queryOptions.getVariables()).isEmpty();
+
+        List<List<ByteBuffer>> variables = Collections.singletonList(Collections.singletonList(ByteBufferUtil.bytes(1)));
+        List<Object> queryOrIdList = Collections.singletonList(1);
+        queryOptions = BatchQueryOptions.withPerStatementVariables(QueryOptions.DEFAULT, variables, queryOrIdList);
+        assertThat(queryOptions.getVariables()).isEqualTo(variables);
+        assertThat(queryOptions.getQueryOrIdList()).isEqualTo(queryOrIdList);
     }
 
     public void sendBatch(BatchStatement.Type type, boolean addCounter, boolean addNonCounter, boolean addClustering)

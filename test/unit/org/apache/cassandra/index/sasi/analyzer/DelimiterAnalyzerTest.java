@@ -34,7 +34,6 @@ import org.apache.commons.io.IOUtils;
 import org.junit.Assert;
 import org.junit.Test;
 
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 import static org.junit.Assert.assertEquals;
 
 public class DelimiterAnalyzerTest
@@ -60,7 +59,7 @@ public class DelimiterAnalyzerTest
             output.append(ByteBufferUtil.string(analyzer.next()) + (analyzer.hasNext() ? ' ' : ""));
 
         Assert.assertEquals(testString, output.toString());
-        Assert.assertFalse(toLowerCaseLocalized(testString).equals(output.toString()));
+        Assert.assertFalse(testString.toLowerCase().equals(output.toString()));
     }
 
     @Test
@@ -83,7 +82,7 @@ public class DelimiterAnalyzerTest
             output.append(ByteBufferUtil.string(analyzer.next()) + (analyzer.hasNext() ? ',' : ""));
 
         Assert.assertEquals("Nip,it,in,the,bud", output.toString());
-        Assert.assertFalse(toLowerCaseLocalized(testString).equals(output.toString()));
+        Assert.assertFalse(testString.toLowerCase().equals(output.toString()));
     }
 
     @Test(expected = ConfigurationException.class)

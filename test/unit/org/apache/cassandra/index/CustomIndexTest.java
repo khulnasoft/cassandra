@@ -32,49 +32,49 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import org.junit.Assume;
 import org.junit.Test;
 
-import com.datastax.driver.core.exceptions.QueryValidationException;
+import com.khulnasoft.driver.core.exceptions.QueryValidationException;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.PageSize;
+import org.apache.cassandra.db.filter.RowFilter;
+import org.apache.cassandra.db.lifecycle.LifecycleNewTracker;
+import org.apache.cassandra.db.memtable.Memtable;
+import org.apache.cassandra.db.rows.Unfiltered;
+import org.apache.cassandra.io.sstable.Component;
+import org.apache.cassandra.io.sstable.Descriptor;
+import org.apache.cassandra.io.sstable.SSTable;
+import org.apache.cassandra.io.sstable.format.SSTableFlushObserver;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.ColumnIdentifier;
-import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.cql3.restrictions.IndexRestrictions;
-import org.apache.cassandra.cql3.restrictions.StatementRestrictions;
 import org.apache.cassandra.cql3.statements.schema.IndexTarget;
 import org.apache.cassandra.cql3.statements.ModificationStatement;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.ColumnFamilyStore.FlushReason;
-import org.apache.cassandra.db.filter.RowFilter;
-import org.apache.cassandra.db.lifecycle.LifecycleNewTracker;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.UTF8Type;
-import org.apache.cassandra.db.memtable.Memtable;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.rows.Row;
-import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.apache.cassandra.index.internal.CassandraIndex;
 import org.apache.cassandra.index.transactions.IndexTransaction;
-import org.apache.cassandra.io.sstable.Component;
-import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.SSTableFlushObserver;
-import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.Indexes;
-import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 
 import static org.apache.cassandra.cql3.statements.schema.IndexTarget.CUSTOM_INDEX_OPTION_NAME;
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -121,11 +121,11 @@ public class CustomIndexTest extends CQLTester
         flush();
 
         SecondaryIndexManager indexManager = getCurrentColumnFamilyStore().indexManager;
-        IndexIncludedInBuild included = (IndexIncludedInBuild)indexManager.getIndexByName(toInclude);
+        IndexIncludedInBuild included = (IndexIncludedInBuild) indexManager.getIndexByName(toInclude);
         included.reset();
         assertTrue(included.rowsInserted.isEmpty());
 
-        IndexExcludedFromBuild excluded = (IndexExcludedFromBuild)indexManager.getIndexByName(toExclude);
+        IndexExcludedFromBuild excluded = (IndexExcludedFromBuild) indexManager.getIndexByName(toExclude);
         excluded.reset();
         assertTrue(excluded.rowsInserted.isEmpty());
 
@@ -149,7 +149,7 @@ public class CustomIndexTest extends CQLTester
         execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 1, 3, 3);
 
         SecondaryIndexManager indexManager = getCurrentColumnFamilyStore().indexManager;
-        StubIndex index = (StubIndex)indexManager.getIndexByName(indexName);
+        StubIndex index = (StubIndex) indexManager.getIndexByName(indexName);
         assertEquals(4, index.rowsInserted.size());
         assertTrue(index.partitionDeletions.isEmpty());
         assertTrue(index.rangeTombstones.isEmpty());
@@ -162,16 +162,15 @@ public class CustomIndexTest extends CQLTester
         assertEquals(1, index.partitionDeletions.size());
         assertEquals(1, index.rangeTombstones.size());
     }
+
     @Test
     public void nonCustomIndexesRequireExactlyOneTargetColumn() throws Throwable
     {
-        Util.assumeLegacySecondaryIndex();
-
         createTable("CREATE TABLE %s(k int, c int, v1 int, v2 int, PRIMARY KEY (k,c))");
 
         assertInvalidMessage("Only CUSTOM indexes support multiple columns", "CREATE INDEX multi_idx on %s(v1,v2)");
         assertInvalidMessage("Only CUSTOM indexes can be created without specifying a target column",
-                           "CREATE INDEX no_targets on %s()");
+                             "CREATE INDEX no_targets on %s()");
 
         createIndex(String.format("CREATE CUSTOM INDEX multi_idx ON %%s(v1, v2) USING '%s'", StubIndex.class.getName()));
         assertIndexCreated("multi_idx", "v1", "v2");
@@ -205,39 +204,39 @@ public class CustomIndexTest extends CQLTester
                     " PRIMARY KEY(k,c))");
 
         assertInvalidMessage("Cannot create keys() index on frozen column fmap. " +
-                             "Frozen collections are immutable and must be fully indexed",
+                             "Frozen collections are immutable and must be fully indexed by using the 'full(fmap)' modifier",
                              String.format("CREATE CUSTOM INDEX ON %%s(c, keys(fmap)) USING'%s'",
                                            StubIndex.class.getName()));
         assertInvalidMessage("Cannot create entries() index on frozen column fmap. " +
-                             "Frozen collections are immutable and must be fully indexed",
+                             "Frozen collections are immutable and must be fully indexed by using the 'full(fmap)' modifier",
                              String.format("CREATE CUSTOM INDEX ON %%s(c, entries(fmap)) USING'%s'",
                                            StubIndex.class.getName()));
         assertInvalidMessage("Cannot create values() index on frozen column fmap. " +
-                             "Frozen collections are immutable and must be fully indexed",
+                             "Frozen collections are immutable and must be fully indexed by using the 'full(fmap)' modifier",
                              String.format("CREATE CUSTOM INDEX ON %%s(c, fmap) USING'%s'", StubIndex.class.getName()));
 
         assertInvalidMessage("Cannot create keys() index on frozen column flist. " +
-                             "Frozen collections are immutable and must be fully indexed",
+                             "Frozen collections are immutable and must be fully indexed by using the 'full(flist)' modifier",
                              String.format("CREATE CUSTOM INDEX ON %%s(c, keys(flist)) USING'%s'",
                                            StubIndex.class.getName()));
         assertInvalidMessage("Cannot create entries() index on frozen column flist. " +
-                             "Frozen collections are immutable and must be fully indexed",
+                             "Frozen collections are immutable and must be fully indexed by using the 'full(flist)' modifier",
                              String.format("CREATE CUSTOM INDEX ON %%s(c, entries(flist)) USING'%s'",
                                            StubIndex.class.getName()));
         assertInvalidMessage("Cannot create values() index on frozen column flist. " +
-                             "Frozen collections are immutable and must be fully indexed",
+                             "Frozen collections are immutable and must be fully indexed by using the 'full(flist)' modifier",
                              String.format("CREATE CUSTOM INDEX ON %%s(c, flist) USING'%s'", StubIndex.class.getName()));
 
         assertInvalidMessage("Cannot create keys() index on frozen column fset. " +
-                             "Frozen collections are immutable and must be fully indexed",
+                             "Frozen collections are immutable and must be fully indexed by using the 'full(fset)' modifier",
                              String.format("CREATE CUSTOM INDEX ON %%s(c, keys(fset)) USING'%s'",
                                            StubIndex.class.getName()));
         assertInvalidMessage("Cannot create entries() index on frozen column fset. " +
-                             "Frozen collections are immutable and must be fully indexed",
+                             "Frozen collections are immutable and must be fully indexed by using the 'full(fset)' modifier",
                              String.format("CREATE CUSTOM INDEX ON %%s(c, entries(fset)) USING'%s'",
                                            StubIndex.class.getName()));
         assertInvalidMessage("Cannot create values() index on frozen column fset. " +
-                             "Frozen collections are immutable and must be fully indexed",
+                             "Frozen collections are immutable and must be fully indexed by using the 'full(fset)' modifier",
                              String.format("CREATE CUSTOM INDEX ON %%s(c, fset) USING'%s'", StubIndex.class.getName()));
 
         createIndex(String.format("CREATE CUSTOM INDEX ON %%s(c, full(fmap)) USING'%s'", StubIndex.class.getName()));
@@ -246,7 +245,7 @@ public class CustomIndexTest extends CQLTester
     }
 
     @Test
-    public void defaultIndexNameContainsTargetColumns()
+    public void defaultIndexNameContainsTargetColumns() throws Throwable
     {
         createTable("CREATE TABLE %s(k int, c int, v1 int, v2 int, PRIMARY KEY(k,c))");
 
@@ -272,7 +271,7 @@ public class CustomIndexTest extends CQLTester
     }
 
     @Test
-    public void createMultiColumnIndexes()
+    public void createMultiColumnIndexes() throws Throwable
     {
         // smoke test for various permutations of multicolumn indexes
         createTable("CREATE TABLE %s (" +
@@ -345,7 +344,7 @@ public class CustomIndexTest extends CQLTester
     }
 
     @Test
-    public void createMultiColumnIndexIncludingUserTypeColumn()
+    public void createMultiColumnIndexIncludingUserTypeColumn() throws Throwable
     {
         String myType = KEYSPACE + '.' + createType("CREATE TYPE %s (a int, b int)");
         createTable("CREATE TABLE %s (k int PRIMARY KEY, v1 int, v2 frozen<" + myType + ">)");
@@ -355,8 +354,6 @@ public class CustomIndexTest extends CQLTester
     @Test
     public void createIndexWithoutTargets() throws Throwable
     {
-        Assume.assumeTrue("Test does not work with different default secondary index",
-                          DatabaseDescriptor.getDefaultSecondaryIndex().equals(CassandraIndex.NAME));
         createTable("CREATE TABLE %s(k int, c int, v1 int, v2 int, PRIMARY KEY(k,c))");
         // only allowed for CUSTOM indexes
         assertInvalidMessage("Only CUSTOM indexes can be created without specifying a target column",
@@ -380,7 +377,7 @@ public class CustomIndexTest extends CQLTester
         assertInvalidMessage(String.format(IndexRestrictions.INDEX_NOT_FOUND, indexName, currentTableMetadata().toString()),
                              String.format("SELECT * FROM %%s WHERE expr(%s, 'foo bar baz')", indexName));
 
-        createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(c) USING '%s'", indexName, ColumnTargetedIndex.class.getName()));
+        createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(c) USING '%s'", indexName, StubIndex.class.getName()));
 
         assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
                                   String.format(IndexRestrictions.INDEX_NOT_FOUND, "no_such_index", currentTableMetadata().toString()),
@@ -400,38 +397,14 @@ public class CustomIndexTest extends CQLTester
                                                 indexName));
 
         // multiple expressions on different indexes
-        createIndex(String.format("CREATE CUSTOM INDEX other_custom_index ON %%s(d) USING '%s'", ColumnTargetedIndex.class.getName()));
+        createIndex(String.format("CREATE CUSTOM INDEX other_custom_index ON %%s(d) USING '%s'", StubIndex.class.getName()));
         assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
                                   IndexRestrictions.MULTIPLE_EXPRESSIONS,
                                   QueryValidationException.class,
                                   String.format("SELECT * FROM %%s WHERE expr(%s, 'foo') AND expr(other_custom_index, 'bar')",
                                                 indexName));
 
-        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
-                                  StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE,
-                                  QueryValidationException.class,
-                                  String.format("SELECT * FROM %%s WHERE expr(%s, 'foo') AND d=0", indexName));
-        assertRows(execute(String.format("SELECT * FROM %%s WHERE expr(%s, 'foo') AND d=0 ALLOW FILTERING", indexName)), row);
-    }
-
-    /**
-     * A {@link StubIndex} that only supports expressions on its target column.
-     */
-    public static final class ColumnTargetedIndex extends StubIndex
-    {
-        private final ColumnMetadata indexedColumn;
-
-        public ColumnTargetedIndex(ColumnFamilyStore baseCfs, IndexMetadata metadata)
-        {
-            super(baseCfs, metadata);
-            indexedColumn = TargetParser.parse(baseCfs.metadata(), metadata).left;
-        }
-
-        @Override
-        public boolean supportsExpression(ColumnMetadata column, Operator operator)
-        {
-            return column.equals(indexedColumn) && super.supportsExpression(column, operator);
-        }
+        assertRows(execute(String.format("SELECT * FROM %%s WHERE expr(%s, 'foo') AND d=0", indexName)), row);
     }
 
     @Test
@@ -443,7 +416,7 @@ public class CustomIndexTest extends CQLTester
                                   indexName,
                                   NoCustomExpressionsIndex.class.getName()));
         assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
-                                  String.format( IndexRestrictions.CUSTOM_EXPRESSION_NOT_SUPPORTED, indexName),
+                                  String.format(IndexRestrictions.CUSTOM_EXPRESSION_NOT_SUPPORTED, indexName),
                                   QueryValidationException.class,
                                   String.format("SELECT * FROM %%s WHERE expr(%s, 'foo bar baz')", indexName));
     }
@@ -465,8 +438,6 @@ public class CustomIndexTest extends CQLTester
     @Test
     public void customExpressionsMustTargetCustomIndex() throws Throwable
     {
-        Assume.assumeTrue("Test does not work with different default secondary index",
-                          DatabaseDescriptor.getDefaultSecondaryIndex().equals(CassandraIndex.NAME));
         createTable("CREATE TABLE %s (a int, b int, c int, d int, PRIMARY KEY (a, b))");
         createIndex("CREATE INDEX non_custom_index ON %s(c)");
         assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
@@ -504,9 +475,9 @@ public class CustomIndexTest extends CQLTester
                                   currentTable(),
                                   SettableSelectivityIndex.class.getName()));
         SettableSelectivityIndex moreSelective =
-            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_more_selective");
+        (SettableSelectivityIndex) getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_more_selective");
         SettableSelectivityIndex lessSelective =
-            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_less_selective");
+        (SettableSelectivityIndex) getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_less_selective");
         assertEquals(0, moreSelective.searchersProvided);
         assertEquals(0, lessSelective.searchersProvided);
 
@@ -535,9 +506,9 @@ public class CustomIndexTest extends CQLTester
                                   currentTable(),
                                   SettableSelectivityIndex.class.getName()));
         SettableSelectivityIndex moreSelective =
-            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_more_selective");
+        (SettableSelectivityIndex) getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_more_selective");
         SettableSelectivityIndex lessSelective =
-            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_less_selective");
+        (SettableSelectivityIndex) getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_less_selective");
         assertEquals(0, moreSelective.searchersProvided);
         assertEquals(0, lessSelective.searchersProvided);
 
@@ -578,7 +549,7 @@ public class CustomIndexTest extends CQLTester
     }
 
     @Test
-    public void reloadIndexMetadataOnBaseCfsReload()
+    public void reloadIndexMetadataOnBaseCfsReload() throws Throwable
     {
         // verify that whenever the base table TableMetadata is reloaded, a reload of the index
         // metadata is performed
@@ -586,7 +557,7 @@ public class CustomIndexTest extends CQLTester
         createIndex(String.format("CREATE CUSTOM INDEX reload_counter ON %%s() USING '%s'",
                                   CountMetadataReloadsIndex.class.getName()));
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
-        CountMetadataReloadsIndex index = (CountMetadataReloadsIndex)cfs.indexManager.getIndexByName("reload_counter");
+        CountMetadataReloadsIndex index = (CountMetadataReloadsIndex) cfs.indexManager.getIndexByName("reload_counter");
         assertEquals(0, index.reloads.get());
 
         // reloading the CFS, even without any metadata changes invokes the index's metadata reload task
@@ -600,7 +571,7 @@ public class CustomIndexTest extends CQLTester
         createTable("CREATE TABLE %s (k int, c int, v int, PRIMARY KEY (k,c))");
         createIndex(String.format("CREATE CUSTOM INDEX cleanup_index ON %%s() USING '%s'", StubIndex.class.getName()));
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
-        StubIndex index  = (StubIndex)cfs.indexManager.getIndexByName("cleanup_index");
+        StubIndex index = (StubIndex) cfs.indexManager.getIndexByName("cleanup_index");
 
         execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 0, 0, 0);
         execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 0, 1, 1);
@@ -629,7 +600,7 @@ public class CustomIndexTest extends CQLTester
         createTable("CREATE TABLE %s (k int, c int, PRIMARY KEY (k,c))");
         createIndex(String.format("CREATE CUSTOM INDEX row_ttl_test_index ON %%s() USING '%s'", StubIndex.class.getName()));
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
-        StubIndex index  = (StubIndex)cfs.indexManager.getIndexByName("row_ttl_test_index");
+        StubIndex index = (StubIndex) cfs.indexManager.getIndexByName("row_ttl_test_index");
 
         execute("INSERT INTO %s (k, c) VALUES (?, ?) USING TTL 1", 0, 0);
         execute("INSERT INTO %s (k, c) VALUES (?, ?)", 0, 1);
@@ -650,7 +621,7 @@ public class CustomIndexTest extends CQLTester
     }
 
     @Test
-    public void validateOptions()
+    public void validateOptions() throws Throwable
     {
         createTable("CREATE TABLE %s(k int, c int, v1 int, v2 int, PRIMARY KEY(k,c))");
         createIndex(String.format("CREATE CUSTOM INDEX ON %%s(c, v2) USING '%s' WITH OPTIONS = {'foo':'bar'}",
@@ -660,7 +631,7 @@ public class CustomIndexTest extends CQLTester
     }
 
     @Test
-    public void validateOptionsWithTableMetadata()
+    public void validateOptionsWithTableMetadata() throws Throwable
     {
         createTable("CREATE TABLE %s(k int, c int, v1 int, v2 int, PRIMARY KEY(k,c))");
         createIndex(String.format("CREATE CUSTOM INDEX ON %%s(c, v2) USING '%s' WITH OPTIONS = {'foo':'bar'}",
@@ -691,7 +662,7 @@ public class CustomIndexTest extends CQLTester
         }
 
         // SSTables remain uncommitted.
-        assertEquals(0, getCurrentColumnFamilyStore().getDirectories().getDirectoryForNewSSTables().tryList().length);
+        assertThat(getCurrentColumnFamilyStore().getDirectories().sstableLister(Directories.OnTxnErr.IGNORE).includeBackups(false).list()).isEmpty();
     }
 
     @Test
@@ -704,7 +675,7 @@ public class CustomIndexTest extends CQLTester
         // Insert a single wide partition to be indexed
         for (int i = 0; i < totalRows; i++)
             execute("INSERT INTO %s (k, c, v) VALUES (0, ?, ?)", i, i);
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         // Create the index, which won't automatically start building
         String indexName = "build_single_partition_idx";
@@ -715,7 +686,7 @@ public class CustomIndexTest extends CQLTester
         // Index the partition with an Indexer which artificially simulates additional concurrent
         // flush activity by periodically issuing barriers on the read & write op groupings
         DecoratedKey targetKey = getCurrentColumnFamilyStore().decorateKey(ByteBufferUtil.bytes(0));
-        indexManager.indexPartition(targetKey, Collections.singleton(index), totalRows / 10);
+        indexManager.indexPartition(targetKey, Collections.singleton(index), PageSize.inRows(totalRows / 10));
 
         // When indexing is done check that:
         // * The base table's read ordering at finish was > the one at the start (i.e. that
@@ -761,7 +732,7 @@ public class CustomIndexTest extends CQLTester
         execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 5, 3, 3);
         execute("DELETE FROM %s WHERE k = ?", 5);
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         String indexName = "partition_index_test_idx";
         createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(v) USING '%s'",
@@ -774,7 +745,7 @@ public class CustomIndexTest extends CQLTester
         for (int pageSize = 1; pageSize <= 5; pageSize++)
         {
             targetKey = getCurrentColumnFamilyStore().decorateKey(ByteBufferUtil.bytes(1));
-            indexManager.indexPartition(targetKey, Collections.singleton(index), pageSize);
+            indexManager.indexPartition(targetKey, Collections.singleton(index), PageSize.inRows(pageSize));
             assertEquals(3, index.rowsInserted.size());
             assertEquals(0, index.rangeTombstones.size());
             assertTrue(index.partitionDeletions.get(0).isLive());
@@ -784,7 +755,7 @@ public class CustomIndexTest extends CQLTester
         for (int pageSize = 1; pageSize <= 5; pageSize++)
         {
             targetKey = getCurrentColumnFamilyStore().decorateKey(ByteBufferUtil.bytes(2));
-            indexManager.indexPartition(targetKey, Collections.singleton(index), pageSize);
+            indexManager.indexPartition(targetKey, Collections.singleton(index), PageSize.inRows(pageSize));
             assertEquals(1, index.rowsInserted.size());
             assertEquals(0, index.rangeTombstones.size());
             assertTrue(index.partitionDeletions.get(0).isLive());
@@ -794,7 +765,7 @@ public class CustomIndexTest extends CQLTester
         for (int pageSize = 1; pageSize <= 5; pageSize++)
         {
             targetKey = getCurrentColumnFamilyStore().decorateKey(ByteBufferUtil.bytes(3));
-            indexManager.indexPartition(targetKey, Collections.singleton(index), pageSize);
+            indexManager.indexPartition(targetKey, Collections.singleton(index), PageSize.inRows(pageSize));
             assertEquals(1, index.rowsInserted.size());
             assertEquals(2, index.rangeTombstones.size());
             assertTrue(index.partitionDeletions.get(0).isLive());
@@ -804,7 +775,7 @@ public class CustomIndexTest extends CQLTester
         for (int pageSize = 1; pageSize <= 5; pageSize++)
         {
             targetKey = getCurrentColumnFamilyStore().decorateKey(ByteBufferUtil.bytes(5));
-            indexManager.indexPartition(targetKey, Collections.singleton(index), pageSize);
+            indexManager.indexPartition(targetKey, Collections.singleton(index), PageSize.inRows(pageSize));
             assertEquals(1, index.partitionDeletions.size());
             assertFalse(index.partitionDeletions.get(0).isLive());
             index.reset();
@@ -823,7 +794,7 @@ public class CustomIndexTest extends CQLTester
         // Insert a single row partition to be indexed
         for (int i = 0; i < totalRows; i++)
             execute("INSERT INTO %s (k, c, v) VALUES (0, ?, ?)", i, i);
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         // Create the index, which won't automatically start building
         String indexName = "partition_overindex_test_idx";
@@ -833,7 +804,7 @@ public class CustomIndexTest extends CQLTester
 
         // Index the partition
         DecoratedKey targetKey = getCurrentColumnFamilyStore().decorateKey(ByteBufferUtil.bytes(0));
-        indexManager.indexPartition(targetKey, Collections.singleton(index), totalRows);
+        indexManager.indexPartition(targetKey, Collections.singleton(index), PageSize.inRows(totalRows));
 
         // Assert only one partition is counted
         assertEquals(1, index.beginCalls);
@@ -849,7 +820,7 @@ public class CustomIndexTest extends CQLTester
 
         // Insert a single range tombstone
         execute("DELETE FROM %s WHERE k=1 and c > 2");
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         // Create the index, which won't automatically start building
         String indexName = "range_tombstone_idx";
@@ -864,7 +835,7 @@ public class CustomIndexTest extends CQLTester
 
         // Index the partition
         DecoratedKey targetKey = getCurrentColumnFamilyStore().decorateKey(ByteBufferUtil.bytes(1));
-        indexManager.indexPartition(targetKey, Sets.newHashSet(index, index2), 1);
+        indexManager.indexPartition(targetKey, Sets.newHashSet(index, index2), PageSize.inRows(1));
 
         // and both indexes should have the same range tombstone
         assertEquals(index.rangeTombstones, index2.rangeTombstones);
@@ -872,7 +843,6 @@ public class CustomIndexTest extends CQLTester
 
 
     // Used for index creation above
-    @SuppressWarnings("unused")
     public static class BrokenCustom2I extends StubIndex
     {
         public BrokenCustom2I(ColumnFamilyStore baseCfs, IndexMetadata metadata)
@@ -886,10 +856,12 @@ public class CustomIndexTest extends CQLTester
         }
     }
 
-    private void testCreateIndex(String indexName, String... targetColumnNames)
+    private void testCreateIndex(String indexName, String... targetColumnNames) throws Throwable
     {
         createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(%s) USING '%s'",
-                                  indexName, String.join(",", targetColumnNames), StubIndex.class.getName()));
+                                  indexName,
+                                  Arrays.stream(targetColumnNames).collect(Collectors.joining(",")),
+                                  StubIndex.class.getName()));
         assertIndexCreated(indexName, targetColumnNames);
     }
 
@@ -1007,8 +979,8 @@ public class CustomIndexTest extends CQLTester
 
         public Searcher searcherFor(ReadCommand command)
         {
-                searchersProvided++;
-                return super.searcherFor(command);
+            searchersProvided++;
+            return super.searcherFor(command);
         }
     }
 
@@ -1065,7 +1037,6 @@ public class CustomIndexTest extends CQLTester
             super(baseCfs, metadata);
         }
 
-        @SuppressWarnings("unused")
         public static Map<String, String> validateOptions(Map<String, String> options)
         {
             IndexWithValidateOptions.options = options;
@@ -1083,7 +1054,6 @@ public class CustomIndexTest extends CQLTester
             super(baseCfs, metadata);
         }
 
-        @SuppressWarnings("unused")
         public static Map<String, String> validateOptions(Map<String, String> options, TableMetadata table)
         {
             IndexWithOverloadedValidateOptions.options = options;
@@ -1128,7 +1098,7 @@ public class CustomIndexTest extends CQLTester
         @Override
         public Indexer indexerFor(final DecoratedKey key,
                                   RegularAndStaticColumns columns,
-                                  long nowInSec,
+                                  int nowInSec,
                                   WriteContext ctx,
                                   IndexTransaction.Type transactionType,
                                   Memtable memtable)
@@ -1169,14 +1139,21 @@ public class CustomIndexTest extends CQLTester
                         readOrderingAtFinish = baseCfs.readOrdering.getCurrent();
                 }
 
-                public void partitionDelete(DeletionTime deletionTime) { }
+                public void partitionDelete(DeletionTime deletionTime)
+                {
+                }
 
-                public void rangeTombstone(RangeTombstone tombstone) { }
+                public void rangeTombstone(RangeTombstone tombstone)
+                {
+                }
 
-                public void updateRow(Row oldRowData, Row newRowData) { }
+                public void updateRow(Row oldRowData, Row newRowData)
+                {
+                }
 
-                public void removeRow(Row row) { }
-
+                public void removeRow(Row row)
+                {
+                }
             };
         }
     }
@@ -1201,14 +1178,16 @@ public class CustomIndexTest extends CQLTester
 
         assertEquals(0, index.beginFlushCalls.get());
         assertEquals(0, index.flushedPartitions.get());
+        assertEquals(0, index.flushedPartitionDeletions.get());
         assertEquals(0, index.flushedStaticRows.get());
         assertEquals(0, index.flushedUnfiltereds.get());
         assertEquals(0, index.completeFlushCalls.get());
 
-        cfs.forceBlockingFlush(FlushReason.UNIT_TESTS);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         assertEquals(1, index.beginFlushCalls.get());
         assertEquals(2, index.flushedPartitions.get());
+        assertEquals(2, index.flushedPartitionDeletions.get());
         assertEquals(2, index.flushedStaticRows.get());
         assertEquals(4, index.flushedUnfiltereds.get());
         assertEquals(1, index.completeFlushCalls.get());
@@ -1216,10 +1195,11 @@ public class CustomIndexTest extends CQLTester
         execute("DELETE FROM %s WHERE k=?", 0);
         execute("DELETE FROM %s WHERE k=? AND c>=?", 1, 1);
         index.reset();
-        cfs.forceBlockingFlush(FlushReason.UNIT_TESTS);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         assertEquals(1, index.beginFlushCalls.get());
         assertEquals(2, index.flushedPartitions.get());
+        assertEquals(2, index.flushedPartitionDeletions.get());
         assertEquals(0, index.flushedStaticRows.get()); // flushed data has no static values..
         assertEquals(2, index.flushedUnfiltereds.get());
         assertEquals(1, index.completeFlushCalls.get());
@@ -1233,6 +1213,7 @@ public class CustomIndexTest extends CQLTester
 
         AtomicInteger beginFlushCalls = new AtomicInteger();
         AtomicInteger flushedPartitions = new AtomicInteger();
+        AtomicInteger flushedPartitionDeletions = new AtomicInteger();
         AtomicInteger flushedStaticRows = new AtomicInteger();
         AtomicInteger flushedUnfiltereds = new AtomicInteger();
         AtomicInteger completeFlushCalls = new AtomicInteger();
@@ -1248,6 +1229,7 @@ public class CustomIndexTest extends CQLTester
             super.reset();
             beginFlushCalls.set(0);
             flushedPartitions.set(0);
+            flushedPartitionDeletions.set(0);
             flushedStaticRows.set(0);
             flushedUnfiltereds.set(0);
             completeFlushCalls.set(0);
@@ -1256,7 +1238,8 @@ public class CustomIndexTest extends CQLTester
         @Override
         public SSTableFlushObserver getFlushObserver(Descriptor descriptor, LifecycleNewTracker tracker)
         {
-            return new SSTableFlushObserver() {
+            return new SSTableFlushObserver()
+            {
 
                 @Override
                 public void begin()
@@ -1265,25 +1248,31 @@ public class CustomIndexTest extends CQLTester
                 }
 
                 @Override
-                public void startPartition(DecoratedKey key, long keyPosition, long keyPositionForSASI)
+                public void startPartition(DecoratedKey key, long position)
                 {
                     flushedPartitions.incrementAndGet();
                 }
 
                 @Override
-                public void staticRow(Row staticRow)
+                public void partitionLevelDeletion(DeletionTime deletionTime, long position)
+                {
+                    flushedPartitionDeletions.incrementAndGet();
+                }
+
+                @Override
+                public void staticRow(Row staticRow, long position)
                 {
                     flushedStaticRows.incrementAndGet();
                 }
 
                 @Override
-                public void nextUnfilteredCluster(Unfiltered unfiltered)
+                public void nextUnfilteredCluster(Unfiltered unfiltered, long position)
                 {
                     flushedUnfiltereds.incrementAndGet();
                 }
 
                 @Override
-                public void complete()
+                public void complete(SSTable sstable)
                 {
                     completeFlushCalls.incrementAndGet();
                 }
@@ -1365,7 +1354,7 @@ public class CustomIndexTest extends CQLTester
         assertEquals(10, index2.finishCalls);
 
         // flush the previous data to get rid of it, reset the group counters and flush a new memtable
-        cfs.forceBlockingFlush(FlushReason.UNIT_TESTS);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         group.reset();
         execute("INSERT INTO %s (k, s) VALUES (?, ?)", 1, 0);
         execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 1, 0, 0);
@@ -1375,11 +1364,12 @@ public class CustomIndexTest extends CQLTester
         execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 2, 2, 0);
         execute("DELETE FROM %s WHERE k=? AND c=?", 2, 3);
         execute("DELETE FROM %s WHERE k=?", 3);
-        cfs.forceBlockingFlush(FlushReason.UNIT_TESTS);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         // verify that the flush observer calls get only once to the group
         assertEquals(1, group.beginFlushCalls.get());
         assertEquals(3, group.flushedPartitions.get());
+        assertEquals(3, group.flushedPartitionDeletions.get());
         assertEquals(3, group.flushedStaticRows.get());
         assertEquals(6, group.flushedUnfiltereds.get());
         assertEquals(1, group.completeFlushCalls.get());
@@ -1402,8 +1392,6 @@ public class CustomIndexTest extends CQLTester
     @Test
     public void testIndexGroupsInstancesManagement() throws Throwable
     {
-        Assume.assumeTrue("Test does not work with different default secondary index",
-                          DatabaseDescriptor.getDefaultSecondaryIndex().equals(CassandraIndex.NAME));
         String indexClassName = IndexWithSharedGroup.class.getName();
         createTable("CREATE TABLE %s (k int PRIMARY KEY, v1 int, v2 int, v3 int, v4 int, v5 int)");
         SecondaryIndexManager indexManager = getCurrentColumnFamilyStore().indexManager;
@@ -1411,12 +1399,12 @@ public class CustomIndexTest extends CQLTester
         // create two indexes belonging to the same group and verify that only one group is added to the manager
         String idx1 = createIndex(String.format("CREATE CUSTOM INDEX ON %%s(v1) USING '%s'", indexClassName));
         String idx2 = createIndex(String.format("CREATE CUSTOM INDEX ON %%s(v2) USING '%s'", indexClassName));
-        Supplier<IndexWithSharedGroup.Group> groupSupplier =
-                () -> indexManager.listIndexGroups().stream()
-                                                    .filter(g -> g instanceof IndexWithSharedGroup.Group)
-                                                    .map(g -> (IndexWithSharedGroup.Group) g)
-                                                    .findAny()
-                                                    .orElse(null);
+        Supplier<IndexWithSharedGroup.Group> groupSupplier = () -> indexManager.listIndexGroups()
+                                                                               .stream()
+                                                                               .filter(g -> g instanceof IndexWithSharedGroup.Group)
+                                                                               .map(g -> (IndexWithSharedGroup.Group) g)
+                                                                               .findAny().orElse(null);
+
         IndexWithSharedGroup.Group group = groupSupplier.get();
         // verify that only one group has been added to the manager
         assertEquals(2, indexManager.listIndexes().size());
@@ -1447,25 +1435,22 @@ public class CustomIndexTest extends CQLTester
         assertEquals(2, indexManager.listIndexes().size());
         assertEquals(1, indexManager.listIndexGroups().size());
 
-        // drop the remaining members of the shared group and verify that it no longer exists in the manager
+        // drop the remaining members of the shared group and verify that it is removed manager
         dropIndex("DROP INDEX %s." + idx2);
         dropIndex("DROP INDEX %s." + idx5);
         assertEquals(0, indexManager.listIndexes().size());
         assertEquals(0, indexManager.listIndexGroups().size());
-        assertEquals(0, group.indexes.size());
+        assertNull(groupSupplier.get());
 
-        // create the sharing group members again and verify that they are added to a new group instance
+        // create the sharing group members again and verify that they are added to the new group instance
         createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(v1) USING '%s'", idx1, indexClassName));
         createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(v2) USING '%s'", idx2, indexClassName));
         createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(v3) USING '%s'", idx3, indexClassName));
-        IndexWithSharedGroup.Group newGroup = indexManager.listIndexGroups()
-                                                          .stream()
-                                                          .filter(g -> g instanceof IndexWithSharedGroup.Group)
-                                                          .map(g -> (IndexWithSharedGroup.Group) g)
-                                                          .findAny()
-                                                          .orElseThrow(AssertionError::new);
         assertEquals(3, indexManager.listIndexes().size());
         assertEquals(1, indexManager.listIndexGroups().size());
+
+        IndexWithSharedGroup.Group newGroup = groupSupplier.get();
+        assertNotSame(group, newGroup);
         assertEquals(3, newGroup.indexes.size());
     }
 
@@ -1512,6 +1497,7 @@ public class CustomIndexTest extends CQLTester
 
             AtomicInteger beginFlushCalls = new AtomicInteger();
             AtomicInteger flushedPartitions = new AtomicInteger();
+            AtomicInteger flushedPartitionDeletions = new AtomicInteger();
             AtomicInteger flushedStaticRows = new AtomicInteger();
             AtomicInteger flushedUnfiltereds = new AtomicInteger();
             AtomicInteger completeFlushCalls = new AtomicInteger();
@@ -1527,6 +1513,7 @@ public class CustomIndexTest extends CQLTester
                 rowsUpdated.set(0);
                 beginFlushCalls.set(0);
                 flushedPartitions.set(0);
+                flushedPartitionDeletions.set(0);
                 flushedStaticRows.set(0);
                 flushedUnfiltereds.set(0);
                 completeFlushCalls.set(0);
@@ -1558,16 +1545,10 @@ public class CustomIndexTest extends CQLTester
             }
 
             @Override
-            public boolean isSingleton()
-            {
-                return false;
-            }
-
-            @Override
             public Index.Indexer indexerFor(Predicate<Index> indexSelector,
                                             DecoratedKey key,
                                             RegularAndStaticColumns columns,
-                                            long nowInSec,
+                                            int nowInSec,
                                             WriteContext context,
                                             IndexTransaction.Type transactionType,
                                             Memtable memtable)
@@ -1579,7 +1560,8 @@ public class CustomIndexTest extends CQLTester
                                                      .filter(Objects::nonNull)
                                                      .collect(Collectors.toSet());
 
-                return indexers.isEmpty() ? null : new Index.Indexer() {
+                return indexers.isEmpty() ? null : new Index.Indexer()
+                {
 
                     @Override
                     public void begin()
@@ -1639,7 +1621,7 @@ public class CustomIndexTest extends CQLTester
             }
 
             @Override
-            public SSTableFlushObserver getFlushObserver(Descriptor descriptor, LifecycleNewTracker tracker, TableMetadata tableMetadata)
+            public SSTableFlushObserver getFlushObserver(Descriptor descriptor, LifecycleNewTracker tracker, TableMetadata tableMetadata, long keyCount)
             {
                 Set<SSTableFlushObserver> observers = indexes.values()
                                                              .stream()
@@ -1647,7 +1629,8 @@ public class CustomIndexTest extends CQLTester
                                                              .filter(Objects::nonNull)
                                                              .collect(Collectors.toSet());
 
-                return new SSTableFlushObserver() {
+                return new SSTableFlushObserver()
+                {
 
                     @Override
                     public void begin()
@@ -1657,37 +1640,50 @@ public class CustomIndexTest extends CQLTester
                     }
 
                     @Override
-                    public void startPartition(DecoratedKey key, long position, long keyPositionForSASI)
+                    public void startPartition(DecoratedKey key, long position)
                     {
                         flushedPartitions.incrementAndGet();
-                        observers.forEach(o -> o.startPartition(key, position, keyPositionForSASI));
+                        observers.forEach(o -> o.startPartition(key, position));
                     }
 
                     @Override
-                    public void staticRow(Row staticRow)
+                    public void partitionLevelDeletion(DeletionTime deletionTime, long position)
+                    {
+                        flushedPartitionDeletions.incrementAndGet();
+                        observers.forEach(o -> o.partitionLevelDeletion(deletionTime, position));
+                    }
+
+                    @Override
+                    public void staticRow(Row staticRow, long position)
                     {
                         flushedStaticRows.incrementAndGet();
-                        observers.forEach(o -> o.staticRow(staticRow));
+                        observers.forEach(o -> o.staticRow(staticRow, position));
                     }
 
                     @Override
-                    public void nextUnfilteredCluster(Unfiltered unfiltered)
+                    public void nextUnfilteredCluster(Unfiltered unfiltered, long position)
                     {
                         flushedUnfiltereds.incrementAndGet();
-                        observers.forEach(o -> o.nextUnfilteredCluster(unfiltered));
+                        observers.forEach(o -> o.nextUnfilteredCluster(unfiltered, position));
                     }
 
                     @Override
-                    public void complete()
+                    public void complete(SSTable sstable)
                     {
                         completeFlushCalls.incrementAndGet();
-                        observers.forEach(SSTableFlushObserver::complete);
+                        observers.forEach(obs -> obs.complete(sstable));
                     }
                 };
             }
 
             @Override
-            public Set<Component> getComponents()
+            public Set<Component> componentsForNewSSTable()
+            {
+                return Collections.emptySet();
+            }
+
+            @Override
+            public Set<Component> activeComponents(SSTableReader sstable)
             {
                 return Collections.emptySet();
             }

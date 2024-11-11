@@ -74,7 +74,7 @@ public class InvokePointBuilder
         if (methodArgs.length > 0)
         {
             targetMethod = targetMethod + Arrays.stream(methodArgs)
-                                                .map(arg -> (arg instanceof Class<?>) ? ((Class<?>) arg).getName() : String.valueOf(arg))
+                                                .map(arg -> (arg instanceof Class<?>) ? ((Class) arg).getName() : String.valueOf(arg))
                                                 .collect(Collectors.joining(",", "(", ")"));
         }
         this.targetMethod = targetMethod;

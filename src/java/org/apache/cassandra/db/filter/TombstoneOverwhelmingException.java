@@ -20,15 +20,18 @@ package org.apache.cassandra.db.filter;
 
 import java.nio.ByteBuffer;
 
+import org.apache.cassandra.exceptions.UncheckedInternalRequestExecutionException;
+import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.*;
 
-public class TombstoneOverwhelmingException extends RejectException
+public class TombstoneOverwhelmingException extends UncheckedInternalRequestExecutionException
 {
-    public TombstoneOverwhelmingException(int numTombstones, String query, TableMetadata metadata, DecoratedKey lastPartitionKey, ClusteringPrefix<?> lastClustering)
+    public TombstoneOverwhelmingException(long numTombstones, String query, TableMetadata metadata, DecoratedKey lastPartitionKey, ClusteringPrefix<?> lastClustering)
     {
-        super(String.format("Scanned over %d tombstones during query '%s' (last scanned row token was %s and partion key was (%s)); query aborted",
+        super(RequestFailureReason.READ_TOO_MANY_TOMBSTONES,
+              String.format("Scanned over %d tombstones during query '%s' (last scanned row token was %s and partition key was (%s)); query aborted",
                             numTombstones, query, lastPartitionKey.getToken(), makePKString(metadata, lastPartitionKey.getKey(), lastClustering)));
     }
 
@@ -37,7 +40,7 @@ public class TombstoneOverwhelmingException extends RejectException
         StringBuilder sb = new StringBuilder();
 
         if (clustering.size() > 0)
-            sb.append("(");
+            sb.append('(');
 
         // TODO: We should probably make that a lot easier/transparent for partition keys
         AbstractType<?> pkType = metadata.partitionKeyType;
@@ -49,7 +52,7 @@ public class TombstoneOverwhelmingException extends RejectException
             {
                 if (i > 0)
                     sb.append(", ");
-                sb.append(ct.types.get(i).getString(values[i]));
+                sb.append(ct.subTypes().get(i).getString(values[i]));
             }
         }
         else
@@ -58,7 +61,7 @@ public class TombstoneOverwhelmingException extends RejectException
         }
 
         if (clustering.size() > 0)
-            sb.append(")");
+            sb.append(')');
 
         for (int i = 0; i < clustering.size(); i++)
             sb.append(", ").append(clustering.stringAt(i, metadata.comparator));

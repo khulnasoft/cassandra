@@ -22,6 +22,8 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Map;
+import java.util.UUID;
 
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -29,25 +31,30 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.ParameterizedClass;
-import org.apache.cassandra.db.commitlog.CommitLog;
+import org.apache.cassandra.io.compress.ZstdCompressor;
+import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.compress.DeflateCompressor;
 import org.apache.cassandra.io.compress.LZ4Compressor;
 import org.apache.cassandra.io.compress.SnappyCompressor;
-import org.apache.cassandra.io.compress.ZstdCompressor;
 import org.apache.cassandra.schema.KeyspaceParams;
-import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.security.EncryptionContext;
 import org.apache.cassandra.security.EncryptionContextGenerator;
+import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.FBUtilities;
+
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
+
+import static org.junit.Assert.assertEquals;
 
 @RunWith(Parameterized.class)
 public class RecoveryManagerFlushedTest
@@ -62,7 +69,6 @@ public class RecoveryManagerFlushedTest
     {
         DatabaseDescriptor.setCommitLogCompression(commitLogCompression);
         DatabaseDescriptor.setEncryptionContext(encryptionContext);
-        DatabaseDescriptor.initializeCommitLogDiskAccessMode();
     }
 
     @Parameters()
@@ -87,6 +93,8 @@ public class RecoveryManagerFlushedTest
     public static void defineSchema() throws ConfigurationException
     {
         SchemaLoader.prepareServer();
+        StorageService.instance.getTokenMetadata().updateHostId(UUID.randomUUID(), FBUtilities.getBroadcastAddressAndPort());
+
         SchemaLoader.createKeyspace(KEYSPACE1,
                                     KeyspaceParams.simple(1),
                                     SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD1),
@@ -97,9 +105,12 @@ public class RecoveryManagerFlushedTest
     /* test that commit logs do not replay flushed data */
     public void testWithFlush() throws Exception
     {
+        // Flush everything that may be in the commit log now to start fresh
+        FBUtilities.waitOnFutures(Keyspace.open(SchemaConstants.SYSTEM_KEYSPACE_NAME).flush(UNIT_TESTS));
+        FBUtilities.waitOnFutures(Keyspace.open(SchemaConstants.SCHEMA_KEYSPACE_NAME).flush(UNIT_TESTS));
+
+
         CompactionManager.instance.disableAutoCompaction();
-        for (String ks : Schema.instance.getKeyspaces())
-            Util.flush(Keyspace.open(ks));
 
         // add a row to another CF so we test skipping mutations within a not-entirely-flushed CF
         insertRow("Standard2", "key");
@@ -113,16 +124,17 @@ public class RecoveryManagerFlushedTest
         Keyspace keyspace1 = Keyspace.open(KEYSPACE1);
         ColumnFamilyStore cfs = keyspace1.getColumnFamilyStore("Standard1");
         logger.debug("forcing flush");
-        // Flush everything that may be in the commit log now to start fresh
-        Util.flush(cfs);
-        // Flush system keyspace again because of sstable activity mutation called by the tidier
-        Util.flushKeyspace(SchemaConstants.SYSTEM_KEYSPACE_NAME);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         logger.debug("begin manual replay");
         // replay the commit log (nothing on Standard1 should be replayed since everything was flushed, so only the row on Standard2
         // will be replayed)
-        int replayed = CommitLog.instance.resetUnsafe(false);
-        assert replayed == 1 : "Expecting only 1 replayed mutation, got " + replayed;
+        Map<Keyspace, Integer> replayed = CommitLog.instance.resetUnsafe(false);
+        assertEquals("Expecting only one keyspace with replayed mutations", 1, replayed.size());
+        Keyspace replayedKeyspace = replayed.keySet().iterator().next();
+        Integer keyspaceReplayedCount = replayed.values().iterator().next();
+        assertEquals(String.format("Expecting %s keyspace, not %s", KEYSPACE1, replayedKeyspace.getName()), KEYSPACE1, replayedKeyspace.getName());
+        assertEquals("Expecting only 1 replayed mutation, got " + replayed, 1, (int) keyspaceReplayedCount);
     }
 
     private void insertRow(String cfname, String key)

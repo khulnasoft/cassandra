@@ -19,16 +19,11 @@ package org.apache.cassandra.index.sai.disk.v1.bitpack;
 
 import java.io.IOException;
 
-import org.apache.lucene.store.IndexOutput;
+import org.apache.cassandra.index.sai.disk.io.IndexOutput;
 import org.apache.lucene.util.packed.DirectWriter;
 
 /**
  * A writer for large monotonically increasing sequences of positive longs.
- *
- * The writer is optimised for monotonic sequences and stores values as a series of deltas
- * from an expected value. The expected value is calculated from the minimum value in the block and the average
- * delta for the block. This means that stored values are generally smaller and can be packed
- * into a smaller number of bits, allowing for larger block sizes.
  *
  * Modified copy of {@link org.apache.lucene.util.packed.MonotonicBlockPackedWriter} to use {@link DirectWriter} for
  * optimised reads that doesn't require seeking through the whole file to open a thread-exclusive reader.
@@ -48,30 +43,32 @@ public class MonotonicBlockPackedWriter extends AbstractBlockPackedWriter
     }
 
     @Override
-    protected void flushBlock() throws IOException
+    protected void flush() throws IOException
     {
-        final float averageDelta = blockIndex == 1 ? 0f : (float) (blockValues[blockIndex - 1] - blockValues[0]) / (blockIndex - 1);
-        long minimumValue = blockValues[0];
-        // adjust minimumValue so that all deltas will be positive
-        for (int index = 1; index < blockIndex; ++index)
+        assert off > 0;
+
+        final float avg = off == 1 ? 0f : (float) (values[off - 1] - values[0]) / (off - 1);
+        long min = values[0];
+        // adjust min so that all deltas will be positive
+        for (int i = 1; i < off; ++i)
         {
-            long actual = blockValues[index];
-            long expected = MonotonicBlockPackedReader.expected(minimumValue, averageDelta, index);
+            final long actual = values[i];
+            final long expected = MonotonicBlockPackedReader.expected(min, avg, i);
             if (expected > actual)
             {
-                minimumValue -= (expected - actual);
+                min -= (expected - actual);
             }
         }
 
         long maxDelta = 0;
-        for (int i = 0; i < blockIndex; ++i)
+        for (int i = 0; i < off; ++i)
         {
-            blockValues[i] = blockValues[i] - MonotonicBlockPackedReader.expected(minimumValue, averageDelta, i);
-            maxDelta = Math.max(maxDelta, blockValues[i]);
+            values[i] = values[i] - MonotonicBlockPackedReader.expected(min, avg, i);
+            maxDelta = Math.max(maxDelta, values[i]);
         }
 
-        blockMetaWriter.writeZLong(minimumValue);
-        blockMetaWriter.writeInt(Float.floatToIntBits(averageDelta));
+        blockMetaWriter.writeZLong(min);
+        blockMetaWriter.writeInt(Float.floatToIntBits(avg));
         if (maxDelta == 0)
         {
             blockMetaWriter.writeVInt(0);
@@ -80,8 +77,10 @@ public class MonotonicBlockPackedWriter extends AbstractBlockPackedWriter
         {
             final int bitsRequired = DirectWriter.bitsRequired(maxDelta);
             blockMetaWriter.writeVInt(bitsRequired);
-            blockMetaWriter.writeVLong(indexOutput.getFilePointer());
-            writeValues(blockIndex, bitsRequired);
+            blockMetaWriter.writeVLong(out.getFilePointer());
+            writeValues(off, bitsRequired);
         }
+
+        off = 0;
     }
 }

@@ -18,6 +18,7 @@
 package org.apache.cassandra.security;
 
 import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.io.InputStream;
 import java.io.IOException;
 import java.security.Key;
@@ -27,9 +28,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.TransparentDataEncryptionOptions;
-import org.apache.cassandra.io.util.File;
-
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 
 /**
  * A {@code KeyProvider} that retrieves keys from a java keystore.
@@ -50,7 +48,7 @@ public class JKSKeyProvider implements KeyProvider
     {
         this.options = options;
         logger.info("initializing keystore from file {}", options.get(PROP_KEYSTORE));
-        try (InputStream inputStream = Files.newInputStream(File.getPath(options.get(PROP_KEYSTORE))))
+        try (InputStream inputStream = Files.newInputStream(Paths.get(options.get(PROP_KEYSTORE))))
         {
             store = KeyStore.getInstance(options.get(PROP_KEYSTORE_TYPE));
             store.load(inputStream, options.get(PROP_KEYSTORE_PW).toCharArray());
@@ -66,7 +64,7 @@ public class JKSKeyProvider implements KeyProvider
     {
         // there's a lovely behavior with jceks files that all aliases are lower-cased
         if (isJceks)
-            keyAlias = toLowerCaseLocalized(keyAlias);
+            keyAlias = keyAlias.toLowerCase();
 
         Key key;
         try

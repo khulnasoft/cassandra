@@ -28,8 +28,6 @@ import org.openjdk.jmh.profile.*;
 import org.openjdk.jmh.runner.*;
 import org.openjdk.jmh.runner.options.*;
 
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
-
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
 @Warmup(iterations = 3, time = 1, timeUnit = TimeUnit.SECONDS)
@@ -47,7 +45,7 @@ public class StreamingTombstoneHistogramBuilderBench
 
     static
     {
-        final int now = (int) (currentTimeMillis() / 1000L);
+        final int now = (int) (System.currentTimeMillis() / 1000L);
         Random random = new Random();
         for(int i = 0 ; i < 10000000; i++)
         {

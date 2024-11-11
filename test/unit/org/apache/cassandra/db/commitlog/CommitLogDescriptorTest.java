@@ -29,7 +29,6 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.ParameterizedClass;
 import org.apache.cassandra.config.TransparentDataEncryptionOptions;
 import org.apache.cassandra.exceptions.ConfigurationException;
@@ -40,7 +39,6 @@ import org.apache.cassandra.io.util.FileSegmentInputStream;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.security.EncryptionContext;
 import org.apache.cassandra.security.EncryptionContextGenerator;
-import org.assertj.core.api.Assertions;
 
 public class CommitLogDescriptorTest
 {
@@ -89,21 +87,6 @@ public class CommitLogDescriptorTest
         Assert.assertEquals(MessagingService.current_version, CommitLogDescriptor.fromFileName(newCLName).getMessagingVersion());
     }
 
-    @Test
-    public void testExactIdFromFileName()
-    {
-        Assertions.assertThatThrownBy(() -> CommitLogDescriptor.idFromFileName("CommitLog-1340512736956320000.log"))
-                  .hasMessageContaining("Commitlog segment is too old to open")
-                  .isInstanceOf(UnsupportedOperationException.class);
-
-        Assertions.assertThatThrownBy(() -> CommitLogDescriptor.idFromFileName("CommitLog--1340512736956320000.log"))
-                  .hasMessageContaining("Cannot parse the version of the file")
-                  .isInstanceOf(RuntimeException.class);
-
-        Assertions.assertThat(CommitLogDescriptor.idFromFileName("CommitLog-2-1340512736956320000.log"))
-                  .isEqualTo(1340512736956320000L);
-    }
-
     // migrated from CommitLogTest
     private void testDescriptorPersistence(CommitLogDescriptor desc) throws IOException
     {
@@ -113,7 +96,7 @@ public class CommitLogDescriptorTest
         // Put some extra data in the stream.
         buf.putDouble(0.1);
         buf.flip();
-        FileDataInput input = new FileSegmentInputStream(buf, "input", 0);
+        FileDataInput input = new FileSegmentInputStream(buf, new File("input"), 0);
         CommitLogDescriptor read = CommitLogDescriptor.readHeader(input, neverEnabledEncryption);
         Assert.assertEquals("Descriptor length", length, input.getFilePointer());
         Assert.assertEquals("Descriptors", desc, read);
@@ -329,17 +312,9 @@ public class CommitLogDescriptorTest
     }
 
     @Test
-    public void testInferCDCIndexFile()
+    public void testDSE68MessagingVersion()
     {
-        DatabaseDescriptor.daemonInitialization();
-        String fileNameSuffix = "CommitLog-2-1340512736956320000";
-        File validCdcLink = new File(fileNameSuffix + ".log");
-        File inferredIndexFile = CommitLogDescriptor.inferCdcIndexFile(validCdcLink);
-        Assert.assertNotNull(inferredIndexFile);
-        Assert.assertEquals(fileNameSuffix + "_cdc.idx", inferredIndexFile.name());
-
-        File invalidCdcLink = new File(fileNameSuffix + ".invalidlog");
-        inferredIndexFile = CommitLogDescriptor.inferCdcIndexFile(invalidCdcLink);
-        Assert.assertNull(inferredIndexFile);
+        CommitLogDescriptor descriptor = new CommitLogDescriptor(680, 1, null, null);
+        Assert.assertEquals(MessagingService.VERSION_DSE_68, descriptor.getMessagingVersion());
     }
 }

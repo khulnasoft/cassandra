@@ -19,10 +19,9 @@
 package org.apache.cassandra.config;
 
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 import org.apache.cassandra.exceptions.ConfigurationException;
-
-import static org.apache.cassandra.config.CassandraRelevantProperties.CONFIG_LOADER;
 
 /**
  * Helper class for programmatically overriding individual config values before DatabaseDescriptor is bootstrapped.
@@ -42,7 +41,7 @@ public class OverrideConfigurationLoader implements ConfigurationLoader
 
     public static void override(Consumer<Config> modifier)
     {
-        CONFIG_LOADER.setString(OverrideConfigurationLoader.class.getName());
+        System.setProperty(Config.PROPERTY_PREFIX + "config.loader", OverrideConfigurationLoader.class.getName());
         configModifier = modifier;
     }
 }

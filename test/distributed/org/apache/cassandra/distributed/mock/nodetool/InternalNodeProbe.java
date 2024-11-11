@@ -45,7 +45,6 @@ import org.apache.cassandra.service.GCInspector;
 import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.streaming.StreamManager;
-import org.apache.cassandra.tcm.CMSOperations;
 import org.apache.cassandra.tools.NodeProbe;
 
 public class InternalNodeProbe extends NodeProbe
@@ -69,7 +68,6 @@ public class InternalNodeProbe extends NodeProbe
         StorageService.instance.skipNotificationListeners = !withNotifications;
 
         ssProxy = StorageService.instance;
-        cmsProxy = CMSOperations.instance;
         msProxy = MessagingService.instance();
         streamProxy = StreamManager.instance;
         compactionProxy = CompactionManager.instance;
@@ -81,7 +79,7 @@ public class InternalNodeProbe extends NodeProbe
         gcProxy = new GCInspector();
         gossProxy = Gossiper.instance;
         bmProxy = BatchlogManager.instance;
-        arsProxy = ActiveRepairService.instance();
+        arsProxy = ActiveRepairService.instance;
         memProxy = ManagementFactory.getMemoryMXBean();
         runtimeProxy = ManagementFactory.getRuntimeMXBean();
     }

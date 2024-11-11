@@ -21,14 +21,12 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
-import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
-
-import javax.annotation.Nullable;
 
 import com.google.common.base.Joiner;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.ReadCommand;
@@ -50,32 +48,38 @@ import org.apache.cassandra.index.Index;
 import org.apache.cassandra.locator.Endpoints;
 import org.apache.cassandra.locator.ReplicaPlan;
 import org.apache.cassandra.net.Message;
+import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.service.reads.repair.NoopReadRepair;
+import org.apache.cassandra.service.QueryInfoTracker;
 import org.apache.cassandra.service.reads.repair.ReadRepair;
 import org.apache.cassandra.service.reads.repair.RepairedDataTracker;
 import org.apache.cassandra.service.reads.repair.RepairedDataVerifier;
-import org.apache.cassandra.transport.Dispatcher;
 
 import static com.google.common.collect.Iterables.*;
 
-public class DataResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<E, P>> extends ResponseResolver<E, P>
+public class DataResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<E>> extends ResponseResolver<E, P>
 {
     private final boolean enforceStrictLiveness;
     private final ReadRepair<E, P> readRepair;
     private final boolean trackRepairedStatus;
+    protected final QueryInfoTracker.ReadTracker readTracker;
 
-    public DataResolver(ReadCommand command, Supplier<? extends P> replicaPlan, ReadRepair<E, P> readRepair, Dispatcher.RequestTime requestTime)
+    public DataResolver(ReadCommand command,
+                        ReplicaPlan.Shared<E, P> replicaPlan,
+                        ReadRepair<E, P> readRepair,
+                        long queryStartNanoTime,
+                        QueryInfoTracker.ReadTracker readTracker)
     {
-        this(command, replicaPlan, readRepair, requestTime, false);
+        this(command, replicaPlan, readRepair, queryStartNanoTime, false, readTracker);
     }
 
-    public DataResolver(ReadCommand command, Supplier<? extends P> replicaPlan, ReadRepair<E, P> readRepair, Dispatcher.RequestTime requestTime, boolean trackRepairedStatus)
+    public DataResolver(ReadCommand command, ReplicaPlan.Shared<E, P> replicaPlan, ReadRepair<E, P> readRepair, long queryStartNanoTime, boolean trackRepairedStatus, QueryInfoTracker.ReadTracker readTracker)
     {
-        super(command, replicaPlan, requestTime);
+        super(command, replicaPlan, queryStartNanoTime);
         this.enforceStrictLiveness = command.metadata().enforceStrictLiveness();
         this.readRepair = readRepair;
         this.trackRepairedStatus = trackRepairedStatus;
+        this.readTracker = readTracker;
     }
 
     public PartitionIterator getData()
@@ -91,17 +95,12 @@ public class DataResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
 
     public PartitionIterator resolve()
     {
-        return resolve(null);
-    }
-
-    public PartitionIterator resolve(@Nullable Runnable runOnShortRead)
-    {
         // We could get more responses while this method runs, which is ok (we're happy to ignore any response not here
         // at the beginning of this method), so grab the response count once and use that through the method.
         Collection<Message<ReadResponse>> messages = responses.snapshot();
         assert !any(messages, msg -> msg.payload.isDigestResponse());
 
-        E replicas = replicaPlan().readCandidates().select(transform(messages, Message::from), false);
+        E replicas = replicaPlan().candidates().select(transform(messages, Message::from), false);
 
         // If requested, inspect each response for a digest of the replica's repaired data set
         RepairedDataTracker repairedDataTracker = trackRepairedStatus
@@ -119,17 +118,19 @@ public class DataResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
             });
         }
 
-        if (usesReplicaFilteringProtection())
-            return resolveWithReplicaFilteringProtection(replicas, repairedDataTracker);
+        if (!needsReplicaFilteringProtection())
+        {
+            ResolveContext context = new ResolveContext(replicas);
+            return resolveWithReadRepair(context,
+                                         i -> shortReadProtectedResponse(i, context),
+                                         UnaryOperator.identity(),
+                                         repairedDataTracker);
+        }
 
-        ResolveContext context = new ResolveContext(replicas, true);
-        return resolveWithReadRepair(context,
-                                     i -> shortReadProtectedResponse(i, context, runOnShortRead),
-                                     UnaryOperator.identity(),
-                                     repairedDataTracker);
+        return resolveWithReplicaFilteringProtection(replicas, repairedDataTracker);
     }
 
-    private boolean usesReplicaFilteringProtection()
+    private boolean needsReplicaFilteringProtection()
     {
         if (command.rowFilter().isEmpty())
             return false;
@@ -138,22 +139,30 @@ public class DataResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
             return false;
 
         Index.QueryPlan queryPlan = command.indexQueryPlan();
-        if (queryPlan == null)
-            return true;
+        IndexMetadata indexMetadata = queryPlan == null ? null : queryPlan.getFirst().getIndexMetadata();
 
-        return queryPlan.supportsReplicaFilteringProtection(command.rowFilter());
+        if (indexMetadata == null || !indexMetadata.isCustom())
+        {
+            return true;
+        }
+
+        ColumnFamilyStore cfs = ColumnFamilyStore.getIfExists(command.metadata().id);
+
+        assert cfs != null;
+
+        Index index = command.getIndex(cfs);
+
+        assert index != null;
+
+        return index.supportsReplicaFilteringProtection(command.rowFilter());
     }
 
-    private class ResolveContext
+    protected class ResolveContext
     {
-        private final E replicas;
+        public final E replicas;
         private final DataLimits.Counter mergedResultCounter;
 
-        /**
-         * @param replicas the collection of {@link Endpoints} involved in the query
-         * @param enforceLimits whether or not to enforce counter limits in this context
-         */
-        private ResolveContext(E replicas, boolean enforceLimits)
+        private ResolveContext(E replicas)
         {
             this.replicas = replicas;
             this.mergedResultCounter = command.limits().newCounter(command.nowInSec(),
@@ -161,31 +170,32 @@ public class DataResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
                                                                    command.selectsFullPartition(),
                                                                    enforceStrictLiveness);
 
-            // In case of top-k query, do not trim reconciled rows here because QueryPlan#postProcessor()
-            // needs to compare all rows. Also avoid enforcing the limit if explicitly requested.
-            if (command.isTopK() || !enforceLimits)
+            // In case of top-k query, do not trim reconciled rows here because QueryPlan#postProcessor() needs to compare all rows
+            if (command.isTopK())
                 this.mergedResultCounter.onlyCount();
         }
 
         private boolean needsReadRepair()
         {
-            // Each replica may return different estimated top-K rows, it doesn't mean data is not replicated.
-            // Even though top-K queries are limited to CL ONE & LOCAL-ONE, they use the ScanAllRangesCommandIterator
-            // that combines the separate replica plans of each data range into a single replica plan. This is an
-            // optimisation but can result in the number of replicas being > 1.
+            // each replica may return different estimated top-K rows, it doesn't mean data is not replicated.
             if (command.isTopK())
                 return false;
 
             return replicas.size() > 1;
         }
 
-        private boolean needShortReadProtection()
+        public DataLimits.Counter mergedResultCounter()
+        {
+            return mergedResultCounter;
+        }
+
+        public boolean needShortReadProtection()
         {
             // SRP doesn't make sense for top-k which needs to re-query replica with larger limit instead of fetching more partitions
             if (command.isTopK())
                 return false;
 
-            // If we have only one result, there is no read repair to do, and we can't get short reads
+            // If we have only one result, there is no read repair to do and we can't get short reads
             // Also, so-called "short reads" stems from nodes returning only a subset of the results they have for a
             // partition due to the limit, but that subset not being enough post-reconciliation. So if we don't have limit,
             // don't bother protecting against short reads.
@@ -199,19 +209,24 @@ public class DataResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
         UnfilteredPartitionIterator getResponse(int i);
     }
 
-    private UnfilteredPartitionIterator shortReadProtectedResponse(int i, ResolveContext context, @Nullable Runnable onShortRead)
+    protected UnfilteredPartitionIterator shortReadProtectedResponse(int i, ResolveContext context)
     {
         UnfilteredPartitionIterator originalResponse = responses.get(i).payload.makeIterator(command);
 
-        return context.needShortReadProtection()
-               ? ShortReadProtection.extend(context.replicas.get(i),
-                                            () -> { responses.clearUnsafe(i); if (onShortRead != null) onShortRead.run(); },
-                                            originalResponse,
-                                            command,
-                                            context.mergedResultCounter,
-                                            requestTime,
-                                            enforceStrictLiveness)
-               : originalResponse;
+        if (context.needShortReadProtection())
+        {
+            DataLimits.Counter singleResultCounter = command.createLimitedCounter(false);
+            return ShortReadProtection.extend(originalResponse,
+                                              command,
+                                              new ShortReadPartitionsProtection(command,
+                                                                                context.replicas.get(i),
+                                                                                () -> responses.clearUnsafe(i),
+                                                                                singleResultCounter,
+                                                                                context.mergedResultCounter(),
+                                                                                queryStartNanoTime),
+                                              singleResultCounter);
+        }
+        return originalResponse;
     }
 
     private PartitionIterator resolveWithReadRepair(ResolveContext context,
@@ -220,50 +235,52 @@ public class DataResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
                                                     RepairedDataTracker repairedDataTracker)
     {
         UnfilteredPartitionIterators.MergeListener listener = null;
-        if (context.needsReadRepair() && readRepair != NoopReadRepair.instance)
+        if (context.needsReadRepair())
         {
-            P sources = replicaPlan.get().withContacts(context.replicas);
+            P sources = replicaPlan.getWithContacts(context.replicas);
             listener = wrapMergeListener(readRepair.getMergeListener(sources), sources, repairedDataTracker);
         }
 
-        return resolveInternal(context, listener, responseProvider, preCountFilter);
+        return resolveInternal(context, listener, responseProvider, preCountFilter, readTracker);
     }
 
+    @SuppressWarnings("resource")
     private PartitionIterator resolveWithReplicaFilteringProtection(E replicas, RepairedDataTracker repairedDataTracker)
     {
         // Protecting against inconsistent replica filtering (some replica returning a row that is outdated but that
         // wouldn't be removed by normal reconciliation because up-to-date replica have filtered the up-to-date version
         // of that row) involves 3 main elements:
-        //   1) We combine an unlimited, short-read-protected iterator of unfiltered partitions with a merge listener 
-        //      that identifies potentially "out-of-date" rows. A row is considered out-of-date if its merged form is 
-        //      non-empty, and we receive no response from some replica. It is also potentially out-of-date if there is
-        //      disagreement around the value of a single column in a non-empty row, and some replica provides no value
-        //      for that column. In either case, it is possible that filtering at the "silent" replica has produced a 
-        //      more up-to-date result.
+        //   1) We combine short-read protection and a merge listener that identifies potentially "out-of-date"
+        //      rows to create an iterator that is guaranteed to produce enough valid row results to satisfy the query
+        //      limit if enough actually exist. A row is considered out-of-date if its merged from is non-empty and we
+        //      receive not response from at least one replica. In this case, it is possible that filtering at the
+        //      "silent" replica has produced a more up-to-date result.
         //   2) This iterator is passed to the standard resolution process with read-repair, but is first wrapped in a
         //      response provider that lazily "completes" potentially out-of-date rows by directly querying them on the
         //      replicas that were previously silent. As this iterator is consumed, it caches valid data for potentially
-        //      out-of-date rows, and this cached data is merged with the fetched data as rows are requested. Only rows 
-        //      in the partition being evalutated will be cached (then released when the partition is consumed).
+        //      out-of-date rows, and this cached data is merged with the fetched data as rows are requested. If there
+        //      is no replica divergence, only rows in the partition being evalutated will be cached (then released
+        //      when the partition is consumed).
         //   3) After a "complete" row is materialized, it must pass the row filter supplied by the original query
-        //      before it counts against the limit. If this "pre-count" filter causes a short read, additional rows
-        //      will be fetched from the first-phase iterator.
+        //      before it counts against the limit.
 
+        // We need separate contexts, as each context has his own counter
+        ResolveContext firstPhaseContext = new ResolveContext(replicas);
+        ResolveContext secondPhaseContext = new ResolveContext(replicas);
         ReplicaFilteringProtection<E> rfp = new ReplicaFilteringProtection<>(replicaPlan().keyspace(),
                                                                              command,
                                                                              replicaPlan().consistencyLevel(),
-                                                                             requestTime,
-                                                                             replicas,
+                                                                             queryStartNanoTime,
+                                                                             firstPhaseContext.replicas,
                                                                              DatabaseDescriptor.getCachedReplicaRowsWarnThreshold(),
                                                                              DatabaseDescriptor.getCachedReplicaRowsFailThreshold());
 
-        ResolveContext firstPhaseContext = new ResolveContext(replicas, false);
         PartitionIterator firstPhasePartitions = resolveInternal(firstPhaseContext,
                                                                  rfp.mergeController(),
-                                                                 i -> shortReadProtectedResponse(i, firstPhaseContext, null),
-                                                                 null);
+                                                                 i -> shortReadProtectedResponse(i, firstPhaseContext),
+                                                                 UnaryOperator.identity(),
+                                                                 QueryInfoTracker.ReadTracker.NOOP);
 
-        ResolveContext secondPhaseContext = new ResolveContext(replicas, true);
         PartitionIterator completedPartitions = resolveWithReadRepair(secondPhaseContext,
                                                                       i -> rfp.queryProtectedPartitions(firstPhasePartitions, i),
                                                                       preCountFilterForReplicaFilteringProtection(),
@@ -275,10 +292,6 @@ public class DataResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
 
     private  UnaryOperator<PartitionIterator> preCountFilterForReplicaFilteringProtection()
     {
-        // Key columns are immutable and should never need to participate in replica filtering
-        if (!command.rowFilter().hasNonKeyExpressions())
-            return results -> results;
-
         return results -> {
             Index.Searcher searcher = command.indexSearcher();
             // in case of "ALLOW FILTERING" without index
@@ -288,10 +301,16 @@ public class DataResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
         };
     }
 
+    @SuppressWarnings("resource")
+    /**
+     * Uses the provided {@link org.apache.cassandra.service.QueryInfoTracker.ReadTracker} as internal calls
+     * may be not tracked, e.g. the first phase of RFP.
+     */
     private PartitionIterator resolveInternal(ResolveContext context,
                                               UnfilteredPartitionIterators.MergeListener mergeListener,
                                               ResponseProvider responseProvider,
-                                              @Nullable UnaryOperator<PartitionIterator> preCountFilter)
+                                              UnaryOperator<PartitionIterator> preCountFilter,
+                                              QueryInfoTracker.ReadTracker resolveReadTracker)
     {
         int count = context.replicas.size();
         List<UnfilteredPartitionIterator> results = new ArrayList<>(count);
@@ -313,13 +332,13 @@ public class DataResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
          */
 
         UnfilteredPartitionIterator merged = UnfilteredPartitionIterators.merge(results, mergeListener);
+        if (!QueryInfoTracker.ReadTracker.NOOP.equals(resolveReadTracker) && !QueryInfoTracker.LWTWriteTracker.NOOP.equals(resolveReadTracker))
+        {
+            merged = Transformation.apply(merged, new ReadTrackingTransformation(resolveReadTracker));
+        }
         Filter filter = new Filter(command.nowInSec(), command.metadata().enforceStrictLiveness());
         FilteredPartitions filtered = FilteredPartitions.filter(merged, filter);
-
-        PartitionIterator counted = preCountFilter == null
-                                    ? filtered
-                                    : Transformation.apply(preCountFilter.apply(filtered), context.mergedResultCounter);
-
+        PartitionIterator counted = Transformation.apply(preCountFilter.apply(filtered), context.mergedResultCounter);
         return Transformation.apply(counted, new EmptyPartitionsDiscarder());
     }
 
@@ -388,11 +407,11 @@ public class DataResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
                         }
                     }
 
-                    public void onMergedRows(Row merged, Row[] versions)
+                    public Row onMergedRows(Row merged, Row[] versions)
                     {
                         try
                         {
-                            rowListener.onMergedRows(merged, versions);
+                            return rowListener.onMergedRows(merged, versions);
                         }
                         catch (AssertionError e)
                         {
@@ -413,7 +432,7 @@ public class DataResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
                     {
                         try
                         {
-                            // The code for merging range tombstones is a tad complex, and we had the assertions there triggered
+                            // The code for merging range tombstones is a tad complex and we had the assertions there triggered
                             // unexpectedly in a few occasions (CASSANDRA-13237, CASSANDRA-13719). It's hard to get insights
                             // when that happen without more context that what the assertion errors give us however, hence the
                             // catch here that basically gather as much as context as reasonable.

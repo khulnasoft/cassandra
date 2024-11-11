@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.audit;
 
+import java.util.HashSet;
 import java.util.Set;
 
 import com.google.common.collect.ImmutableSet;
@@ -24,18 +25,18 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-final class AuditLogFilter
+public class AuditLogFilter
 {
     private static final Logger logger = LoggerFactory.getLogger(AuditLogFilter.class);
 
     private static ImmutableSet<String> EMPTY_FILTERS = ImmutableSet.of();
 
-    final ImmutableSet<String> excludedKeyspaces;
-    final ImmutableSet<String> includedKeyspaces;
-    final ImmutableSet<String> excludedCategories;
-    final ImmutableSet<String> includedCategories;
-    final ImmutableSet<String> includedUsers;
-    final ImmutableSet<String> excludedUsers;
+    private final ImmutableSet<String> excludedKeyspaces;
+    private final ImmutableSet<String> includedKeyspaces;
+    private final ImmutableSet<String> excludedCategories;
+    private final ImmutableSet<String> includedCategories;
+    private final ImmutableSet<String> includedUsers;
+    private final ImmutableSet<String> excludedUsers;
 
     private AuditLogFilter(ImmutableSet<String> excludedKeyspaces, ImmutableSet<String> includedKeyspaces, ImmutableSet<String> excludedCategories, ImmutableSet<String> includedCategories, ImmutableSet<String> excludedUsers, ImmutableSet<String> includedUsers)
     {

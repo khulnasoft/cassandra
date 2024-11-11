@@ -33,9 +33,9 @@ import java.util.stream.Collectors;
 import com.google.common.collect.Lists;
 import org.junit.Test;
 
-import com.datastax.driver.core.CodecRegistry;
-import com.datastax.driver.core.SimpleStatement;
-import com.datastax.driver.core.Statement;
+import com.khulnasoft.driver.core.CodecRegistry;
+import com.khulnasoft.driver.core.SimpleStatement;
+import com.khulnasoft.driver.core.Statement;
 import net.openhft.chronicle.core.io.IORuntimeException;
 import net.openhft.chronicle.queue.ChronicleQueue;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
@@ -51,6 +51,7 @@ import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.tools.Util;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.CloseableIterator;
 import org.apache.cassandra.utils.MergeIterator;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.binlog.BinLog;
@@ -120,7 +121,7 @@ public class FQLReplayTest
              ChronicleQueue queue2 = SingleChronicleQueueBuilder.single(f2).build();
              FQLQueryIterator iter = new FQLQueryIterator(queue.createTailer(), 101);
              FQLQueryIterator iter2 = new FQLQueryIterator(queue2.createTailer(), 101);
-             MergeIterator<FQLQuery, List<FQLQuery>> merger = MergeIterator.get(Lists.newArrayList(iter, iter2), FQLQuery::compareTo, new Replay.Reducer()))
+             CloseableIterator<List<FQLQuery>> merger = MergeIterator.getCloseable(Lists.newArrayList(iter, iter2), FQLQuery::compareTo, new Replay.ReplayReducer()))
         {
             long last = -1;
 
@@ -401,7 +402,7 @@ public class FQLReplayTest
                                               i * 1000,
                                               i * 54321,
                                               i * 12345,
-                                              com.datastax.driver.core.BatchStatement.Type.UNLOGGED,
+                                              com.khulnasoft.driver.core.BatchStatement.Type.UNLOGGED,
                                               Lists.newArrayList("select * from aaaa"),
                                               Collections.singletonList(values));
 
@@ -466,7 +467,7 @@ public class FQLReplayTest
         assertEquals(0, q1.compareTo(q2));
         assertEquals(0, q2.compareTo(q1));
 
-        FQLQuery q3 = new FQLQuery.Batch("abc", 0, QueryOptions.DEFAULT, 123, 111, 222, com.datastax.driver.core.BatchStatement.Type.UNLOGGED, Collections.emptyList(), Collections.emptyList());
+        FQLQuery q3 = new FQLQuery.Batch("abc", 0, QueryOptions.DEFAULT, 123, 111, 222, com.khulnasoft.driver.core.BatchStatement.Type.UNLOGGED, Collections.emptyList(), Collections.emptyList());
         // single queries before batch queries
         assertTrue(q1.compareTo(q3) < 0);
         assertTrue(q3.compareTo(q1) > 0);
@@ -476,7 +477,7 @@ public class FQLReplayTest
         assertTrue(q1.compareTo(q4) < 0);
         assertTrue(q4.compareTo(q1) > 0);
 
-        FQLQuery q5 = new FQLQuery.Batch("abc", 0, QueryOptions.DEFAULT, 124, 111, 222, com.datastax.driver.core.BatchStatement.Type.UNLOGGED, Collections.emptyList(), Collections.emptyList());
+        FQLQuery q5 = new FQLQuery.Batch("abc", 0, QueryOptions.DEFAULT, 124, 111, 222, com.khulnasoft.driver.core.BatchStatement.Type.UNLOGGED, Collections.emptyList(), Collections.emptyList());
         assertTrue(q1.compareTo(q5) < 0);
         assertTrue(q5.compareTo(q1) > 0);
 
@@ -510,7 +511,7 @@ public class FQLReplayTest
         assertTrue(stmt instanceof SimpleStatement);
         SimpleStatement simpleStmt = (SimpleStatement)stmt;
         assertEquals("select * from aaa",simpleStmt.getQueryString(CodecRegistry.DEFAULT_INSTANCE));
-        assertArrayEquals(values.toArray(), simpleStmt.getValues(com.datastax.driver.core.ProtocolVersion.fromInt(QueryOptions.DEFAULT.getProtocolVersion().asInt()), CodecRegistry.DEFAULT_INSTANCE));
+        assertArrayEquals(values.toArray(), simpleStmt.getValues(com.khulnasoft.driver.core.ProtocolVersion.fromInt(QueryOptions.DEFAULT.getProtocolVersion().asInt()), CodecRegistry.DEFAULT_INSTANCE));
     }
 
 
@@ -534,13 +535,13 @@ public class FQLReplayTest
                                                    1234,
                                                    12345,
                                                    54321,
-                                                   com.datastax.driver.core.BatchStatement.Type.UNLOGGED,
+                                                   com.khulnasoft.driver.core.BatchStatement.Type.UNLOGGED,
                                                    queries,
                                                    values);
         Statement stmt = batch.toStatement();
         assertEquals(stmt.getDefaultTimestamp(), 12345);
-        assertTrue(stmt instanceof com.datastax.driver.core.BatchStatement);
-        com.datastax.driver.core.BatchStatement batchStmt = (com.datastax.driver.core.BatchStatement)stmt;
+        assertTrue(stmt instanceof com.khulnasoft.driver.core.BatchStatement);
+        com.khulnasoft.driver.core.BatchStatement batchStmt = (com.khulnasoft.driver.core.BatchStatement)stmt;
         List<Statement> statements = Lists.newArrayList(batchStmt.getStatements());
         List<Statement> fromFQLQueries = batch.queries.stream().map(FQLQuery.Single::toStatement).collect(Collectors.toList());
         assertEquals(statements.size(), fromFQLQueries.size());
@@ -677,8 +678,8 @@ public class FQLReplayTest
         SimpleStatement simpleStmt1 = (SimpleStatement)statement1;
         SimpleStatement simpleStmt2 = (SimpleStatement)statement2;
         assertEquals(simpleStmt1.getQueryString(CodecRegistry.DEFAULT_INSTANCE), simpleStmt2.getQueryString(CodecRegistry.DEFAULT_INSTANCE));
-        assertArrayEquals(simpleStmt1.getValues(com.datastax.driver.core.ProtocolVersion.fromInt(QueryOptions.DEFAULT.getProtocolVersion().asInt()), CodecRegistry.DEFAULT_INSTANCE),
-                          simpleStmt2.getValues(com.datastax.driver.core.ProtocolVersion.fromInt(QueryOptions.DEFAULT.getProtocolVersion().asInt()), CodecRegistry.DEFAULT_INSTANCE));
+        assertArrayEquals(simpleStmt1.getValues(com.khulnasoft.driver.core.ProtocolVersion.fromInt(QueryOptions.DEFAULT.getProtocolVersion().asInt()), CodecRegistry.DEFAULT_INSTANCE),
+                          simpleStmt2.getValues(com.khulnasoft.driver.core.ProtocolVersion.fromInt(QueryOptions.DEFAULT.getProtocolVersion().asInt()), CodecRegistry.DEFAULT_INSTANCE));
 
     }
 

@@ -464,40 +464,31 @@ public class MerkleTree
     EstimatedHistogram histogramOfRowSizePerLeaf()
     {
         HistogramBuilder histbuild = new HistogramBuilder();
-        try (TreeRangeIterator trIter = new TreeRangeIterator(this))
+        for (TreeRange range : new TreeRangeIterator(this))
         {
-            for (TreeRange range : trIter)
-            {
-                histbuild.add(range.node.sizeOfRange());
-            }
-            return histbuild.buildWithStdevRangesAroundMean();
+            histbuild.add(range.node.sizeOfRange());
         }
+        return histbuild.buildWithStdevRangesAroundMean();
     }
 
     EstimatedHistogram histogramOfRowCountPerLeaf()
     {
         HistogramBuilder histbuild = new HistogramBuilder();
-        try (TreeRangeIterator trIter = new TreeRangeIterator(this))
+        for (TreeRange range : new TreeRangeIterator(this))
         {
-            for (TreeRange range : trIter)
-            {
-                histbuild.add(range.node.partitionsInRange());
-            }
-            return histbuild.buildWithStdevRangesAroundMean();
+            histbuild.add(range.node.partitionsInRange());
         }
+        return histbuild.buildWithStdevRangesAroundMean();
     }
 
     public long rowCount()
     {
         long count = 0;
-        try (TreeRangeIterator trIter = new TreeRangeIterator(this))
+        for (TreeRange range : new TreeRangeIterator(this))
         {
-            for (TreeRange range : trIter)
-            {
-                count += range.node.partitionsInRange();
-            }
-            return count;
+            count += range.node.partitionsInRange();
         }
+        return count;
     }
 
     @Override
@@ -1024,7 +1015,7 @@ public class MerkleTree
         default void serialize(DataOutputPlus out, int version) throws IOException
         {
             byte[] hash = hash();
-            assert hash.length == HASH_SIZE: String.format("Expected hash length to be %d, but given %d", HASH_SIZE, hash.length);
+            assert hash.length == HASH_SIZE;
 
             out.writeByte(Leaf.IDENT);
 
@@ -1512,8 +1503,8 @@ public class MerkleTree
      *
      * n = floor(log_2((T + I) / (L + I))
      *
-     * @param numBytes The number of bytes to fit the tree within
-     * @param bytesPerHash The number of bytes stored in a leaf node, for example 2 * murmur128 will be 256 bits
+     * @param numBytes: The number of bytes to fit the tree within
+     * @param bytesPerHash: The number of bytes stored in a leaf node, for example 2 * murmur128 will be 256 bits
      *                    or 32 bytes
      * @return the estimated depth that will fit within the provided number of bytes
      */

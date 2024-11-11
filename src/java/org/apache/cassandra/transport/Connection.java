@@ -83,6 +83,5 @@ public class Connection
     public interface Tracker
     {
         void addConnection(Channel ch, Connection connection);
-        boolean isRunning();
     }
 }

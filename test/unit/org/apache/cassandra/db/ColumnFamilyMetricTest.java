@@ -42,6 +42,7 @@ import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
 import static org.junit.Assert.*;
 
@@ -60,7 +61,7 @@ public class ColumnFamilyMetricTest
         // late - after the whole system is already running, and some static fields may remain uninitialized
         // OTOH, late initialization of them may have creepy effects (for example NPEs in static initializers)
         // disclaimer: this is not a proper way to fix that
-        StorageService.instance.forceKeyspaceFlush(SchemaConstants.SYSTEM_KEYSPACE_NAME, ColumnFamilyStore.FlushReason.UNIT_TESTS);
+        StorageService.instance.forceKeyspaceFlush(SchemaConstants.SYSTEM_KEYSPACE_NAME);
     }
 
     @Test
@@ -79,7 +80,7 @@ public class ColumnFamilyMetricTest
         {
             applyMutation(cfs.metadata(), String.valueOf(j), ByteBufferUtil.EMPTY_BYTE_BUFFER, FBUtilities.timestampMicros());
         }
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         Collection<SSTableReader> sstables = cfs.getLiveSSTables();
         long size = 0;
         for (SSTableReader reader : sstables)
@@ -107,18 +108,18 @@ public class ColumnFamilyMetricTest
         ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard2");
 
         // This confirms another test/set up did not overflow the histogram
-        store.metric.colUpdateTimeDeltaHistogram.cf.getSnapshot().get999thPercentile();
+        store.metric.colUpdateTimeDeltaHistogram.tableOrKeyspaceHistogram().getSnapshot().get999thPercentile();
 
         applyMutation(store.metadata(), "4242", ByteBufferUtil.bytes("0"), 0);
 
         // The histogram should not have overflowed on the first write
-        store.metric.colUpdateTimeDeltaHistogram.cf.getSnapshot().get999thPercentile();
+        store.metric.colUpdateTimeDeltaHistogram.tableOrKeyspaceHistogram().getSnapshot().get999thPercentile();
 
         // smallest time delta that would overflow the histogram if unfiltered
         applyMutation(store.metadata(), "4242", ByteBufferUtil.bytes("1"), 18165375903307L);
 
         // CASSANDRA-11117 - update with large timestamp delta should not overflow the histogram
-        store.metric.colUpdateTimeDeltaHistogram.cf.getSnapshot().get999thPercentile();
+        store.metric.colUpdateTimeDeltaHistogram.tableOrKeyspaceHistogram().getSnapshot().get999thPercentile();
     }
 
     @Test
@@ -161,7 +162,7 @@ public class ColumnFamilyMetricTest
             applyMutation(store.metadata(), "1", bytes(1), FBUtilities.timestampMicros());
 
             // Flushing first SSTable
-            Util.flush(store);
+            store.forceBlockingFlush(UNIT_TESTS);
 
             long[] estimatedColumnCountHistogram = store.metric.estimatedColumnCountHistogram.getValue();
             assertNumberOfNonZeroValue(estimatedColumnCountHistogram, 1);
@@ -174,7 +175,7 @@ public class ColumnFamilyMetricTest
             applyMutation(store.metadata(), "2", bytes(2), FBUtilities.timestampMicros());
 
             // Flushing second SSTable
-            Util.flush(store);
+            store.forceBlockingFlush(UNIT_TESTS);
 
             estimatedColumnCountHistogram = store.metric.estimatedColumnCountHistogram.getValue();
             assertNumberOfNonZeroValue(estimatedColumnCountHistogram, 1);

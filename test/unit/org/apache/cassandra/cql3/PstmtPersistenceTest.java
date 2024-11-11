@@ -21,9 +21,7 @@ import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
-import org.apache.cassandra.Util;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -34,14 +32,11 @@ import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.SchemaKeyspaceTables;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.transport.Dispatcher;
+import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.MD5Digest;
 
-import static java.util.Collections.emptyMap;
-import static org.apache.cassandra.service.QueryState.forInternalCalls;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.*;
 
 public class PstmtPersistenceTest extends CQLTester
 {
@@ -135,7 +130,7 @@ public class PstmtPersistenceTest extends CQLTester
     {
         QueryProcessor.Prepared prepared = handler.getPrepared(stmtId);
         Assert.assertNotNull(prepared);
-        handler.processPrepared(prepared.statement, forInternalCalls(), options, emptyMap(), Dispatcher.RequestTime.forImmediateExecution());
+        handler.processPrepared(prepared.statement, QueryState.forInternalCalls(), options, Collections.emptyMap(), System.nanoTime());
     }
 
     @Test
@@ -158,7 +153,7 @@ public class PstmtPersistenceTest extends CQLTester
                     prepareStatement("INSERT INTO %s (key, val) VALUES (?, ?) USING TIMESTAMP " + cnt2, clientState);
 
                 // each new prepared statement should have caused an eviction
-                Util.spinAssertEquals("eviction count didn't increase by the expected number", 10L, this::numberOfEvictedStatements, 90, TimeUnit.SECONDS);
+                assertEquals("eviction count didn't increase by the expected number", numberOfEvictedStatements(), 10);
                 assertEquals("Number of statements in table and in cache don't match", numberOfStatementsInMemory(), numberOfStatementsOnDisk());
 
                 return;

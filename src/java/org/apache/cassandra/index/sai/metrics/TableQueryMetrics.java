@@ -18,6 +18,7 @@
 package org.apache.cassandra.index.sai.metrics;
 
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.LongAdder;
 
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Histogram;
@@ -32,8 +33,6 @@ public class TableQueryMetrics extends AbstractMetrics
 {
     public static final String TABLE_QUERY_METRIC_TYPE = "TableQueryMetrics";
 
-    public final Timer postFilteringReadLatency;
-
     private final PerQueryMetrics perQueryMetrics;
 
     private final Counter totalQueryTimeouts;
@@ -41,24 +40,33 @@ public class TableQueryMetrics extends AbstractMetrics
     private final Counter totalRowsFiltered;
     private final Counter totalQueriesCompleted;
 
+    private final Counter sortThenFilterQueriesCompleted;
+    private final Counter filterThenSortQueriesCompleted;
+
+
     public TableQueryMetrics(TableMetadata table)
     {
         super(table.keyspace, table.name, TABLE_QUERY_METRIC_TYPE);
 
         perQueryMetrics = new PerQueryMetrics(table);
 
-        postFilteringReadLatency = Metrics.timer(createMetricName("PostFilteringReadLatency"));
-
         totalPartitionReads = Metrics.counter(createMetricName("TotalPartitionReads"));
         totalRowsFiltered = Metrics.counter(createMetricName("TotalRowsFiltered"));
         totalQueriesCompleted = Metrics.counter(createMetricName("TotalQueriesCompleted"));
         totalQueryTimeouts = Metrics.counter(createMetricName("TotalQueryTimeouts"));
+
+        sortThenFilterQueriesCompleted = Metrics.counter(createMetricName("SortThenFilterQueriesCompleted"));
+        filterThenSortQueriesCompleted = Metrics.counter(createMetricName("FilterThenSortQueriesCompleted"));
     }
 
     public void record(QueryContext queryContext)
     {
-        if (queryContext.queryTimedOut)
+        if (queryContext.queryTimeouts() > 0)
+        {
+            assert queryContext.queryTimeouts() == 1;
+
             totalQueryTimeouts.inc();
+        }
 
         perQueryMetrics.record(queryContext);
     }
@@ -82,20 +90,25 @@ public class TableQueryMetrics extends AbstractMetrics
         private final Histogram rowsFiltered;
 
         /**
-         * Balanced tree index metrics.
+         * BKD index metrics.
          */
-        private final Histogram balancedTreePostingsNumPostings;
+        private final Histogram kdTreePostingsNumPostings;
         /**
-         * Balanced tree index posting lists metrics.
+         * BKD index posting lists metrics.
          */
-        private final Histogram balancedTreePostingsSkips;
-        private final Histogram balancedTreePostingsDecodes;
+        private final Histogram kdTreePostingsSkips;
+        private final Histogram kdTreePostingsDecodes;
+
+        /** Shadowed keys scan metrics **/
+        private final Histogram shadowedKeysScannedHistogram;
 
         /**
          * Trie index posting lists metrics.
          */
         private final Histogram postingsSkips;
         private final Histogram postingsDecodes;
+
+        private final LongAdder annNodesVisited = new LongAdder();
 
         public PerQueryMetrics(TableMetadata table)
         {
@@ -106,30 +119,37 @@ public class TableQueryMetrics extends AbstractMetrics
             sstablesHit = Metrics.histogram(createMetricName("SSTableIndexesHit"), false);
             segmentsHit = Metrics.histogram(createMetricName("IndexSegmentsHit"), false);
 
-            balancedTreePostingsSkips = Metrics.histogram(createMetricName("BalancedTreePostingsSkips"), false);
+            kdTreePostingsSkips = Metrics.histogram(createMetricName("KDTreePostingsSkips"), false);
 
-            balancedTreePostingsNumPostings = Metrics.histogram(createMetricName("BalancedTreePostingsNumPostings"), false);
-            balancedTreePostingsDecodes = Metrics.histogram(createMetricName("BalancedTreePostingsDecodes"), false);
+            kdTreePostingsNumPostings = Metrics.histogram(createMetricName("KDTreePostingsNumPostings"), false);
+            kdTreePostingsDecodes = Metrics.histogram(createMetricName("KDTreePostingsDecodes"), false);
 
             postingsSkips = Metrics.histogram(createMetricName("PostingsSkips"), false);
             postingsDecodes = Metrics.histogram(createMetricName("PostingsDecodes"), false);
 
             partitionReads = Metrics.histogram(createMetricName("PartitionReads"), false);
             rowsFiltered = Metrics.histogram(createMetricName("RowsFiltered"), false);
+
+            shadowedKeysScannedHistogram = Metrics.histogram(createMetricName("ShadowedKeysScannedHistogram"), false);
         }
 
         private void recordStringIndexCacheMetrics(QueryContext events)
         {
-            postingsSkips.update(events.triePostingsSkips);
-            postingsDecodes.update(events.triePostingsDecodes);
+            postingsSkips.update(events.triePostingsSkips());
+            postingsDecodes.update(events.triePostingsDecodes());
         }
 
         private void recordNumericIndexCacheMetrics(QueryContext events)
         {
-            balancedTreePostingsNumPostings.update(events.balancedTreePostingListsHit);
+            kdTreePostingsNumPostings.update(events.bkdPostingListsHit());
 
-            balancedTreePostingsSkips.update(events.balancedTreePostingsSkips);
-            balancedTreePostingsDecodes.update(events.balancedTreePostingsDecodes);
+            kdTreePostingsSkips.update(events.bkdPostingsSkips());
+            kdTreePostingsDecodes.update(events.bkdPostingsDecodes());
+        }
+
+        private void recordAnnIndexMetrics(QueryContext queryContext)
+        {
+            annNodesVisited.add(queryContext.annNodesVisited());
         }
 
         public void record(QueryContext queryContext)
@@ -138,32 +158,57 @@ public class TableQueryMetrics extends AbstractMetrics
             queryLatency.update(totalQueryTimeNs, TimeUnit.NANOSECONDS);
             final long queryLatencyMicros = TimeUnit.NANOSECONDS.toMicros(totalQueryTimeNs);
 
-            sstablesHit.update(queryContext.sstablesHit);
-            segmentsHit.update(queryContext.segmentsHit);
+            final long ssTablesHit = queryContext.sstablesHit();
+            final long segmentsHit = queryContext.segmentsHit();
+            final long partitionsRead = queryContext.partitionsRead();
+            final long rowsFiltered = queryContext.rowsFiltered();
+            final long rowsPreFiltered = queryContext.rowsFiltered();
 
-            partitionReads.update(queryContext.partitionsRead);
-            totalPartitionReads.inc(queryContext.partitionsRead);
+            sstablesHit.update(ssTablesHit);
+            this.segmentsHit.update(segmentsHit);
 
-            rowsFiltered.update(queryContext.rowsFiltered);
-            totalRowsFiltered.inc(queryContext.rowsFiltered);
+            partitionReads.update(partitionsRead);
+            totalPartitionReads.inc(partitionsRead);
+
+            this.rowsFiltered.update(rowsFiltered);
+            totalRowsFiltered.inc(rowsFiltered);
+
+            if (queryContext.filterSortOrder() == QueryContext.FilterSortOrder.SCAN_THEN_FILTER)
+                sortThenFilterQueriesCompleted.inc();
+            else if (queryContext.filterSortOrder() == QueryContext.FilterSortOrder.SEARCH_THEN_ORDER)
+                filterThenSortQueriesCompleted.inc();
 
             if (Tracing.isTracing())
             {
-                Tracing.trace("Index query accessed memtable indexes, {}, and {}, post-filtered {} in {}, and took {} microseconds.",
-                              pluralize(queryContext.sstablesHit, "SSTable index", "es"), pluralize(queryContext.segmentsHit, "segment", "s"),
-                              pluralize(queryContext.rowsFiltered, "row", "s"), pluralize(queryContext.partitionsRead, "partition", "s"),
-                              queryLatencyMicros);
+                if (queryContext.filterSortOrder() == QueryContext.FilterSortOrder.SEARCH_THEN_ORDER)
+                {
+                    Tracing.trace("Index query accessed memtable indexes, {}, and {}, selected {} before ranking, post-filtered {} in {}, and took {} microseconds.",
+                                  pluralize(ssTablesHit, "SSTable index", "es"),
+                                  pluralize(segmentsHit, "segment", "s"),
+                                  pluralize(rowsPreFiltered, "row", "s"),
+                                  pluralize(rowsFiltered, "row", "s"),
+                                  pluralize(partitionsRead, "partition", "s"),
+                                  queryLatencyMicros);
+                }
+                else
+                {
+                    Tracing.trace("Index query accessed memtable indexes, {}, and {}, post-filtered {} in {}, and took {} microseconds.",
+                                  pluralize(ssTablesHit, "SSTable index", "es"),
+                                  pluralize(segmentsHit, "segment", "s"),
+                                  pluralize(rowsFiltered, "row", "s"),
+                                  pluralize(partitionsRead, "partition", "s"),
+                                  queryLatencyMicros);
+                }
             }
 
-            if (queryContext.trieSegmentsHit > 0)
-            {
+            if (queryContext.trieSegmentsHit() > 0)
                 recordStringIndexCacheMetrics(queryContext);
-            }
-
-            if (queryContext.balancedTreeSegmentsHit > 0)
-            {
+            if (queryContext.bkdSegmentsHit() > 0)
                 recordNumericIndexCacheMetrics(queryContext);
-            }
+            if (queryContext.annNodesVisited() > 0)
+                recordAnnIndexMetrics(queryContext);
+
+            shadowedKeysScannedHistogram.update(queryContext.getShadowedPrimaryKeyCount());
 
             totalQueriesCompleted.inc();
         }

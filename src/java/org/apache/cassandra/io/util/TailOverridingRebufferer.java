@@ -22,7 +22,7 @@ import javax.annotation.concurrent.NotThreadSafe;
 
 /**
  * Special rebufferer that replaces the tail of the file (from the specified cutoff point) with the given buffer.
- * <p>
+ *
  * Instantiated once per RandomAccessReader, thread-unsafe.
  * The instances reuse themselves as the BufferHolder to avoid having to return a new object for each rebuffer call.
  * Only one BufferHolder can be active at a time. Calling {@link #rebuffer(long)} before the previously obtained
@@ -68,6 +68,6 @@ public class TailOverridingRebufferer extends WrappingRebufferer
     @Override
     public String toString()
     {
-        return String.format("%s[+%d@%d]:%s", getClass().getSimpleName(), tail.limit(), cutoff, wrapped.toString());
+        return String.format("%s[+%d@%d]:%s", getClass().getSimpleName(), tail.limit(), cutoff, source.toString());
     }
 }

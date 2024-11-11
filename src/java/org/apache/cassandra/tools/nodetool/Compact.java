@@ -47,16 +47,11 @@ public class Compact extends NodeToolCmd
     @Option(title = "end_token", name = {"-et", "--end-token"}, description = "Use -et to specify a token at which compaction range ends (inclusive)")
     private String endToken = EMPTY;
 
-    @Option(title = "partition_key", name = {"--partition"}, description = "String representation of the partition key")
-    private String partitionKey = EMPTY;
-
 
     @Override
     public void execute(NodeProbe probe)
     {
-        final boolean startEndTokenProvided = !(startToken.isEmpty() && endToken.isEmpty());
-        final boolean partitionKeyProvided = !partitionKey.isEmpty();
-        final boolean tokenProvided = startEndTokenProvided || partitionKeyProvided;
+        final boolean tokenProvided = !(startToken.isEmpty() && endToken.isEmpty());
         if (splitOutput && (userDefined || tokenProvided))
         {
             throw new RuntimeException("Invalid option combination: Can not use split-output here");
@@ -85,13 +80,9 @@ public class Compact extends NodeToolCmd
         {
             try
             {
-                if (startEndTokenProvided)
+                if (tokenProvided)
                 {
                     probe.forceKeyspaceCompactionForTokenRange(keyspace, startToken, endToken, tableNames);
-                }
-                else if (partitionKeyProvided)
-                {
-                    probe.forceKeyspaceCompactionForPartitionKey(keyspace, partitionKey, tableNames);
                 }
                 else
                 {

@@ -19,20 +19,19 @@ package org.apache.cassandra.schema;
 
 import com.google.common.collect.ImmutableList;
 
-public class SchemaKeyspaceTables
+public final class SchemaKeyspaceTables
 {
-    public static final String KEYSPACES = "keyspaces";
-    public static final String TABLES = "tables";
-    public static final String COLUMNS = "columns";
-    public static final String COLUMN_MASKS = "column_masks";
-    public static final String DROPPED_COLUMNS = "dropped_columns";
-    public static final String TRIGGERS = "triggers";
-    public static final String VIEWS = "views";
-    public static final String TYPES = "types";
-    public static final String FUNCTIONS = "functions";
-    public static final String AGGREGATES = "aggregates";
     public static final String INDEXES = "indexes";
- 
+    public static final String AGGREGATES = "aggregates";
+    public static final String FUNCTIONS = "functions";
+    public static final String TYPES = "types";
+    public static final String VIEWS = "views";
+    public static final String TRIGGERS = "triggers";
+    public static final String DROPPED_COLUMNS = "dropped_columns";
+    public static final String COLUMNS = "columns";
+    public static final String TABLES = "tables";
+    public static final String KEYSPACES = "keyspaces";
+
     /**
      * The order in this list matters.
      *
@@ -46,8 +45,7 @@ public class SchemaKeyspaceTables
      *
      * See CASSANDRA-12213 for more details.
      */
-    public static final ImmutableList<String> ALL = ImmutableList.of(COLUMN_MASKS,
-                                                                     COLUMNS,
+    public static final ImmutableList<String> ALL = ImmutableList.of(COLUMNS,
                                                                      DROPPED_COLUMNS,
                                                                      TRIGGERS,
                                                                      TYPES,
@@ -58,4 +56,7 @@ public class SchemaKeyspaceTables
                                                                      VIEWS,
                                                                      KEYSPACES);
 
+    private SchemaKeyspaceTables()
+    {
+    }
 }

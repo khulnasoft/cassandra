@@ -17,10 +17,15 @@
  */
 package org.apache.cassandra.db;
 
+import java.util.Map;
 import javax.management.openmbean.*;
 
+import com.google.common.base.Throwables;
 import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.service.snapshot.TableSnapshot;
+import org.apache.cassandra.utils.Pair;
+
+
+
 
 public class SnapshotDetailsTabularData
 {
@@ -29,19 +34,13 @@ public class SnapshotDetailsTabularData
             "Keyspace name",
             "Column family name",
             "True size",
-            "Size on disk",
-            "Creation time",
-            "Expiration time",
-            "Ephemeral"};
+            "Size on disk"};
 
     private static final String[] ITEM_DESCS = new String[]{"snapshot_name",
             "keyspace_name",
             "columnfamily_name",
             "TrueDiskSpaceUsed",
-            "TotalDiskSpaceUsed",
-            "created_at",
-            "expires_at",
-            "ephemeral"};
+            "TotalDiskSpaceUsed"};
 
     private static final String TYPE_NAME = "SnapshotDetails";
 
@@ -57,7 +56,7 @@ public class SnapshotDetailsTabularData
     {
         try
         {
-            ITEM_TYPES = new OpenType[]{ SimpleType.STRING, SimpleType.STRING, SimpleType.STRING, SimpleType.STRING, SimpleType.STRING, SimpleType.STRING, SimpleType.STRING, SimpleType.STRING };
+            ITEM_TYPES = new OpenType[]{ SimpleType.STRING, SimpleType.STRING, SimpleType.STRING, SimpleType.STRING, SimpleType.STRING };
 
             COMPOSITE_TYPE = new CompositeType(TYPE_NAME, ROW_DESC, ITEM_NAMES, ITEM_DESCS, ITEM_TYPES);
 
@@ -65,31 +64,23 @@ public class SnapshotDetailsTabularData
         }
         catch (OpenDataException e)
         {
-            throw new RuntimeException(e);
+            throw Throwables.propagate(e);
         }
     }
 
 
-    public static void from(TableSnapshot details, TabularDataSupport result)
+    public static void from(final String snapshot, final String ks, final String cf, Map.Entry<String, Directories.SnapshotSizeDetails> snapshotDetail, TabularDataSupport result)
     {
         try
         {
-            final String totalSize = FileUtils.stringifyFileSize(details.computeSizeOnDiskBytes());
-            final String liveSize =  FileUtils.stringifyFileSize(details.computeTrueSizeBytes());
-            String createdAt = safeToString(details.getCreatedAt());
-            String expiresAt = safeToString(details.getExpiresAt());
-            String ephemeral = Boolean.toString(details.isEphemeral());
+            final String totalSize = FileUtils.stringifyFileSize(snapshotDetail.getValue().sizeOnDiskBytes);
+            final String liveSize =  FileUtils.stringifyFileSize(snapshotDetail.getValue().dataSizeBytes);
             result.put(new CompositeDataSupport(COMPOSITE_TYPE, ITEM_NAMES,
-                    new Object[]{ details.getTag(), details.getKeyspaceName(), details.getTableName(), liveSize, totalSize, createdAt, expiresAt, ephemeral }));
+                    new Object[]{ snapshot, ks, cf, liveSize, totalSize }));
         }
         catch (OpenDataException e)
         {
             throw new RuntimeException(e);
         }
-    }
-
-    private static String safeToString(Object object)
-    {
-        return object == null ? null : object.toString();
     }
 }

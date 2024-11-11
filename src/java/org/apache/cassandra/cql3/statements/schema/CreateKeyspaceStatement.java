@@ -17,10 +17,12 @@
  */
 package org.apache.cassandra.cql3.statements.schema;
 
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
+import java.util.function.UnaryOperator;
 
 import com.google.common.collect.ImmutableSet;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,54 +32,58 @@ import org.apache.cassandra.auth.DataResource;
 import org.apache.cassandra.auth.FunctionResource;
 import org.apache.cassandra.auth.IResource;
 import org.apache.cassandra.auth.Permission;
-import org.apache.cassandra.cql3.CQLStatement;
-import org.apache.cassandra.db.guardrails.Guardrails;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.statements.RawKeyspaceAwareStatement;
 import org.apache.cassandra.exceptions.AlreadyExistsException;
 import org.apache.cassandra.locator.LocalStrategy;
-import org.apache.cassandra.locator.SimpleStrategy;
-import org.apache.cassandra.schema.*;
+import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.KeyspaceParams.Option;
+import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.Keyspaces.KeyspacesDiff;
+import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.transport.Event.SchemaChange;
 import org.apache.cassandra.transport.Event.SchemaChange.Change;
 
-public final class CreateKeyspaceStatement extends AlterSchemaStatement
+public final class CreateKeyspaceStatement extends AlterSchemaStatement implements AlterSchemaStatement.WithKeyspaceAttributes
 {
     private static final Logger logger = LoggerFactory.getLogger(CreateKeyspaceStatement.class);
 
     private final KeyspaceAttributes attrs;
     private final boolean ifNotExists;
-    private String expandedCql;
 
-    public CreateKeyspaceStatement(String keyspaceName, KeyspaceAttributes attrs, boolean ifNotExists)
+    public CreateKeyspaceStatement(String queryString, String keyspaceName,
+                                   KeyspaceAttributes attrs, boolean ifNotExists)
     {
-        super(keyspaceName);
+        super(queryString, keyspaceName);
         this.attrs = attrs;
         this.ifNotExists = ifNotExists;
     }
 
-    @Override
-    public String cql()
+    public Object getAttribute(String key)
     {
-        if (expandedCql != null)
-            return expandedCql;
-        return super.cql();
+        return attrs.getProperty(key);
     }
 
-    @Override
-    public Keyspaces apply(ClusterMetadata metadata)
+    public void overrideAttribute(String oldKey, String newKey, String newValue)
+    {
+        attrs.removeProperty(oldKey);
+        attrs.addProperty(newKey, newValue);
+    }
+
+    public void overrideAttribute(String oldKey, String newKey, Map<String, String> newValue)
+    {
+        attrs.removeProperty(oldKey);
+        attrs.addProperty(newKey, newValue);
+    }
+
+    public Keyspaces apply(Keyspaces schema)
     {
         attrs.validate();
 
         if (!attrs.hasOption(Option.REPLICATION))
             throw ire("Missing mandatory option '%s'", Option.REPLICATION);
 
-        if (attrs.getReplicationStrategyClass() != null && attrs.getReplicationStrategyClass().equals(SimpleStrategy.class.getSimpleName()))
-            Guardrails.simpleStrategyEnabled.ensureEnabled("SimpleStrategy", state);
-
-        Keyspaces schema = metadata.schema.getKeyspaces();
         if (schema.containsKeyspace(keyspaceName))
         {
             if (ifNotExists)
@@ -86,20 +92,13 @@ public final class CreateKeyspaceStatement extends AlterSchemaStatement
             throw new AlreadyExistsException(keyspaceName);
         }
 
-        KeyspaceMetadata keyspaceMetadata = KeyspaceMetadata.create(keyspaceName, attrs.asNewKeyspaceParams());
+        KeyspaceMetadata keyspace = KeyspaceMetadata.create(keyspaceName, attrs.asNewKeyspaceParams());
+        keyspace.validate();
 
-        if (keyspaceMetadata.params.replication.klass.equals(LocalStrategy.class))
+        if (keyspace.params.replication.klass.equals(LocalStrategy.class))
             throw ire("Unable to use given strategy class: LocalStrategy is reserved for internal use.");
 
-        if (keyspaceMetadata.params.replication.isMeta())
-            throw ire("Can not create a keyspace with MetaReplicationStrategy");
-
-        keyspaceMetadata.params.validate(keyspaceName, state, metadata);
-        keyspaceMetadata.replicationStrategy.validateExpectedOptions(metadata);
-
-        this.expandedCql = keyspaceMetadata.toCqlString(false, true, ifNotExists);
-
-        return schema.withAddedOrUpdated(keyspaceMetadata);
+        return schema.withAddedOrUpdated(keyspace);
     }
 
     SchemaChange schemaChangeEvent(KeyspacesDiff diff)
@@ -130,15 +129,18 @@ public final class CreateKeyspaceStatement extends AlterSchemaStatement
     }
 
     @Override
-    public void validate(ClientState state)
+    Set<String> clientWarnings(KeyspacesDiff diff)
     {
-        super.validate(state);
+        HashSet<String> clientWarnings = new HashSet<>();
+        if (attrs.hasProperty("graph_engine"))
+        {
+            clientWarnings.add("The unsupported graph property 'graph_engine' was ignored.");
+        }
 
-        // Guardrail on number of keyspaces
-        Guardrails.keyspaces.guard(Schema.instance.getUserKeyspaces().size() + 1, keyspaceName, false, state);
+        return clientWarnings;
     }
 
-    public static final class Raw extends CQLStatement.Raw
+    public static final class Raw extends RawKeyspaceAwareStatement<CreateKeyspaceStatement>
     {
         public final String keyspaceName;
         private final KeyspaceAttributes attrs;
@@ -151,9 +153,10 @@ public final class CreateKeyspaceStatement extends AlterSchemaStatement
             this.ifNotExists = ifNotExists;
         }
 
-        public CreateKeyspaceStatement prepare(ClientState state)
+        @Override
+        public CreateKeyspaceStatement prepare(ClientState state, UnaryOperator<String> keyspaceMapper)
         {
-            return new CreateKeyspaceStatement(keyspaceName, attrs, ifNotExists);
+            return new CreateKeyspaceStatement(rawCQLStatement, keyspaceMapper.apply(keyspaceName), attrs, ifNotExists);
         }
     }
 }

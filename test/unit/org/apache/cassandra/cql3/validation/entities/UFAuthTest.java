@@ -226,7 +226,7 @@ public class UFAuthTest extends CQLTester
             functions.add(functionName);
             statements.add(stmt);
         }
-        BatchStatement batch = new BatchStatement(BatchStatement.Type.LOGGED, VariableSpecifications.empty(), statements, Attributes.none());
+        BatchStatement batch = new BatchStatement(null, BatchStatement.Type.LOGGED, VariableSpecifications.empty(), statements, Attributes.none());
         assertUnauthorized(batch, functions);
 
         grantExecuteOnFunction(functions.get(0));
@@ -311,14 +311,14 @@ public class UFAuthTest extends CQLTester
     public void systemFunctionsRequireNoExplicitPrivileges() throws Throwable
     {
         // with terminal arguments, so evaluated at prepare time
-        String cql = String.format("UPDATE %s SET v2 = 0 WHERE k = blob_as_int(int_as_blob(0)) and v1 = 0",
+        String cql = String.format("UPDATE %s SET v2 = 0 WHERE k = blobasint(intasblob(0)) and v1 = 0",
                                    KEYSPACE + "." + currentTable());
         getStatement(cql).authorize(clientState);
 
         // with non-terminal arguments, so evaluated at execution
         String functionName = createSimpleFunction();
         grantExecuteOnFunction(functionName);
-        cql = String.format("UPDATE %s SET v2 = 0 WHERE k = blob_as_int(int_as_blob(%s)) and v1 = 0",
+        cql = String.format("UPDATE %s SET v2 = 0 WHERE k = blobasint(intasblob(%s)) and v1 = 0",
                             KEYSPACE + "." + currentTable(),
                             functionCall(functionName));
         getStatement(cql).authorize(clientState);

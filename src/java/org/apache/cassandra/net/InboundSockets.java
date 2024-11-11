@@ -24,8 +24,6 @@ import java.util.function.Consumer;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
@@ -33,19 +31,16 @@ import io.netty.channel.ChannelPipeline;
 import io.netty.channel.group.ChannelGroup;
 import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.util.concurrent.DefaultEventExecutor;
-import io.netty.util.concurrent.Future; //checkstyle: permit this import
+import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GlobalEventExecutor;
 import io.netty.util.concurrent.PromiseNotifier;
 import io.netty.util.concurrent.SucceededFuture;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.concurrent.AsyncPromise;
-import org.apache.cassandra.utils.concurrent.FutureCombiner;
 
 class InboundSockets
 {
-    private static Logger logger = LoggerFactory.getLogger(InboundSockets.class);
     /**
      * A simple struct to wrap up the components needed for each listening socket.
      */
@@ -102,28 +97,15 @@ class InboundSockets
                     throw new IllegalStateException();
                 binding = InboundConnectionInitiator.bind(settings, connections, pipelineInjector);
             }
-            // isOpen is defined as "listen.isOpen", but this is set AFTER the binding future is set
-            // to make sure the future returned does not complete until listen is set, need a new
-            // future to replicate "Future.map" behavior.
-            AsyncChannelPromise promise = new AsyncChannelPromise(binding.channel());
-            binding.addListener(f -> {
-                if (!f.isSuccess())
-                {
-                    synchronized (this)
-                    {
-                        binding = null;
-                    }
-                    promise.setFailure(f.cause());
-                    return;
-                }
+
+            return binding.addListener(ignore -> {
                 synchronized (this)
                 {
-                    listen = binding.channel();
+                    if (binding.isSuccess())
+                        listen = binding.channel();
                     binding = null;
                 }
-                promise.setSuccess(null);
             });
-            return promise;
         }
 
         /**
@@ -143,7 +125,7 @@ class InboundSockets
                 if (listen != null)
                     closing.add(listen.close());
                 closing.add(connections.close());
-                FutureCombiner.nettySuccessListener(closing)
+                new FutureCombiner(closing)
                        .addListener(future -> {
                            executor.shutdownGracefully();
                            shutdownExecutors.accept(executor);
@@ -220,17 +202,8 @@ class InboundSockets
         InboundConnectionSettings       settings = template.withDefaults();
         InboundConnectionSettings legacySettings = template.withLegacySslStoragePortDefaults();
 
-        if (settings.encryption.legacy_ssl_storage_port_enabled)
+        if (settings.encryption.enable_legacy_ssl_storage_port)
         {
-            // Initialize hot reloading here rather than in org.apache.cassandra.security.SSLFactory.initHotReloading
-            // as the legacySettings.encryption.sslContextFactory is not shared outside the messaging system.
-            // Any SslContexts created will be checked when checkCertFilesForHotReloading is called if initialization
-            // is successful.
-            try {
-                legacySettings.encryption.sslContextFactoryInstance.initHotReloading();
-            } catch (Throwable tr) {
-                logger.warn("Unable to initialize hot reloading for legacy internode socket - continuing disabled", tr);
-            }
             out.add(new InboundSocket(legacySettings));
 
             /*
@@ -251,7 +224,7 @@ class InboundSockets
         for (InboundSocket socket : sockets)
             opening.add(socket.open(pipelineInjector));
 
-        return FutureCombiner.nettySuccessListener(opening);
+        return new FutureCombiner(opening);
     }
 
     public Future<Void> open()
@@ -259,7 +232,7 @@ class InboundSockets
         List<Future<Void>> opening = new ArrayList<>();
         for (InboundSocket socket : sockets)
             opening.add(socket.open());
-        return FutureCombiner.nettySuccessListener(opening);
+        return new FutureCombiner(opening);
     }
 
     public boolean isListening()
@@ -275,7 +248,7 @@ class InboundSockets
         List<Future<Void>> closing = new ArrayList<>();
         for (InboundSocket address : sockets)
             closing.add(address.close(shutdownExecutors));
-        return FutureCombiner.nettySuccessListener(closing);
+        return new FutureCombiner(closing);
     }
     public Future<Void> close()
     {

@@ -20,12 +20,12 @@ package org.apache.cassandra.stress.operations.userdefined;
  * 
  */
 
-import com.datastax.driver.core.BoundStatement;
-import com.datastax.driver.core.ColumnDefinitions;
-import com.datastax.driver.core.DataType;
-import com.datastax.driver.core.LocalDate;
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.ResultSet;
+import com.khulnasoft.driver.core.BoundStatement;
+import com.khulnasoft.driver.core.ColumnDefinitions;
+import com.khulnasoft.driver.core.DataType;
+import com.khulnasoft.driver.core.LocalDate;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.ResultSet;
 import org.antlr.runtime.RecognitionException;
 import org.apache.cassandra.cql3.CQLFragmentParser;
 import org.apache.cassandra.cql3.ColumnIdentifier;
@@ -33,6 +33,7 @@ import org.apache.cassandra.cql3.CqlParser;
 import org.apache.cassandra.cql3.conditions.ColumnCondition;
 import org.apache.cassandra.cql3.statements.ModificationStatement;
 import org.apache.cassandra.db.ConsistencyLevel;
+import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.stress.generate.DistributionFixed;
 import org.apache.cassandra.stress.generate.PartitionGenerator;
 import org.apache.cassandra.stress.generate.Row;
@@ -41,6 +42,7 @@ import org.apache.cassandra.stress.generate.values.Generator;
 import org.apache.cassandra.stress.report.Timer;
 import org.apache.cassandra.stress.settings.StressSettings;
 import org.apache.cassandra.stress.util.JavaDriverClient;
+import org.apache.cassandra.utils.Pair;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -80,15 +82,15 @@ public class CASQuery extends SchemaStatement
             throw new IllegalArgumentException("could not parse update query:" + statement.getQueryString(), e);
         }
 
-        final List<ColumnCondition.Raw> casConditionList = modificationStatement.getConditions();
+        final List<Pair<ColumnIdentifier, ColumnCondition.Raw>> casConditionList = modificationStatement.getConditions();
         List<Integer> casConditionIndex = new ArrayList<>();
 
         boolean first = true;
         StringBuilder casReadConditionQuery = new StringBuilder();
         casReadConditionQuery.append("SELECT ");
-        for (final ColumnCondition.Raw condition : casConditionList)
+        for (final Pair<ColumnIdentifier, ColumnCondition.Raw> condition : casConditionList)
         {
-            if (!condition.containsBindMarkers())
+            if (!condition.right.getValue().getText().equals("?"))
             {
                 //condition uses static value, ignore it
                 continue;
@@ -97,9 +99,8 @@ public class CASQuery extends SchemaStatement
             {
                 casReadConditionQuery.append(", ");
             }
-            ColumnIdentifier column = condition.columnExpression().identifiers().get(0);
-            casReadConditionQuery.append(column.toString());
-            casConditionIndex.add(getDataSpecification().partitionGenerator.indexOf(column.toString()));
+            casReadConditionQuery.append(condition.left.toString());
+            casConditionIndex.add(getDataSpecification().partitionGenerator.indexOf(condition.left.toString()));
             first = false;
         }
         casReadConditionQuery.append(" FROM ").append(tableName).append(" WHERE ");
@@ -171,7 +172,7 @@ public class CASQuery extends SchemaStatement
         ResultSet rs = client.getSession().execute(casReadConditionStatement.bind(keys));
         final Object casDbValues[] = new Object[casConditionArgFreqMap.size()];
 
-        final com.datastax.driver.core.Row casDbValue = rs.one();
+        final com.khulnasoft.driver.core.Row casDbValue = rs.one();
         if (casDbValue != null)
         {
             for (int i = 0; i < casConditionArgFreqMap.size(); i++)
@@ -210,7 +211,7 @@ public class CASQuery extends SchemaStatement
                 Object value = row.get(argumentIndex[i]);
                 if (definitions.getType(i).getName() == DataType.date().getName())
                 {
-                    // the java driver only accepts com.datastax.driver.core.LocalDate for CQL type "DATE"
+                    // the java driver only accepts com.khulnasoft.driver.core.LocalDate for CQL type "DATE"
                     value = LocalDate.fromDaysSinceEpoch((Integer) value);
                 }
 

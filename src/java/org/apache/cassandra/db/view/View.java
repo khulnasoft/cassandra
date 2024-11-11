@@ -35,7 +35,7 @@ import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.schema.ViewMetadata;
-import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.utils.FBUtilities;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -147,7 +147,7 @@ public class View
      * @param nowInSec the current time in seconds (to decide what is live and what isn't).
      * @return {@code true} if {@code baseRow} matches the view filters, {@code false} otherwise.
      */
-    public boolean matchesViewFilter(DecoratedKey partitionKey, Row baseRow, long nowInSec)
+    public boolean matchesViewFilter(DecoratedKey partitionKey, Row baseRow, int nowInSec)
     {
         return getReadQuery().selectsClustering(partitionKey, baseRow.clustering())
             && getSelectStatement().rowFilterForInternalCalls().isSatisfiedBy(baseCfs.metadata(), partitionKey, baseRow, nowInSec);
@@ -169,16 +169,17 @@ public class View
                                                false);
 
             SelectStatement.RawStatement rawSelect =
-                new SelectStatement.RawStatement(new QualifiedName(baseCfs.getKeyspaceName(), baseCfs.name),
+                new SelectStatement.RawStatement(new QualifiedName(baseCfs.keyspace.getName(), baseCfs.name),
                                                  parameters,
                                                  selectClause(),
                                                  definition.whereClause,
+                                                 null,
                                                  null,
                                                  null);
 
             rawSelect.setBindVariables(Collections.emptyList());
 
-            select = rawSelect.prepare(ClientState.forInternalCalls(), true);
+            select = rawSelect.prepare(true, Constants.IDENTITY_STRING_MAPPER);
         }
 
         return select;
@@ -202,7 +203,7 @@ public class View
     ReadQuery getReadQuery()
     {
         if (query == null)
-            query = getSelectStatement().getQuery(QueryOptions.forInternalCalls(Collections.emptyList()), FBUtilities.nowInSeconds());
+            query = getSelectStatement().getQuery(QueryState.forInternalCalls(), QueryOptions.forInternalCalls(Collections.emptyList()), FBUtilities.nowInSeconds());
 
         return query;
     }

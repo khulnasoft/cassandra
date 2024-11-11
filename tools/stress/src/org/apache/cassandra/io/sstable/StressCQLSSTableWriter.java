@@ -36,11 +36,12 @@ import org.apache.commons.lang3.ArrayUtils;
 import org.antlr.runtime.RecognitionException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLFragmentParser;
+import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.ColumnSpecification;
 import org.apache.cassandra.cql3.CqlParser;
-import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.UpdateParameters;
+import org.apache.cassandra.cql3.functions.UDHelper;
 import org.apache.cassandra.cql3.functions.types.TypeCodec;
 import org.apache.cassandra.cql3.statements.UpdateStatement;
 import org.apache.cassandra.cql3.statements.schema.CreateTableStatement;
@@ -61,14 +62,11 @@ import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaTransformations;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.schema.Tables;
+import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.schema.Types;
-import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.JavaDriverUtils;
-
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 
 /**
  * Utility to write SSTables.
@@ -132,7 +130,7 @@ public class StressCQLSSTableWriter implements Closeable
         this.writer = writer;
         this.insert = insert;
         this.boundNames = boundNames;
-        this.typeCodecs = boundNames.stream().map(bn ->  JavaDriverUtils.codecFor(JavaDriverUtils.driverType(bn.type)))
+        this.typeCodecs = boundNames.stream().map(bn ->  UDHelper.codecFor(UDHelper.driverType(bn.type)))
                                              .collect(Collectors.toList());
     }
 
@@ -167,7 +165,7 @@ public class StressCQLSSTableWriter implements Closeable
      * Each provided value type should correspond to the types of the CQL column
      * the value is for. The correspondance between java type and CQL type is the
      * same one than the one documented at
-     * www.datastax.com/drivers/java/2.0/apidocs/com/datastax/driver/core/DataType.Name.html#asJavaClass().
+     * www.khulnasoft.com/drivers/java/2.0/apidocs/com/khulnasoft/driver/core/DataType.Name.html#asJavaClass().
      * <p>
      * If you prefer providing the values directly as binary, use
      * {@link #rawAddRow} instead.
@@ -253,22 +251,21 @@ public class StressCQLSSTableWriter implements Closeable
         if (values.size() != boundNames.size())
             throw new InvalidRequestException(String.format("Invalid number of arguments, expecting %d values but got %d", boundNames.size(), values.size()));
 
+        QueryState state = QueryState.forInternalCalls();
         QueryOptions options = QueryOptions.forInternalCalls(null, values);
-        ClientState state = ClientState.forInternalCalls();
         List<ByteBuffer> keys = insert.buildPartitionKeyNames(options, state);
         SortedSet<Clustering<?>> clusterings = insert.createClustering(options, state);
 
-        long now = currentTimeMillis();
+        long now = System.currentTimeMillis();
         // Note that we asks indexes to not validate values (the last 'false' arg below) because that triggers a 'Keyspace.open'
         // and that forces a lot of initialization that we don't want.
         UpdateParameters params = new UpdateParameters(insert.metadata(),
                                                        insert.updatedColumns(),
-                                                       ClientState.forInternalCalls(),
+                                                       state,
                                                        options,
                                                        insert.getTimestamp(TimeUnit.MILLISECONDS.toMicros(now), options),
                                                        (int) TimeUnit.MILLISECONDS.toSeconds(now),
-                                                       insert.getTimeToLive(options),
-                                                       Collections.emptyMap());
+                                                       insert.getTimeToLive(options), Collections.emptyMap());
 
         try
         {
@@ -354,7 +351,7 @@ public class StressCQLSSTableWriter implements Closeable
         private final List<File> directoryList;
         private ColumnFamilyStore cfs;
 
-        protected SSTableFormat<?, ?> format = null;
+        protected SSTableFormat.Type formatType = null;
 
         private Boolean makeRangeAware = false;
 
@@ -364,7 +361,7 @@ public class StressCQLSSTableWriter implements Closeable
         private IPartitioner partitioner;
 
         private boolean sorted = false;
-        private long bufferSizeInMiB = 128;
+        private long bufferSizeInMB = 128;
 
         protected Builder()
         {
@@ -510,38 +507,19 @@ public class StressCQLSSTableWriter implements Closeable
          * The size of the buffer to use.
          * <p>
          * This defines how much data will be buffered before being written as
-         * a new SSTable. This corresponds roughly to the data size that will have the created
+         * a new SSTable. This correspond roughly to the data size that will have the created
          * sstable.
          * <p>
-         * The default is 128MiB, which should be reasonable for a 1GiB heap. If you experience
+         * The default is 128MB, which should be reasonable for a 1GB heap. If you experience
          * OOM while using the writer, you should lower this value.
          *
-         * @param size the size to use in MiB.
-         * @return this builder.
-         */
-        public Builder withBufferSizeInMiB(int size)
-        {
-            this.bufferSizeInMiB = size;
-            return this;
-        }
-
-        /**
-         * This method is deprecated in favor of the new withBufferSizeInMiB(int size)
-         * The size of the buffer to use.
-         * <p>
-         * This defines how much data will be buffered before being written as
-         * a new SSTable. This corresponds roughly to the data size that will have the created
-         * sstable.
-         * <p>
-         * The default is 128MiB, which should be reasonable for a 1GiB heap. If you experience
-         * OOM while using the writer, you should lower this value.
-         *
-         * @param size the size to use in MiB.
+         * @param size the size to use in MB.
          * @return this builder.
          */
         public Builder withBufferSizeInMB(int size)
         {
-            return withBufferSizeInMiB(size);
+            this.bufferSizeInMB = size;
+            return this;
         }
 
         /**
@@ -557,7 +535,7 @@ public class StressCQLSSTableWriter implements Closeable
          * the rows in order, which is rarely the case. If you can provide the
          * rows in order however, using this sorted might be more efficient.
          * <p>
-         * Note that if used, some option like withBufferSizeInMiB will be ignored.
+         * Note that if used, some option like withBufferSizeInMB will be ignored.
          *
          * @return this builder.
          */
@@ -567,6 +545,7 @@ public class StressCQLSSTableWriter implements Closeable
             return this;
         }
 
+        @SuppressWarnings("resource")
         public StressCQLSSTableWriter build()
         {
             if (directoryList.isEmpty() && cfs == null)
@@ -586,11 +565,11 @@ public class StressCQLSSTableWriter implements Closeable
 
                 UpdateStatement preparedInsert = prepareInsert();
                 AbstractSSTableSimpleWriter writer = sorted
-                                                     ? new SSTableSimpleWriter(cfs.getDirectories().getDirectoryForNewSSTables(), cfs.metadata, preparedInsert.updatedColumns(), -1)
-                                                     : new SSTableSimpleUnsortedWriter(cfs.getDirectories().getDirectoryForNewSSTables(), cfs.metadata, preparedInsert.updatedColumns(), bufferSizeInMiB);
+                                                     ? new SSTableSimpleWriter(cfs.getDirectories().getDirectoryForNewSSTables(), cfs.metadata, preparedInsert.updatedColumns())
+                                                     : new SSTableSimpleUnsortedWriter(cfs.getDirectories().getDirectoryForNewSSTables(), cfs.metadata, preparedInsert.updatedColumns(), bufferSizeInMB);
 
-                if (format != null)
-                    writer.setSSTableFormatType(format);
+                if (formatType != null)
+                    writer.setSSTableFormatType(formatType);
 
                 writer.setRangeAwareWriting(makeRangeAware);
 
@@ -621,32 +600,36 @@ public class StressCQLSSTableWriter implements Closeable
         {
             String keyspace = schemaStatement.keyspace();
 
-            KeyspaceMetadata ksm = KeyspaceMetadata.create(keyspace, KeyspaceParams.simple(1));
-            Schema.instance.submit((metadata) ->  metadata.schema.getKeyspaces().withAddedOrUpdated(ksm));
+            Schema.instance.transform(SchemaTransformations.addKeyspace(KeyspaceMetadata.create(keyspace, KeyspaceParams.simple(1)), true));
 
             Types types = createTypes(keyspace, typeStatements);
-            Schema.instance.submit(SchemaTransformations.addTypes(types, true));
+            Schema.instance.transform(SchemaTransformations.addTypes(types, true));
+
+            KeyspaceMetadata ksm = Schema.instance.getKeyspaceMetadata(keyspace);
 
             TableMetadata tableMetadata = ksm.tables.getNullable(schemaStatement.table());
             if (tableMetadata != null)
                 return Schema.instance.getColumnFamilyStoreInstance(tableMetadata.id);
 
-            ClientState state = ClientState.forInternalCalls();
-            CreateTableStatement statement = schemaStatement.prepare(state);
+            QueryState state = QueryState.forInternalCalls();
+            CreateTableStatement statement = schemaStatement.prepare(state.getClientState());
             statement.validate(state);
 
             //Build metadata with a portable tableId
-            tableMetadata = statement.builder(ksm.types, ksm.userFunctions)
+            tableMetadata = statement.builder(ksm.types)
                                      .id(deterministicId(schemaStatement.keyspace(), schemaStatement.table()))
                                      .build();
-            Tables tables = Tables.of(tableMetadata);
-            KeyspaceMetadata updated = ksm.withSwapped(tables);
-            Schema.instance.submit((metadata) ->  metadata.schema.getKeyspaces().withAddedOrUpdated(updated));
+
             Keyspace.setInitialized();
             Directories directories = new Directories(tableMetadata, directoryList.stream().map(f -> new Directories.DataDirectory(new org.apache.cassandra.io.util.File(f.toPath()))).collect(Collectors.toList()));
 
             Keyspace ks = Keyspace.openWithoutSSTables(keyspace);
-            return ColumnFamilyStore.createColumnFamilyStore(ks, tableMetadata.name, tableMetadata, directories, false, false);
+            ColumnFamilyStore cfs =  ColumnFamilyStore.createColumnFamilyStore(ks, tableMetadata.name, TableMetadataRef.forOfflineTools(tableMetadata), directories, false, false, true);
+
+            ks.initCfCustom(cfs);
+            Schema.instance.transform(SchemaTransformations.addTable(tableMetadata, true));
+
+            return cfs;
         }
 
         private static TableId deterministicId(String keyspace, String table)
@@ -661,8 +644,8 @@ public class StressCQLSSTableWriter implements Closeable
          */
         private UpdateStatement prepareInsert()
         {
-            ClientState state = ClientState.forInternalCalls();
-            CQLStatement cqlStatement = insertStatement.prepare(state);
+            QueryState state = QueryState.forInternalCalls();
+            CQLStatement cqlStatement = insertStatement.prepare(state.getClientState());
             UpdateStatement insert = (UpdateStatement) cqlStatement;
             insert.validate(state);
 

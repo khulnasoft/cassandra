@@ -19,43 +19,79 @@ package org.apache.cassandra.index.sai.cql;
 
 import org.junit.Test;
 
+import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.index.sai.SAITester;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.Assert.assertEquals;
 
 public class MultipleColumnIndexTest extends SAITester
 {
+    // Note: Full testing of multiple map index types is done in the
+    // types/collections/maps/MultiMap*Test tests
+    // This is just testing that the indexes can be created
     @Test
-    public void canCreateMultipleMapIndexesOnSameColumn()
+    public void canCreateMultipleMapIndexesOnSameColumn() throws Throwable
     {
-        // Note: Full testing of multiple map index types is done in the
-        // types/collections/maps/MultiMap*Test tests
-        // This is just testing that the indexes can be created
         createTable("CREATE TABLE %s (pk int, ck int, value map<int,int>, PRIMARY KEY(pk, ck))");
-        createIndex("CREATE INDEX ON %s(KEYS(value)) USING 'sai'");
-        createIndex("CREATE INDEX ON %s(VALUES(value)) USING 'sai'");
-        createIndex("CREATE INDEX ON %s(ENTRIES(value)) USING 'sai'");
+        createIndex("CREATE CUSTOM INDEX ON %s(KEYS(value)) USING 'StorageAttachedIndex'");
+        createIndex("CREATE CUSTOM INDEX ON %s(VALUES(value)) USING 'StorageAttachedIndex'");
+        createIndex("CREATE CUSTOM INDEX ON %s(ENTRIES(value)) USING 'StorageAttachedIndex'");
     }
 
     @Test
-    public void indexNamedAsColumnWillCoExistWithGeneratedIndexNames()
+    public void cannotHaveMultipleLiteralIndexesWithDifferentOptions() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk int, ck int, value text, PRIMARY KEY(pk, ck))");
+        createIndex("CREATE CUSTOM INDEX ON %s(value) USING 'StorageAttachedIndex' WITH OPTIONS = { 'case_sensitive' : true }");
+        assertThatThrownBy(() -> createIndex("CREATE CUSTOM INDEX ON %s(value) USING 'StorageAttachedIndex' WITH OPTIONS = { 'case_sensitive' : false }"))
+                .isInstanceOf(InvalidRequestException.class);
+    }
+
+    @Test
+    public void indexNamedAsColumnWillCoExistWithGeneratedIndexNames() throws Throwable
     {
         createTable("CREATE TABLE %s(id int PRIMARY KEY, text_map map<text, text>)");
-
-        createIndex("CREATE INDEX text_map ON %s(keys(text_map)) USING 'sai'");
-        createIndex("CREATE INDEX ON %s(values(text_map)) USING 'sai'");
-        createIndex("CREATE INDEX ON %s(entries(text_map)) USING 'sai'");
-
         execute("INSERT INTO %s(id, text_map) values (1, {'k1':'v1', 'k2':'v2'})");
         execute("INSERT INTO %s(id, text_map) values (2, {'k1':'v1', 'k3':'v3'})");
         execute("INSERT INTO %s(id, text_map) values (3, {'k4':'v4', 'k5':'v5'})");
 
-        assertEquals(1, execute("SELECT * FROM %s WHERE text_map['k1'] = 'v1' AND text_map['k2'] = 'v2'").size());
-        assertEquals(2, execute("SELECT * FROM %s WHERE text_map CONTAINS 'v1'").size());
-        assertEquals(2, execute("SELECT * FROM %s WHERE text_map CONTAINS KEY 'k1'").size());
-        assertEquals(1, execute("SELECT * FROM %s WHERE text_map CONTAINS KEY 'k1' AND text_map CONTAINS KEY 'k2'").size());
-        assertEquals(2, execute("SELECT * FROM %s WHERE text_map['k1'] = 'v1' AND text_map CONTAINS KEY 'k1' AND text_map CONTAINS 'v1'").size());
-        assertEquals(1, execute("SELECT * FROM %s WHERE text_map['k1'] = 'v1' AND text_map CONTAINS KEY 'k1' AND text_map CONTAINS KEY 'k2' AND text_map CONTAINS 'v1'").size());
-        assertEquals(0, execute("SELECT * FROM %s WHERE text_map['k1'] = 'v1' AND text_map CONTAINS KEY 'k1' AND text_map CONTAINS KEY 'k4'").size());
+        flush();
+
+        createIndex("CREATE CUSTOM INDEX text_map ON %s(keys(text_map)) USING 'StorageAttachedIndex'");
+        createIndex("CREATE CUSTOM INDEX ON %s(values(text_map)) USING 'StorageAttachedIndex'");
+        createIndex("CREATE CUSTOM INDEX ON %s(entries(text_map)) USING 'StorageAttachedIndex'");
+
+        beforeAndAfterFlush(() -> {
+            assertEquals(1, execute("SELECT * FROM %s WHERE text_map['k1'] = 'v1' AND text_map['k2'] = 'v2'").size());
+            assertEquals(2, execute("SELECT * FROM %s WHERE text_map CONTAINS 'v1'").size());
+            assertEquals(2, execute("SELECT * FROM %s WHERE text_map CONTAINS 'v1' AND text_map NOT CONTAINS 'v5'").size());
+            assertEquals(2, execute("SELECT * FROM %s WHERE text_map CONTAINS 'v1' AND text_map NOT CONTAINS KEY 'k5'").size());
+            assertEquals(1, execute("SELECT * FROM %s WHERE text_map CONTAINS 'v1' AND text_map['k2'] != 'v2'").size());
+
+
+            assertEquals(2, execute("SELECT * FROM %s WHERE text_map CONTAINS KEY 'k1'").size());
+            assertEquals(1, execute("SELECT * FROM %s WHERE text_map CONTAINS KEY 'k1' AND text_map CONTAINS 'v2'").size());
+            assertEquals(1, execute("SELECT * FROM %s WHERE text_map CONTAINS KEY 'k1' AND text_map CONTAINS KEY 'k2'").size());
+            assertEquals(1, execute("SELECT * FROM %s WHERE text_map CONTAINS KEY 'k1' AND text_map NOT CONTAINS 'v3'").size());
+            assertEquals(1, execute("SELECT * FROM %s WHERE text_map CONTAINS KEY 'k1' AND text_map NOT CONTAINS KEY 'k3'").size());
+            assertEquals(1, execute("SELECT * FROM %s WHERE text_map CONTAINS KEY 'k1' AND text_map['k2'] != 'v2'").size());
+
+            assertEquals(2, execute("SELECT * FROM %s WHERE text_map['k1'] = 'v1' AND text_map CONTAINS KEY 'k1' AND text_map CONTAINS 'v1'").size());
+            assertEquals(2, execute("SELECT * FROM %s WHERE text_map['k1'] = 'v1' AND text_map CONTAINS KEY 'k1' AND text_map CONTAINS 'v1' AND text_map NOT CONTAINS 'v8'").size());
+            assertEquals(1, execute("SELECT * FROM %s WHERE text_map['k1'] = 'v1' AND text_map CONTAINS KEY 'k1' AND text_map CONTAINS 'v1' AND text_map NOT CONTAINS 'v3'").size());
+            assertEquals(1, execute("SELECT * FROM %s WHERE text_map['k1'] = 'v1' AND text_map CONTAINS KEY 'k1' AND text_map CONTAINS KEY 'k2' AND text_map CONTAINS 'v1'").size());
+            assertEquals(1, execute("SELECT * FROM %s WHERE text_map['k1'] = 'v1' AND text_map CONTAINS KEY 'k1' AND text_map CONTAINS KEY 'k2' AND text_map NOT CONTAINS 'v3'").size());
+            assertEquals(0, execute("SELECT * FROM %s WHERE text_map['k1'] = 'v1' AND text_map CONTAINS KEY 'k1' AND text_map CONTAINS KEY 'k4'").size());
+            assertEquals(1, execute("SELECT * FROM %s WHERE text_map['k1'] = 'v1' AND text_map CONTAINS KEY 'k1' AND text_map NOT CONTAINS KEY 'k2'").size());
+            assertEquals(0, execute("SELECT * FROM %s WHERE text_map['k1'] = 'v1' AND text_map CONTAINS KEY 'k1' AND text_map CONTAINS KEY 'k4' AND text_map NOT CONTAINS KEY 'k2'").size());
+
+            assertEquals(1, execute("SELECT * FROM %s WHERE text_map['k1'] != 'v2' AND text_map['k2'] = 'v2'").size());
+            assertEquals(2, execute("SELECT * FROM %s WHERE text_map['k1'] != 'v2' AND text_map['k2'] != 'v2'").size());
+            assertEquals(2, execute("SELECT * FROM %s WHERE text_map['k1'] != 'v2' AND text_map NOT CONTAINS 'v3'").size());
+            assertEquals(1, execute("SELECT * FROM %s WHERE text_map['k1'] != 'v2' AND text_map NOT CONTAINS 'v3' AND text_map NOT CONTAINS 'v5'").size());
+            assertEquals(2, execute("SELECT * FROM %s WHERE text_map['k1'] != 'v2' AND text_map NOT CONTAINS KEY 'k3'").size());
+            assertEquals(1, execute("SELECT * FROM %s WHERE text_map['k1'] != 'v2' AND text_map NOT CONTAINS KEY 'k3' AND text_map NOT CONTAINS KEY 'k5'").size());
+        });
     }
 }

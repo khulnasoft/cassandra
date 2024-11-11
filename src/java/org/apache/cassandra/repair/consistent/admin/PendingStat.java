@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import javax.management.openmbean.ArrayType;
 import javax.management.openmbean.CompositeData;
 import javax.management.openmbean.CompositeDataSupport;
@@ -31,11 +32,13 @@ import javax.management.openmbean.OpenDataException;
 import javax.management.openmbean.OpenType;
 import javax.management.openmbean.SimpleType;
 
+import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Throwables;
+import com.google.common.collect.Iterables;
 
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.utils.TimeUUID;
 
 public class PendingStat
 {
@@ -54,7 +57,7 @@ public class PendingStat
         }
         catch (OpenDataException e)
         {
-            throw new RuntimeException(e);
+            throw Throwables.propagate(e);
         }
     }
 
@@ -62,9 +65,9 @@ public class PendingStat
 
     public final long dataSize;
     public final int numSSTables;
-    public final Set<TimeUUID> sessions;
+    public final Set<UUID> sessions;
 
-    public PendingStat(long dataSize, int numSSTables, Set<TimeUUID> sessions)
+    public PendingStat(long dataSize, int numSSTables, Set<UUID> sessions)
     {
         this.dataSize = dataSize;
         this.numSSTables = numSSTables;
@@ -83,7 +86,7 @@ public class PendingStat
         values.put(COMPOSITE_NAMES[1], numSSTables);
         String[] sessionIds = new String[sessions.size()];
         int idx = 0;
-        for (TimeUUID session : sessions)
+        for (UUID session : sessions)
             sessionIds[idx++] = session.toString();
         values.put(COMPOSITE_NAMES[2], sessionIds);
 
@@ -93,7 +96,7 @@ public class PendingStat
         }
         catch (OpenDataException e)
         {
-            throw new RuntimeException(e);
+            throw Throwables.propagate(e);
         }
     }
 
@@ -101,9 +104,9 @@ public class PendingStat
     {
         Preconditions.checkArgument(cd.getCompositeType().equals(COMPOSITE_TYPE));
         Object[] values = cd.getAll(COMPOSITE_NAMES);
-        Set<TimeUUID> sessions = new HashSet<>();
+        Set<UUID> sessions = new HashSet<>();
         for (String session : (String[]) values[2])
-            sessions.add(TimeUUID.fromString(session));
+            sessions.add(UUID.fromString(session));
         return new PendingStat((long) values[0], (int) values[1], sessions);
     }
 
@@ -111,11 +114,11 @@ public class PendingStat
     {
         public long dataSize = 0;
         public int numSSTables = 0;
-        public Set<TimeUUID> sessions = new HashSet<>();
+        public Set<UUID> sessions = new HashSet<>();
 
         public Builder addSSTable(SSTableReader sstable)
         {
-            TimeUUID sessionID = sstable.getPendingRepair();
+            UUID sessionID = sstable.getPendingRepair();
             if (sessionID == null)
                 return this;
             dataSize += sstable.onDiskLength();

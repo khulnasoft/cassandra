@@ -19,7 +19,9 @@
 package org.apache.cassandra.cql3.functions;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 
+import org.apache.cassandra.cql3.functions.types.TypeCodec;
 import org.apache.cassandra.transport.ProtocolVersion;
 
 /**
@@ -30,62 +32,78 @@ import org.apache.cassandra.transport.ProtocolVersion;
  */
 public abstract class JavaUDF
 {
-    private final UDFDataType returnType;
+    private final TypeCodec<Object> returnCodec;
+    private final TypeCodec<Object>[] argCodecs;
+
     protected final UDFContext udfContext;
 
-    protected JavaUDF(UDFDataType returnType, UDFContext udfContext)
+    protected JavaUDF(TypeCodec<Object> returnCodec, TypeCodec<Object>[] argCodecs, UDFContext udfContext)
     {
-        this.returnType = returnType;
+        this.returnCodec = returnCodec;
+        this.argCodecs = argCodecs;
         this.udfContext = udfContext;
     }
 
-    protected abstract ByteBuffer executeImpl(Arguments arguments);
+    protected abstract ByteBuffer executeImpl(ProtocolVersion protocolVersion, List<ByteBuffer> params);
 
-    protected abstract Object executeAggregateImpl(Object state, Arguments arguments);
+    protected abstract Object executeAggregateImpl(ProtocolVersion protocolVersion, Object firstParam, List<ByteBuffer> params);
 
-    //~///////////////////////////////////////////////////////////////////////////////////////////
-    // The decompose method is overloaded to avoid boxing of the result if it is a primitive type.
-    //~///////////////////////////////////////////////////////////////////////////////////////////
-
-    // do not remove - used by generated Java UDFs
-    protected final ByteBuffer decompose(ProtocolVersion protocolVersion, Object value)
+    protected Object compose(ProtocolVersion protocolVersion, int argIndex, ByteBuffer value)
     {
-        return returnType.decompose(protocolVersion, value);
+        return UDFunction.compose(argCodecs, protocolVersion, argIndex, value);
+    }
+
+    protected ByteBuffer decompose(ProtocolVersion protocolVersion, Object value)
+    {
+        return UDFunction.decompose(returnCodec, protocolVersion, value);
     }
 
     // do not remove - used by generated Java UDFs
-    protected final ByteBuffer decompose(ProtocolVersion protocolVersion, byte value)
+    protected float compose_float(ProtocolVersion protocolVersion, int argIndex, ByteBuffer value)
     {
-        return returnType.decompose(protocolVersion, value);
+        assert value != null && value.remaining() > 0;
+        return (float) UDHelper.deserialize(TypeCodec.cfloat(), protocolVersion, value);
     }
 
     // do not remove - used by generated Java UDFs
-    protected final ByteBuffer decompose(ProtocolVersion protocolVersion, short value)
+    protected double compose_double(ProtocolVersion protocolVersion, int argIndex, ByteBuffer value)
     {
-        return returnType.decompose(protocolVersion, value);
+        assert value != null && value.remaining() > 0;
+        return (double) UDHelper.deserialize(TypeCodec.cdouble(), protocolVersion, value);
     }
 
     // do not remove - used by generated Java UDFs
-    protected final ByteBuffer decompose(ProtocolVersion protocolVersion, int value)
+    protected byte compose_byte(ProtocolVersion protocolVersion, int argIndex, ByteBuffer value)
     {
-        return returnType.decompose(protocolVersion, value);
+        assert value != null && value.remaining() > 0;
+        return (byte) UDHelper.deserialize(TypeCodec.tinyInt(), protocolVersion, value);
     }
 
     // do not remove - used by generated Java UDFs
-    protected final ByteBuffer decompose(ProtocolVersion protocolVersion, long value)
+    protected short compose_short(ProtocolVersion protocolVersion, int argIndex, ByteBuffer value)
     {
-        return returnType.decompose(protocolVersion, value);
+        assert value != null && value.remaining() > 0;
+        return (short) UDHelper.deserialize(TypeCodec.smallInt(), protocolVersion, value);
     }
 
     // do not remove - used by generated Java UDFs
-    protected final ByteBuffer decompose(ProtocolVersion protocolVersion, float value)
+    protected int compose_int(ProtocolVersion protocolVersion, int argIndex, ByteBuffer value)
     {
-        return returnType.decompose(protocolVersion, value);
+        assert value != null && value.remaining() > 0;
+        return (int) UDHelper.deserialize(TypeCodec.cint(), protocolVersion, value);
     }
 
     // do not remove - used by generated Java UDFs
-    protected final ByteBuffer decompose(ProtocolVersion protocolVersion, double value)
+    protected long compose_long(ProtocolVersion protocolVersion, int argIndex, ByteBuffer value)
     {
-        return returnType.decompose(protocolVersion, value);
+        assert value != null && value.remaining() > 0;
+        return (long) UDHelper.deserialize(TypeCodec.bigint(), protocolVersion, value);
+    }
+
+    // do not remove - used by generated Java UDFs
+    protected boolean compose_boolean(ProtocolVersion protocolVersion, int argIndex, ByteBuffer value)
+    {
+        assert value != null && value.remaining() > 0;
+        return (boolean) UDHelper.deserialize(TypeCodec.cboolean(), protocolVersion, value);
     }
 }

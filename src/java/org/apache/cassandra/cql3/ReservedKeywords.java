@@ -30,8 +30,6 @@ import com.google.common.collect.ImmutableSet;
 
 import org.apache.cassandra.exceptions.ConfigurationException;
 
-import static org.apache.cassandra.utils.LocalizeString.toUpperCaseLocalized;
-
 public final class ReservedKeywords
 {
     private static final String FILE_NAME = "reserved_keywords.txt";
@@ -60,6 +58,6 @@ public final class ReservedKeywords
 
     public static boolean isReserved(String text)
     {
-        return reservedKeywords.contains(toUpperCaseLocalized(text));
+        return reservedKeywords.contains(text.toUpperCase());
     }
 }

@@ -24,6 +24,7 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.index.sasi.plan.Expression.Bound;
 
 public class ExpressionTest
 {

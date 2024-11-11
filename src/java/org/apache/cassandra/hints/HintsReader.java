@@ -21,24 +21,18 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Iterator;
-
 import javax.annotation.Nullable;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.primitives.Ints;
 import com.google.common.util.concurrent.RateLimiter;
-
-import org.apache.cassandra.exceptions.CoordinatorBehindException;
-import org.apache.cassandra.io.util.File;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.exceptions.UnknownTableException;
 import org.apache.cassandra.io.FSReadError;
-import org.apache.cassandra.schema.TableId;
-import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.utils.AbstractIterator;
-
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 
 /**
  * A paged non-compressed hints reader that provides two iterators:
@@ -55,7 +49,7 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
 {
     private static final Logger logger = LoggerFactory.getLogger(HintsReader.class);
 
-    // don't read more than 512 KiB of hints at a time.
+    // don't read more than 512 KB of hints at a time.
     private static final int PAGE_SIZE = 512 << 10;
 
     private final HintsDescriptor descriptor;
@@ -74,12 +68,15 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
         this.rateLimiter = rateLimiter;
     }
 
+    @SuppressWarnings("resource") // HintsReader owns input
     static HintsReader open(File file, RateLimiter rateLimiter)
     {
         ChecksummedDataInput reader = ChecksummedDataInput.open(file);
         try
         {
             HintsDescriptor descriptor = HintsDescriptor.deserialize(reader);
+            descriptor.setDataSize(file.length());
+            descriptor.loadStatsComponent(file.toPath().getParent());
             if (descriptor.isCompressed())
             {
                 // since the hints descriptor is always uncompressed, it needs to be read with the normal ChecksummedDataInput.
@@ -97,6 +94,7 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
         }
     }
 
+    @VisibleForTesting
     static HintsReader open(File file)
     {
         return open(file, null);
@@ -149,6 +147,7 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
 
     final class PagesIterator extends AbstractIterator<Page>
     {
+        @SuppressWarnings("resource")
         protected Page computeNext()
         {
             input.tryUncacheRead();
@@ -166,7 +165,7 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
     final class HintsIterator extends AbstractIterator<Hint>
     {
         private final InputPosition offset;
-        private final long now = currentTimeMillis();
+        private final long now = System.currentTimeMillis();
 
         HintsIterator(InputPosition offset)
         {
@@ -241,13 +240,12 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
                 hint = Hint.serializer.deserializeIfLive(input, now, size, descriptor.messagingVersion());
                 input.checkLimit(0);
             }
-            catch (UnknownTableException | CoordinatorBehindException e)
+            catch (UnknownTableException e)
             {
-                TableId id = ((UnknownTableException) (e instanceof CoordinatorBehindException ? e.getCause() : e)).id;
                 logger.warn("Failed to read a hint for {}: {} - table with id {} is unknown in file {}",
-                            StorageService.instance.getEndpointForHostId(descriptor.hostId),
+                            HintsEndpointProvider.instance.endpointForHost(descriptor.hostId),
                             descriptor.hostId,
-                            id,
+                            e.id,
                             descriptor.fileName());
                 input.skipBytes(Ints.checkedCast(size - input.bytesPastLimit()));
 
@@ -259,7 +257,7 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
 
             // log a warning and skip the corrupted entry
             logger.warn("Failed to read a hint for {}: {} - digest mismatch for hint at position {} in file {}",
-                        StorageService.instance.getEndpointForHostId(descriptor.hostId),
+                        HintsEndpointProvider.instance.endpointForHost(descriptor.hostId),
                         descriptor.hostId,
                         input.getPosition() - size - 4,
                         descriptor.fileName());
@@ -273,7 +271,7 @@ class HintsReader implements AutoCloseable, Iterable<HintsReader.Page>
     final class BuffersIterator extends AbstractIterator<ByteBuffer>
     {
         private final InputPosition offset;
-        private final long now = currentTimeMillis();
+        private final long now = System.currentTimeMillis();
 
         BuffersIterator(InputPosition offset)
         {

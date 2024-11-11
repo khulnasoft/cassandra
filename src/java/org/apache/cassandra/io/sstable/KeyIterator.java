@@ -19,27 +19,41 @@ package org.apache.cassandra.io.sstable;
 
 import java.io.IOException;
 import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.dht.IPartitioner;
+import org.apache.cassandra.io.sstable.format.PartitionIndexIterator;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.utils.AbstractIterator;
 import org.apache.cassandra.utils.CloseableIterator;
 
+// TODO STAR-247: Implement a unit test
 public class KeyIterator extends AbstractIterator<DecoratedKey> implements CloseableIterator<DecoratedKey>
 {
     private final IPartitioner partitioner;
-    private final KeyReader it;
+    private final PartitionIndexIterator it;
     private final ReadWriteLock fileAccessLock;
     private final long totalBytes;
 
     private boolean initialized = false;
 
-    public KeyIterator(KeyReader it, IPartitioner partitioner, long totalBytes, ReadWriteLock fileAccessLock)
+    public KeyIterator(PartitionIndexIterator it, IPartitioner partitioner, long totalBytes, ReadWriteLock fileAccessLock)
     {
         this.it = it;
         this.partitioner = partitioner;
         this.totalBytes = totalBytes;
         this.fileAccessLock = fileAccessLock;
+    }
+
+    public KeyIterator(PartitionIndexIterator it, IPartitioner partitioner, long totalBytes)
+    {
+        this(it, partitioner, totalBytes, null);
+    }
+
+    public static KeyIterator forSSTable(SSTableReader ssTableReader) throws IOException
+    {
+        return new KeyIterator(ssTableReader.allKeysIterator(), ssTableReader.getPartitioner(), ssTableReader.uncompressedLength(), new ReentrantReadWriteLock());
     }
 
     protected DecoratedKey computeNext()
@@ -107,5 +121,4 @@ public class KeyIterator extends AbstractIterator<DecoratedKey> implements Close
     {
         return totalBytes;
     }
-
 }

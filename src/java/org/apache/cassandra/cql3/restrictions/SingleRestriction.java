@@ -17,62 +17,96 @@
  */
 package org.apache.cassandra.cql3.restrictions;
 
-import java.util.List;
-
-import com.google.common.collect.RangeSet;
-
 import org.apache.cassandra.cql3.QueryOptions;
-import org.apache.cassandra.index.Index;
+import org.apache.cassandra.cql3.statements.Bound;
+import org.apache.cassandra.db.MultiClusteringBuilder;
+import org.apache.cassandra.index.IndexRegistry;
 
 /**
  * A single restriction/clause on one or multiple column.
  */
 public interface SingleRestriction extends Restriction
 {
-    /**
-     * Checks if the restriction applies to the column level.
-     * @return {@code true} if this restriction applies to the column level, {@code false} otherwise.
-     */
-    boolean isColumnLevel();
+    public default boolean isSlice()
+    {
+        return false;
+    }
+
+    public default boolean isEQ()
+    {
+        return false;
+    }
+
+    public default boolean isAnalyzerMatches()
+    {
+        return false;
+    }
+
+    public default boolean isLIKE()
+    {
+        return false;
+    }
+
+    public default boolean isIN()
+    {
+        return false;
+    }
+
+    public default boolean isContains()
+    {
+        return false;
+    }
+
+    public default boolean isNotNull()
+    {
+        return false;
+    }
+
+    public default boolean isMultiColumn()
+    {
+        return false;
+    }
+
+    public default boolean isIndexBasedOrdering()
+    {
+        return false;
+    }
+
+    public default boolean isBoundedAnn()
+    {
+        return false;
+    }
 
     /**
-     * Checks if this restriction uses an {@code EQ} operator.
-     * @return {@code true} if this restriction uses an {@code EQ} operator, {@code false} otherwise.
+     * Checks if the specified bound is set or not.
+     * @param b the bound type
+     * @return <code>true</code> if the specified bound is set, <code>false</code> otherwise
      */
-    boolean isEQ();
+    public default boolean hasBound(Bound b)
+    {
+        return true;
+    }
 
     /**
-     * Checks if this restriction uses an {@code IN} operator.
-     * @return {@code true} if this restriction uses an {@code IN} operator, {@code false} otherwise.
+     * Checks if the specified bound is inclusive or not.
+     * @param b the bound type
+     * @return <code>true</code> if the specified bound is inclusive, <code>false</code> otherwise
      */
-    boolean isIN();
+    public default boolean isInclusive(Bound b)
+    {
+        return true;
+    }
 
     /**
-     * Checks if this restriction uses an {@code ANN} operator.
-     * @return {@code true} if this restriction uses an {@code ANN} operator, {@code false} otherwise.
-     */
-    boolean isANN();
-
-    /**
-     * Checks if this restriction is selecting a range of values.
-     * @return {@code true} if this restriction is selecting a range of values, {@code false} otherwise.
-     */
-    boolean isSlice();
-
-    /**
-     * Checks if this restriction is a multi-column restriction.
-     * @return {@code true} if this restriction is a multi-column restriction, {@code false} otherwise.
-     */
-    boolean isMultiColumn();
-
-    /**
-     * Check if this type of restriction is supported by the specified index.
+     * Checks if this restriction shouldn't be merged with other restrictions.
      *
-     * @param index the secondary index
-     * @return <code>true</code> this type of restriction is supported by the specified index,
-     * <code>false</code> otherwise.
+     * @param indexRegistry the index registry
+     * @return {@code true} if this shouldn't be merged with other restrictions
      */
-    boolean isSupportedBy(Index index);
+    default boolean skipMerge(IndexRegistry indexRegistry)
+    {
+        return false;
+    }
 
     /**
      * Merges this restriction with the specified one.
@@ -81,29 +115,30 @@ public interface SingleRestriction extends Restriction
      * The reason behind this choice is that it allow a great flexibility in the way the merging can done while
      * preventing any side effect.</p>
      *
-     * @param other the restriction to merge into this one
+     * @param otherRestriction the restriction to merge into this one
      * @return the restriction resulting of the merge
      */
-    default SingleRestriction mergeWith(SingleRestriction other)
+    public SingleRestriction mergeWith(SingleRestriction otherRestriction);
+
+    /**
+     * Appends the values of this <code>SingleRestriction</code> to the specified builder.
+     *
+     * @param builder the <code>MultiCBuilder</code> to append to.
+     * @param options the query options
+     * @return the <code>MultiCBuilder</code>
+     */
+    public MultiClusteringBuilder appendTo(MultiClusteringBuilder builder, QueryOptions options);
+
+    /**
+     * Appends the values of the <code>SingleRestriction</code> for the specified bound to the specified builder.
+     *
+     * @param builder the <code>MultiCBuilder</code> to append to.
+     * @param bound the bound
+     * @param options the query options
+     * @return the <code>MultiCBuilder</code>
+     */
+    public default MultiClusteringBuilder appendBoundTo(MultiClusteringBuilder builder, Bound bound, QueryOptions options)
     {
-        return new MergedRestriction(this, (SimpleRestriction) other);
+        return appendTo(builder, options);
     }
-
-    /**
-     * Returns the values selected by this restriction (or by the intersection of merged restrictions) if the operator is an {@code EQ} or an {@code IN}.
-     *
-     * @param options the query options
-     * @return the values selected by this restriction (or by the intersection of merged restrictions) if the operator is an {@code EQ} or an {@code IN}.
-     * @throws UnsupportedOperationException if the operator is not an {@code EQ} or an {@code IN}.
-     */
-    List<ClusteringElements> values(QueryOptions options);
-
-    /**
-     * Removes the ranges of values not selected by this restriction from the specified {@code RangeSet} if the operator is an operator selecting ranges of data.
-     *
-     * @param rangeSet the range set to add to
-     * @param options the query options
-     * @throws UnsupportedOperationException if the operator is not an operator selecting ranges of data.
-     */
-    void restrict(RangeSet<ClusteringElements> rangeSet, QueryOptions options);
 }

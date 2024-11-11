@@ -19,7 +19,6 @@
 package org.apache.cassandra.db;
 
 import java.nio.ByteBuffer;
-import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -29,7 +28,10 @@ import com.google.common.annotations.VisibleForTesting;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.marshal.UserType;
-import org.apache.cassandra.schema.*;
+import org.apache.cassandra.schema.KeyspaceMetadata;
+import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.schema.Types;
+import org.apache.cassandra.schema.ViewMetadata;
 
 /**
  * Helper methods to represent TableMetadata and related objects in CQL format
@@ -47,10 +49,37 @@ public class SchemaCQLHelper
         // Types come first, as table can't be created without them
         Stream<String> udts = SchemaCQLHelper.getUserTypesAsCQL(metadata, keyspaceMetadata.types, true);
 
-        Stream<String> tableMatadata = Stream.of(SchemaCQLHelper.getTableMetadataAsCQL(metadata, keyspaceMetadata));
+        return Stream.concat(udts,
+                             reCreateStatements(metadata,
+                                                true,
+                                                true,
+                                                true,
+                                                true,
+                                                keyspaceMetadata));
+    }
 
-        Stream<String> indexes = SchemaCQLHelper.getIndexesAsCQL(metadata, true);
-        return Stream.of(udts, tableMatadata, indexes).flatMap(Function.identity());
+    public static Stream<String> reCreateStatements(TableMetadata metadata,
+                                                    boolean includeDroppedColumns,
+                                                    boolean internals,
+                                                    boolean ifNotExists,
+                                                    boolean includeIndexes,
+                                                    KeyspaceMetadata keyspaceMetadata)
+    {
+        // Record re-create schema statements
+        Stream<String> r = Stream.of(metadata)
+                                         .map((tm) -> SchemaCQLHelper.getTableMetadataAsCQL(tm,
+                                                                                            includeDroppedColumns,
+                                                                                            internals,
+                                                                                            ifNotExists,
+                                                                                            keyspaceMetadata));
+
+        if (includeIndexes)
+        {
+            // Indexes applied as last, since otherwise they may interfere with column drops / re-additions
+            r = Stream.concat(r, SchemaCQLHelper.getIndexesAsCQL(metadata, ifNotExists));
+        }
+
+        return r;
     }
 
     /**
@@ -60,24 +89,20 @@ public class SchemaCQLHelper
      * that will not contain everything needed for user types.
      */
     @VisibleForTesting
-    public static String getTableMetadataAsCQL(TableMetadata metadata, KeyspaceMetadata keyspaceMetadata)
+    public static String getTableMetadataAsCQL(TableMetadata metadata,
+                                               boolean includeDroppedColumns,
+                                               boolean internals,
+                                               boolean ifNotExists,
+                                               KeyspaceMetadata keyspaceMetadata)
     {
         if (metadata.isView())
         {
             ViewMetadata viewMetadata = keyspaceMetadata.views.get(metadata.name).orElse(null);
             assert viewMetadata != null;
-            /*
-             * first argument(withInternals) indicates to include table metadata id and clustering columns order,
-             * second argument(ifNotExists) instructs to include IF NOT EXISTS statement within creation statements.
-             */
-            return viewMetadata.toCqlString(true, true, true);
+            return viewMetadata.toCqlString(internals, ifNotExists);
         }
 
-        /*
-         * With addition to withInternals and ifNotExists arguments, includeDroppedColumns will include dropped
-         * columns as ALTER TABLE statements appended into the snapshot.
-         */
-        return metadata.toCqlString(true, true, true, true);
+        return metadata.toCqlString(includeDroppedColumns, internals, ifNotExists);
     }
 
     /**
@@ -122,7 +147,7 @@ public class SchemaCQLHelper
          */
         return metadata.getReferencedUserTypes()
                        .stream()
-                       .map(name -> getType(metadata, types, name).toCqlString(true, false, ifNotExists));
+                       .map(name -> getType(metadata, types, name).toCqlString(false, ifNotExists));
     }
 
     /**

@@ -44,6 +44,9 @@ public interface ShardTracker
      */
     boolean advanceTo(Token nextToken);
 
+    /**
+     * Returns the number of shards tracked by this tracker.
+     */
     int count();
 
     /**
@@ -54,20 +57,23 @@ public interface ShardTracker
 
     double rangeSpanned(PartitionPosition first, PartitionPosition last);
 
+    /**
+     * The index of the shard this tracker is currently on.
+     */
     int shardIndex();
 
     default long shardAdjustedKeyCount(Set<SSTableReader> sstables)
     {
         // Note: computationally non-trivial; can be optimized if we save start/stop shards and size per table.
         long shardAdjustedKeyCount = 0;
-        for (SSTableReader sstable : sstables)
+        for (CompactionSSTable sstable : sstables)
             shardAdjustedKeyCount += sstable.estimatedKeys() * fractionInShard(ShardManager.coveringRange(sstable));
         return shardAdjustedKeyCount;
     }
 
     default void applyTokenSpaceCoverage(SSTableWriter writer)
     {
-        if (writer.getFirst() != null)
-            writer.setTokenSpaceCoverage(rangeSpanned(writer.getFirst(), writer.getLast()));
+        if (writer.first != null)
+            writer.setTokenSpaceCoverage(rangeSpanned(writer.first, writer.last));
     }
 }

@@ -23,7 +23,6 @@ import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.function.Predicate;
 
 import com.google.common.collect.Range;
 
@@ -31,6 +30,7 @@ import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.ByteBufferAccessor;
 import org.apache.cassandra.db.marshal.ValueAccessor;
+import org.apache.cassandra.transport.ProtocolVersion;
 
 public class ListSerializer<T> extends CollectionSerializer<List<T>>
 {
@@ -54,7 +54,6 @@ public class ListSerializer<T> extends CollectionSerializer<List<T>>
         this.elements = elements;
     }
 
-    @Override
     protected List<ByteBuffer> serializeValues(List<T> values)
     {
         List<ByteBuffer> output = new ArrayList<>(values.size());
@@ -63,19 +62,21 @@ public class ListSerializer<T> extends CollectionSerializer<List<T>>
         return output;
     }
 
-    @Override
-    public <V> void validate(V input, ValueAccessor<V> accessor)
+    public int getElementCount(List<T> value)
     {
-        if (accessor.isEmpty(input))
-            throw new MarshalException("Not enough bytes to read a list");
+        return value.size();
+    }
+
+    public <V> void validateForNativeProtocol(V input, ValueAccessor<V> accessor, ProtocolVersion version)
+    {
         try
         {
-            int n = readCollectionSize(input, accessor);
-            int offset = sizeOfCollectionSize();
+            int n = readCollectionSize(input, accessor, version);
+            int offset = sizeOfCollectionSize(n, version);
             for (int i = 0; i < n; i++)
             {
-                V value = readNonNullValue(input, accessor, offset);
-                offset += sizeOfValue(value, accessor);
+                V value = readNonNullValue(input, accessor, offset, version);
+                offset += sizeOfValue(value, accessor, version);
                 elements.validate(value, accessor);
             }
 
@@ -88,13 +89,12 @@ public class ListSerializer<T> extends CollectionSerializer<List<T>>
         }
     }
 
-    @Override
-    public <V> List<T> deserialize(V input, ValueAccessor<V> accessor)
+    public <V> List<T> deserializeForNativeProtocol(V input, ValueAccessor<V> accessor, ProtocolVersion version)
     {
         try
         {
-            int n = readCollectionSize(input, accessor);
-            int offset = sizeOfCollectionSize();
+            int n = readCollectionSize(input, accessor, version);
+            int offset = sizeOfCollectionSize(n, version);
 
             if (n < 0)
                 throw new MarshalException("The data cannot be deserialized as a list");
@@ -112,8 +112,8 @@ public class ListSerializer<T> extends CollectionSerializer<List<T>>
                 // for it, but should likely be changed to readNonNull. Validate has been
                 // changed to throw on null elements as otherwise it would NPE, and it's unclear
                 // if callers could handle null elements.
-                V databb = readValue(input, accessor, offset);
-                offset += sizeOfValue(databb, accessor);
+                V databb = readValue(input, accessor, offset, version);
+                offset += sizeOfValue(databb, accessor, version);
                 if (databb != null)
                 {
                     elements.validate(databb, accessor);
@@ -136,34 +136,6 @@ public class ListSerializer<T> extends CollectionSerializer<List<T>>
         }
     }
 
-    public boolean anyMatch(ByteBuffer serializedList, Predicate<ByteBuffer> predicate)
-    {
-        return anyMatch(serializedList, ByteBufferAccessor.instance, predicate);
-    }
-
-    public <V> boolean anyMatch(V input, ValueAccessor<V> accessor, Predicate<V> predicate)
-    {
-        try
-        {
-            int s = readCollectionSize(input, accessor);
-            int offset = sizeOfCollectionSize();
-
-            for (int i = 0; i < s; i++)
-            {
-                V value = readValue(input, accessor, offset);
-                offset += sizeOfValue(value, accessor);
-
-                if (predicate.test(value))
-                    return true;
-            }
-            return false;
-        }
-        catch (BufferUnderflowException e)
-        {
-            throw new MarshalException("Not enough bytes to read a list");
-        }
-    }
-
     /**
      * Returns the element at the given index in a list.
      * @param input a serialized list
@@ -174,8 +146,8 @@ public class ListSerializer<T> extends CollectionSerializer<List<T>>
     {
         try
         {
-            int n = readCollectionSize(input, accessor);
-            int offset = sizeOfCollectionSize();
+            int n = readCollectionSize(input, accessor, ProtocolVersion.V3);
+            int offset = sizeOfCollectionSize(n, ProtocolVersion.V3);
             if (n <= index)
                 return null;
 
@@ -184,7 +156,7 @@ public class ListSerializer<T> extends CollectionSerializer<List<T>>
                 int length = accessor.getInt(input, offset);
                 offset += TypeSizes.INT_SIZE + length;
             }
-            return readValue(input, accessor, offset);
+            return readValue(input, accessor, offset, ProtocolVersion.V3);
         }
         catch (BufferUnderflowException | IndexOutOfBoundsException e)
         {
@@ -197,7 +169,6 @@ public class ListSerializer<T> extends CollectionSerializer<List<T>>
         return getElement(input, ByteBufferAccessor.instance, index);
     }
 
-    @Override
     public String toString(List<T> value)
     {
         StringBuilder sb = new StringBuilder();
@@ -215,7 +186,6 @@ public class ListSerializer<T> extends CollectionSerializer<List<T>>
         return sb.toString();
     }
 
-    @Override
     @SuppressWarnings({ "rawtypes", "unchecked" })
     public Class<List<T>> getType()
     {

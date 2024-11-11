@@ -20,18 +20,15 @@ package org.apache.cassandra.cql3.functions;
 
 import java.util.Arrays;
 import java.util.List;
-import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 
 import org.apache.cassandra.cql3.AssignmentTestable;
 import org.apache.cassandra.cql3.CQL3Type;
+import org.apache.cassandra.cql3.Constants;
 import org.apache.cassandra.cql3.selection.Selectable;
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.marshal.CollectionType;
+import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.ListType;
-import org.apache.cassandra.db.marshal.MapType;
-import org.apache.cassandra.db.marshal.NumberType;
-import org.apache.cassandra.db.marshal.SetType;
 import org.apache.cassandra.db.marshal.VectorType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 
@@ -62,68 +59,39 @@ public interface FunctionParameter
         return arg.getCompatibleTypeIfKnown(keyspace);
     }
 
-    void validateType(FunctionName name, AssignmentTestable arg, AbstractType<?> argType);
-
-    /**
-     * @return whether this parameter is optional
-     */
-    default boolean isOptional()
-    {
-        return false;
-    }
-
-    /**
-     * @param wrapped the wrapped parameter
-     * @return a function parameter definition that accepts the specified wrapped parameter, considering it optional as
-     * defined by {@link #isOptional()}.
-     */
-    static FunctionParameter optional(FunctionParameter wrapped)
-    {
-        return new FunctionParameter()
-        {
-            @Nullable
-            @Override
-            public AbstractType<?> inferType(String keyspace,
-                                             AssignmentTestable arg,
-                                             @Nullable AbstractType<?> receiverType,
-                                             @Nullable List<AbstractType<?>> inferredTypes)
-            {
-                return wrapped.inferType(keyspace, arg, receiverType, inferredTypes);
-            }
-
-            @Override
-            public void validateType(FunctionName name, AssignmentTestable arg, AbstractType<?> argType)
-            {
-                wrapped.validateType(name, arg, argType);
-            }
-
-            @Override
-            public boolean isOptional()
-            {
-                return true;
-            }
-
-            @Override
-            public String toString()
-            {
-                return '[' + wrapped.toString() + ']';
-            }
-        };
-    }
+    void validateType(FunctionFactory factory, AssignmentTestable arg, AbstractType<?> argType);
 
     /**
      * @return a function parameter definition that accepts values of string-based data types (text, varchar and ascii)
      */
     static FunctionParameter string()
     {
-        return fixed(CQL3Type.Native.TEXT, CQL3Type.Native.VARCHAR, CQL3Type.Native.ASCII);
+        return fixed("string", CQL3Type.Native.TEXT, CQL3Type.Native.VARCHAR, CQL3Type.Native.ASCII);
     }
 
     /**
-     * @param types the accepted data types
+     * @return a function parameter definition that accepts values that can be interpreted as floats
+     */
+    static FunctionParameter float32()
+    {
+        return fixed("float", CQL3Type.Native.FLOAT, CQL3Type.Native.DOUBLE, CQL3Type.Native.INT, CQL3Type.Native.BIGINT);
+    }
+
+    /**
+     * @param type the accepted data type
      * @return a function parameter definition that accepts values of a specific data type
      */
-    static FunctionParameter fixed(CQL3Type... types)
+    static FunctionParameter fixed(CQL3Type type)
+    {
+        return fixed(type.toString(), type);
+    }
+
+    /**
+     * @param name the name of the data type
+     * @param types the accepted data types
+     * @return a function parameter definition that accepts values of the specified data types
+     */
+    static FunctionParameter fixed(String name, CQL3Type... types)
     {
         assert types.length > 0;
 
@@ -140,21 +108,18 @@ public interface FunctionParameter
             }
 
             @Override
-            public void validateType(FunctionName name, AssignmentTestable arg, AbstractType<?> argType)
+            public void validateType(FunctionFactory factory, AssignmentTestable arg, AbstractType<?> argType)
             {
                 if (Arrays.stream(types).allMatch(t -> argType.testAssignment(t.getType()) == NOT_ASSIGNABLE))
                     throw new InvalidRequestException(format("Function %s requires an argument of type %s, " +
                                                              "but found argument %s of type %s",
-                                                             name, this, arg, argType.asCQL3Type()));
+                                                             factory, this, arg, argType.asCQL3Type()));
             }
 
             @Override
             public String toString()
             {
-                if (types.length == 1)
-                    return types[0].toString();
-
-                return '[' + Arrays.stream(types).map(Object::toString).collect(Collectors.joining("|")) + ']';
+                return name;
             }
         };
     }
@@ -178,7 +143,7 @@ public interface FunctionParameter
             }
 
             @Override
-            public void validateType(FunctionName name, AssignmentTestable arg, AbstractType<?> argType)
+            public void validateType(FunctionFactory factory, AssignmentTestable arg, AbstractType<?> argType)
             {
                 // nothing to do here, all types are accepted
             }
@@ -192,10 +157,8 @@ public interface FunctionParameter
     }
 
     /**
-     * @param index the index of the function argument that this parameter is associated with
-     * @param preferOther whether the parameter should prefer the type of the other parameter over its own type
-     * @param parameter the type of this parameter when the type of the associated parameter is unknown
-     * @return a function parameter definition that is expected to have the same type as another parameter
+     * @return a function parameter definition that accepts values of any type, provided that it's the same type as all
+     * the other parameters
      */
     static FunctionParameter sameAs(int index, boolean preferOther, FunctionParameter parameter)
     {
@@ -218,9 +181,9 @@ public interface FunctionParameter
             }
 
             @Override
-            public void validateType(FunctionName name, AssignmentTestable arg, AbstractType<?> argType)
+            public void validateType(FunctionFactory factory, AssignmentTestable arg, AbstractType<?> argType)
             {
-                parameter.validateType(name, arg, argType);
+                parameter.validateType(factory, arg, argType);
             }
 
             @Override
@@ -232,128 +195,7 @@ public interface FunctionParameter
     }
 
     /**
-     * @return a function parameter definition that accepts values of type {@link CollectionType}, independently of the
-     * types of its elements.
-     */
-    static FunctionParameter anyCollection()
-    {
-        return new FunctionParameter()
-        {
-            @Override
-            public void validateType(FunctionName name, AssignmentTestable arg, AbstractType<?> argType)
-            {
-                if (!argType.isCollection())
-                    throw new InvalidRequestException(format("Function %s requires a collection argument, " +
-                                                             "but found argument %s of type %s",
-                                                             name, arg, argType.asCQL3Type()));
-            }
-
-            @Override
-            public String toString()
-            {
-                return "collection";
-            }
-        };
-    }
-
-    /**
-     * @return a function parameter definition that accepts values of type {@link SetType} or {@link ListType}.
-     */
-    static FunctionParameter setOrList()
-    {
-        return new FunctionParameter()
-        {
-            @Override
-            public void validateType(FunctionName name, AssignmentTestable arg, AbstractType<?> argType)
-            {
-                if (argType.isCollection())
-                {
-                    CollectionType.Kind kind = ((CollectionType<?>) argType).kind;
-                    if (kind == CollectionType.Kind.SET || kind == CollectionType.Kind.LIST)
-                        return;
-                }
-
-                throw new InvalidRequestException(format("Function %s requires a set or list argument, " +
-                                                         "but found argument %s of type %s",
-                                                         name, arg, argType.asCQL3Type()));
-            }
-
-            @Override
-            public String toString()
-            {
-                return "numeric_set_or_list";
-            }
-        };
-    }
-
-    /**
-     * @return a function parameter definition that accepts values of type {@link SetType} or {@link ListType},
-     * provided that its elements are numeric.
-     */
-    static FunctionParameter numericSetOrList()
-    {
-        return new FunctionParameter()
-        {
-            @Override
-            public void validateType(FunctionName name, AssignmentTestable arg, AbstractType<?> argType)
-            {
-                AbstractType<?> elementType = null;
-                if (argType.isCollection())
-                {
-                    CollectionType<?> collectionType = (CollectionType<?>) argType;
-                    if (collectionType.kind == CollectionType.Kind.SET)
-                    {
-                        elementType = ((SetType<?>) argType).getElementsType();
-                    }
-                    else if (collectionType.kind == CollectionType.Kind.LIST)
-                    {
-                        elementType = ((ListType<?>) argType).getElementsType();
-                    }
-                }
-
-                if (!(elementType instanceof NumberType))
-                    throw new InvalidRequestException(format("Function %s requires a numeric set/list argument, " +
-                                                             "but found argument %s of type %s",
-                                                             name, arg, argType.asCQL3Type()));
-            }
-
-            @Override
-            public String toString()
-            {
-                return "numeric_set_or_list";
-            }
-        };
-    }
-
-    /**
-     * @return a function parameter definition that accepts values of type {@link MapType}, independently of the types
-     * of the map keys and values.
-     */
-    static FunctionParameter anyMap()
-    {
-        return new FunctionParameter()
-        {
-            @Override
-            public void validateType(FunctionName name, AssignmentTestable arg, AbstractType<?> argType)
-            {
-                if (!argType.isUDT() && !(argType instanceof MapType))
-                    throw new InvalidRequestException(format("Function %s requires a map argument, " +
-                                                             "but found argument %s of type %s",
-                                                             name, arg, argType.asCQL3Type()));
-            }
-
-            @Override
-            public String toString()
-            {
-                return "map";
-            }
-        };
-    }
-
-    /**
-     * @param type the type of the vector elements
-     * @return a function parameter definition that accepts values of type {@link VectorType} with elements of the
-     * specified {@code type} and any dimensions.
+     * @return a function parameter definition that accepts values of type {@link VectorType}.
      */
     static FunctionParameter vector(CQL3Type type)
     {
@@ -363,17 +205,19 @@ public interface FunctionParameter
             public AbstractType<?> inferType(String keyspace,
                                              AssignmentTestable arg,
                                              @Nullable AbstractType<?> receiverType,
-                                             @Nullable List<AbstractType<?>> inferredTypes)
+                                             List<AbstractType<?>> inferredTypes)
             {
-                if (arg instanceof Selectable.WithArrayLiteral)
-                    return VectorType.getInstance(type.getType(), ((Selectable.WithArrayLiteral) arg).getSize());
-
                 AbstractType<?> inferred = arg.getCompatibleTypeIfKnown(keyspace);
+                if (inferred != null && arg instanceof Selectable.WithArrayLiteral)
+                {
+                    return VectorType.getInstance(type.getType(), ((Selectable.WithArrayLiteral) arg).getSize());
+                }
+
                 return inferred == null ? receiverType : inferred;
             }
 
             @Override
-            public void validateType(FunctionName name, AssignmentTestable arg, AbstractType<?> argType)
+            public void validateType(FunctionFactory factory, AssignmentTestable arg, AbstractType<?> argType)
             {
                 if (argType.isVector())
                 {
@@ -381,7 +225,7 @@ public interface FunctionParameter
                     if (vectorType.elementType.asCQL3Type() == type)
                         return;
                 }
-                else if (argType instanceof ListType) // if it's terminal it will be a list
+                else if (argType.isList()) // if it's terminal it will be a list
                 {
                     ListType<?> listType = (ListType<?>) argType;
                     if (listType.getElementsType().testAssignment(type.getType()) == NOT_ASSIGNABLE)
@@ -390,7 +234,7 @@ public interface FunctionParameter
 
                 throw new InvalidRequestException(format("Function %s requires a %s vector argument, " +
                                                          "but found argument %s of type %s",
-                                                         name, type, arg, argType.asCQL3Type()));
+                                                         factory, type, arg, argType.asCQL3Type()));
             }
 
             @Override
@@ -399,5 +243,57 @@ public interface FunctionParameter
                 return format("vector<%s, n>", type);
             }
         };
+    }
+
+    /**
+     * @param name the name of the function parameter
+     * @param type the accepted type of literal
+     * @param inferredType the inferred type of the literal
+     * @return a function parameter definition that accepts a specific literal type
+     */
+    static FunctionParameter literal(String name, Constants.Type type, AbstractType<?> inferredType)
+    {
+        return new FunctionParameter()
+        {
+            @Override
+            public AbstractType<?> inferType(String keyspace,
+                                             AssignmentTestable arg,
+                                             @Nullable AbstractType<?> receiverType,
+                                             @Nullable List<AbstractType<?>> inferredTypes)
+            {
+                return inferredType;
+            }
+
+            @Override
+            public void validateType(FunctionFactory factory, AssignmentTestable arg, AbstractType<?> argType)
+            {
+                if (arg instanceof Selectable.WithTerm)
+                    arg = ((Selectable.WithTerm) arg).rawTerm;
+
+                if (!(arg instanceof Constants.Literal))
+                    throw invalidArgumentException(factory, arg);
+
+                Constants.Literal literal = (Constants.Literal) arg;
+                if (literal.type != type)
+                    throw invalidArgumentException(factory, arg);
+            }
+
+            private InvalidRequestException invalidArgumentException(FunctionFactory factory, AssignmentTestable arg)
+            {
+                throw new InvalidRequestException(format("Function %s requires a %s argument, but found %s",
+                                                         factory, this, arg));
+            }
+
+            @Override
+            public String toString()
+            {
+                return name;
+            }
+        };
+    }
+
+    static FunctionParameter literalInteger()
+    {
+        return literal("literal_int", Constants.Type.INTEGER, Int32Type.instance);
     }
 }

@@ -23,8 +23,6 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 
-import javax.annotation.Nullable;
-
 import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.db.ConsistencyLevel;
@@ -34,11 +32,11 @@ import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.index.Index;
+import org.apache.cassandra.locator.LocalStrategy;
 import org.apache.cassandra.locator.ReplicaPlan;
 import org.apache.cassandra.locator.ReplicaPlans;
-import org.apache.cassandra.schema.ReplicationParams;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.tcm.compatibility.TokenRingUtils;
+import org.apache.cassandra.locator.TokenMetadata;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.AbstractIterator;
 import org.apache.cassandra.utils.Pair;
 
@@ -52,7 +50,7 @@ class ReplicaPlanIterator extends AbstractIterator<ReplicaPlan.ForRangeRead>
     private final int rangeCount;
 
     ReplicaPlanIterator(AbstractBounds<PartitionPosition> keyRange,
-                        @Nullable Index.QueryPlan indexQueryPlan,
+                        Index.QueryPlan indexQueryPlan,
                         Keyspace keyspace,
                         ConsistencyLevel consistency)
     {
@@ -60,10 +58,10 @@ class ReplicaPlanIterator extends AbstractIterator<ReplicaPlan.ForRangeRead>
         this.keyspace = keyspace;
         this.consistency = consistency;
 
-        ReplicationParams replication = keyspace.getMetadata().params.replication;
-        List<? extends AbstractBounds<PartitionPosition>> l = replication.isLocal() || replication.isMeta()
+
+        List<? extends AbstractBounds<PartitionPosition>> l = keyspace.getReplicationStrategy() instanceof LocalStrategy
                                                               ? keyRange.unwrap()
-                                                              : getRestrictedRanges(keyRange);
+                                                              : getRestrictedRanges(keyspace.getReplicationStrategy().getTokenMetadata(), keyRange);
         this.ranges = l.iterator();
         this.rangeCount = l.size();
     }
@@ -89,7 +87,7 @@ class ReplicaPlanIterator extends AbstractIterator<ReplicaPlan.ForRangeRead>
      * Compute all ranges we're going to query, in sorted order. Nodes can be replica destinations for many ranges,
      * so we need to restrict each scan to the specific range we want, or else we'd get duplicate results.
      */
-    private static List<AbstractBounds<PartitionPosition>> getRestrictedRanges(final AbstractBounds<PartitionPosition> queryRange)
+    private static List<AbstractBounds<PartitionPosition>> getRestrictedRanges(TokenMetadata tokenMetadata, final AbstractBounds<PartitionPosition> queryRange)
     {
         // special case for bounds containing exactly 1 (non-minimum) token
         if (queryRange instanceof Bounds && queryRange.left.equals(queryRange.right) && !queryRange.left.isMinimum())
@@ -97,11 +95,9 @@ class ReplicaPlanIterator extends AbstractIterator<ReplicaPlan.ForRangeRead>
             return Collections.singletonList(queryRange);
         }
 
-        ClusterMetadata metadata = ClusterMetadata.current();
-
         List<AbstractBounds<PartitionPosition>> ranges = new ArrayList<>();
         // divide the queryRange into pieces delimited by the ring and minimum tokens
-        Iterator<Token> ringIter = TokenRingUtils.ringIterator(metadata.tokenMap.tokens(), queryRange.left.getToken(), true);
+        Iterator<Token> ringIter = TokenMetadata.ringIterator(tokenMetadata.sortedTokens(), queryRange.left.getToken(), true);
         AbstractBounds<PartitionPosition> remainder = queryRange;
         while (ringIter.hasNext())
         {

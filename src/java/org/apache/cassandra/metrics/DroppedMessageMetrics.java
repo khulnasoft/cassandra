@@ -18,6 +18,8 @@
 package org.apache.cassandra.metrics;
 
 import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.Map;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
@@ -35,14 +37,14 @@ import static org.apache.cassandra.metrics.DefaultNameFactory.createMetricName;
  */
 public class DroppedMessageMetrics
 {
-    public static final String TYPE = "DroppedMessage";
+    private static final String TYPE = "DroppedMessage";
 
     // backward compatibility for request metrics which names have changed in 4.0 as part of CASSANDRA-15066
     private static final ImmutableMap<Verb, String> REQUEST_VERB_ALIAS;
 
     static
     {
-        EnumMap<Verb, String> aliases = new EnumMap<>(Verb.class);
+        Map<Verb, String> aliases = new HashMap<>();
         aliases.put(Verb.BATCH_REMOVE_REQ, "BATCH_REMOVE");
         aliases.put(Verb.BATCH_STORE_REQ, "BATCH_STORE");
         aliases.put(Verb.COUNTER_MUTATION_REQ, "COUNTER_MUTATION");
@@ -53,7 +55,7 @@ public class DroppedMessageMetrics
         aliases.put(Verb.READ_REPAIR_REQ, "READ_REPAIR");
         aliases.put(Verb.REQUEST_RSP, "REQUEST_RESPONSE");
 
-        REQUEST_VERB_ALIAS = Maps.immutableEnumMap(aliases);
+        REQUEST_VERB_ALIAS = ImmutableMap.copyOf(aliases);
     }
 
     /** Number of dropped messages */

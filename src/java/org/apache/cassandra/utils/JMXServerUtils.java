@@ -56,8 +56,6 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.auth.jmx.AuthenticationProxy;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_JMX_AUTHORIZER;
-import static org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_JMX_REMOTE_LOGIN_CONFIG;
 import static org.apache.cassandra.config.CassandraRelevantProperties.COM_SUN_MANAGEMENT_JMXREMOTE_ACCESS_FILE;
 import static org.apache.cassandra.config.CassandraRelevantProperties.COM_SUN_MANAGEMENT_JMXREMOTE_AUTHENTICATE;
 import static org.apache.cassandra.config.CassandraRelevantProperties.COM_SUN_MANAGEMENT_JMXREMOTE_PASSWORD_FILE;
@@ -66,9 +64,6 @@ import static org.apache.cassandra.config.CassandraRelevantProperties.COM_SUN_MA
 import static org.apache.cassandra.config.CassandraRelevantProperties.COM_SUN_MANAGEMENT_JMXREMOTE_SSL_ENABLED_CIPHER_SUITES;
 import static org.apache.cassandra.config.CassandraRelevantProperties.COM_SUN_MANAGEMENT_JMXREMOTE_SSL_ENABLED_PROTOCOLS;
 import static org.apache.cassandra.config.CassandraRelevantProperties.COM_SUN_MANAGEMENT_JMXREMOTE_SSL_NEED_CLIENT_AUTH;
-import static org.apache.cassandra.config.CassandraRelevantProperties.JAVAX_RMI_SSL_CLIENT_ENABLED_CIPHER_SUITES;
-import static org.apache.cassandra.config.CassandraRelevantProperties.JAVAX_RMI_SSL_CLIENT_ENABLED_PROTOCOLS;
-import static org.apache.cassandra.config.CassandraRelevantProperties.JAVA_RMI_SERVER_HOSTNAME;
 
 public class JMXServerUtils
 {
@@ -78,6 +73,7 @@ public class JMXServerUtils
      * Creates a server programmatically. This allows us to set parameters which normally are
      * inaccessable.
      */
+    @SuppressWarnings("resource")
     @VisibleForTesting
     public static JMXConnectorServer createJMXServer(int port, String hostname, boolean local)
     throws IOException
@@ -88,7 +84,7 @@ public class JMXServerUtils
         if (local)
         {
             serverAddress = InetAddress.getLoopbackAddress();
-            JAVA_RMI_SERVER_HOSTNAME.setString(serverAddress.getHostAddress());
+            System.setProperty("java.rmi.server.hostname", serverAddress.getHostAddress());
         }
 
         // Configure the RMI client & server socket factories, including SSL config.
@@ -149,6 +145,7 @@ public class JMXServerUtils
         return jmxServer;
     }
 
+    @SuppressWarnings("resource")
     public static JMXConnectorServer createJMXServer(int port, boolean local) throws IOException
     {
         return createJMXServer(port, null, local);
@@ -171,7 +168,7 @@ public class JMXServerUtils
         // before creating the authenticator. If no password file has been
         // explicitly set, it's read from the default location
         // $JAVA_HOME/lib/management/jmxremote.password
-        String configEntry = CASSANDRA_JMX_REMOTE_LOGIN_CONFIG.getString();
+        String configEntry = System.getProperty("cassandra.jmx.remote.login.config");
         if (configEntry != null)
         {
             env.put(JMXConnectorServer.AUTHENTICATOR, new AuthenticationProxy(configEntry));
@@ -199,7 +196,7 @@ public class JMXServerUtils
         // can be set as the JMXConnectorServer's MBeanServerForwarder.
         // If no custom proxy is supplied, check system properties for the location of the
         // standard access file & stash it in env
-        String authzProxyClass = CASSANDRA_JMX_AUTHORIZER.getString();
+        String authzProxyClass = System.getProperty("cassandra.jmx.authorizer");
         if (authzProxyClass != null)
         {
             final InvocationHandler handler = FBUtilities.construct(authzProxyClass, "JMX authz proxy");
@@ -229,7 +226,7 @@ public class JMXServerUtils
             String protocolList = COM_SUN_MANAGEMENT_JMXREMOTE_SSL_ENABLED_PROTOCOLS.getString();
             if (protocolList != null)
             {
-                JAVAX_RMI_SSL_CLIENT_ENABLED_PROTOCOLS.setString(protocolList);
+                System.setProperty("javax.rmi.ssl.client.enabledProtocols", protocolList);
                 protocols = StringUtils.split(protocolList, ',');
             }
 
@@ -237,7 +234,7 @@ public class JMXServerUtils
             String cipherList = COM_SUN_MANAGEMENT_JMXREMOTE_SSL_ENABLED_CIPHER_SUITES.getString();
             if (cipherList != null)
             {
-                JAVAX_RMI_SSL_CLIENT_ENABLED_CIPHER_SUITES.setString(cipherList);
+                System.setProperty("javax.rmi.ssl.client.enabledCipherSuites", cipherList);
                 ciphers = StringUtils.split(cipherList, ',');
             }
 

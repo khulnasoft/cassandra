@@ -1,4 +1,0 @@
- id | created_at | comment | comment_vector | commenter | record_id
-----+------------+---------+----------------+-----------+-----------
-
-(0 rows)

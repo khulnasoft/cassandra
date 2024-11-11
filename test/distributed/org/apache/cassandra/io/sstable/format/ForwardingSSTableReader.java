@@ -23,68 +23,62 @@ import java.nio.ByteBuffer;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Set;
+import java.util.UUID;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.RateLimiter;
 
+import org.apache.cassandra.cache.InstrumentingCache;
+import org.apache.cassandra.cache.KeyCacheKey;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.filter.ColumnFilter;
-import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
+import org.apache.cassandra.db.lifecycle.AbstractLogTransaction;
 import org.apache.cassandra.db.rows.EncodingStats;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.dht.AbstractBounds;
+import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.compress.CompressionMetadata;
-import org.apache.cassandra.io.sstable.AbstractRowIndexEntry;
 import org.apache.cassandra.io.sstable.Component;
-import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
-import org.apache.cassandra.io.sstable.IVerifier;
-import org.apache.cassandra.io.sstable.KeyIterator;
-import org.apache.cassandra.io.sstable.KeyReader;
-import org.apache.cassandra.io.sstable.SSTableReadsListener;
+import org.apache.cassandra.io.sstable.SSTable;
+import org.apache.cassandra.io.sstable.format.big.BigTableRowIndexEntry;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.util.ChannelProxy;
-import org.apache.cassandra.io.util.CheckedFunction;
-import org.apache.cassandra.io.util.DataIntegrityMetadata;
 import org.apache.cassandra.io.util.FileDataInput;
+import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.metrics.RestorableMeter;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.utils.EstimatedHistogram;
-import org.apache.cassandra.utils.OutputHandler;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.IFilter;
 import org.apache.cassandra.utils.concurrent.Ref;
 
 public abstract class ForwardingSSTableReader extends SSTableReader
 {
     private final SSTableReader delegate;
 
-    private static class Builder extends SSTableReader.Builder<ForwardingSSTableReader, Builder>
-    {
-        public Builder(SSTableReader delegate)
-        {
-            super(delegate.descriptor);
-            delegate.unbuildTo(this, false);
-        }
-
-        @Override
-        public ForwardingSSTableReader buildInternal(Owner owner)
-        {
-            throw new UnsupportedOperationException();
-        }
-    }
-
     public ForwardingSSTableReader(SSTableReader delegate)
     {
-        super(new Builder(delegate), delegate.owner().orElse(null));
+        super(delegate.descriptor, SSTable.componentsFor(delegate.descriptor),
+              TableMetadataRef.forOfflineTools(delegate.metadata()), delegate.maxDataAge, delegate.getSSTableMetadata(),
+              delegate.openReason, delegate.header, delegate.indexSummary, delegate.dfile, delegate.ifile, delegate.bf);
         this.delegate = delegate;
+        this.first = delegate.first;
+        this.last = delegate.last;
+    }
+
+    @Override
+    public PartitionIndexIterator allKeysIterator() throws IOException
+    {
+        return delegate.allKeysIterator();
     }
 
     @Override
@@ -106,21 +100,9 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public boolean mayContainAssumingKeyIsInRange(DecoratedKey key)
-    {
-        return delegate.mayContainAssumingKeyIsInRange(key);
-    }
-
-    @Override
     public void setupOnline()
     {
         delegate.setupOnline();
-    }
-
-    @Override
-    public <R, E extends Exception> R runWithLock(CheckedFunction<Descriptor, R, E> task) throws E
-    {
-        return delegate.runWithLock(task);
     }
 
     @Override
@@ -148,9 +130,15 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public SSTableReader cloneWithNewStart(DecoratedKey newStart)
+    public SSTableReader cloneWithNewStart(DecoratedKey newStart, Runnable runOnClose)
     {
-        return delegate.cloneWithNewStart(newStart);
+        return delegate.cloneWithNewStart(newStart, runOnClose);
+    }
+
+    @Override
+    public SSTableReader cloneWithNewSummarySamplingLevel(ColumnFamilyStore parent, int samplingLevel) throws IOException
+    {
+        return delegate.cloneWithNewSummarySamplingLevel(parent, samplingLevel);
     }
 
     @Override
@@ -160,21 +148,39 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public void releaseInMemoryComponents()
+    public int getIndexSummarySamplingLevel()
     {
-        delegate.releaseInMemoryComponents();
+        return delegate.getIndexSummarySamplingLevel();
     }
 
     @Override
-    public void validate()
+    public long getIndexSummaryOffHeapSize()
     {
-        delegate.validate();
+        return delegate.getIndexSummaryOffHeapSize();
     }
 
     @Override
-    protected void closeInternalComponent(AutoCloseable closeable)
+    public int getMinIndexInterval()
     {
-        delegate.closeInternalComponent(closeable);
+        return delegate.getMinIndexInterval();
+    }
+
+    @Override
+    public double getEffectiveIndexInterval()
+    {
+        return delegate.getEffectiveIndexInterval();
+    }
+
+    @Override
+    public void releaseSummary()
+    {
+        delegate.releaseSummary();
+    }
+
+    @Override
+    public long getIndexScanPosition(PartitionPosition key)
+    {
+        return delegate.getIndexScanPosition(key);
     }
 
     @Override
@@ -190,6 +196,24 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
+    public IFilter getBloomFilter()
+    {
+        return delegate.getBloomFilter();
+    }
+
+    @Override
+    public long getBloomFilterSerializedSize()
+    {
+        return delegate.getBloomFilterSerializedSize();
+    }
+
+    @Override
+    public long getBloomFilterOffHeapSize()
+    {
+        return delegate.getBloomFilterOffHeapSize();
+    }
+
+    @Override
     public long estimatedKeys()
     {
         return delegate.estimatedKeys();
@@ -199,6 +223,24 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     public long estimatedKeysForRanges(Collection<Range<Token>> ranges)
     {
         return delegate.estimatedKeysForRanges(ranges);
+    }
+
+    @Override
+    public int getIndexSummarySize()
+    {
+        return delegate.getIndexSummarySize();
+    }
+
+    @Override
+    public int getMaxIndexSummarySize()
+    {
+        return delegate.getMaxIndexSummarySize();
+    }
+
+    @Override
+    public byte[] getIndexSummaryKey(int index)
+    {
+        return delegate.getIndexSummaryKey(index);
     }
 
     @Override
@@ -214,39 +256,51 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    protected long getPosition(PartitionPosition key, Operator op, boolean updateStats, SSTableReadsListener listener)
+    public KeyCacheKey getCacheKey(DecoratedKey key)
     {
-        return delegate.getPosition(key, op, updateStats, listener);
+        return delegate.getCacheKey(key);
     }
 
     @Override
-    protected AbstractRowIndexEntry getRowIndexEntry(PartitionPosition key, Operator op, boolean updateCacheAndStats, SSTableReadsListener listener)
+    public void cacheKey(DecoratedKey key, BigTableRowIndexEntry info)
     {
-        return delegate.getRowIndexEntry(key, op, updateCacheAndStats, listener);
+        delegate.cacheKey(key, info);
     }
 
     @Override
-    public UnfilteredRowIterator rowIterator(DecoratedKey key, Slices slices, ColumnFilter selectedColumns, boolean reversed, SSTableReadsListener listener)
+    public BigTableRowIndexEntry getCachedPosition(DecoratedKey key, boolean updateStats)
     {
-        return delegate.rowIterator(key, slices, selectedColumns, reversed, listener);
+        return delegate.getCachedPosition(key, updateStats);
     }
 
     @Override
-    public UnfilteredRowIterator simpleIterator(FileDataInput file, DecoratedKey key, long dataPosition, boolean tombstoneOnly)
+    protected BigTableRowIndexEntry getCachedPosition(KeyCacheKey unifiedKey, boolean updateStats)
     {
-        return delegate.simpleIterator(file, key, dataPosition, tombstoneOnly);
+        return delegate.getCachedPosition(unifiedKey, updateStats);
     }
 
     @Override
-    public KeyReader keyReader() throws IOException
+    public boolean isKeyCacheEnabled()
     {
-        return delegate.keyReader();
+        return delegate.isKeyCacheEnabled();
     }
 
     @Override
-    public KeyIterator keyIterator() throws IOException
+    protected BigTableRowIndexEntry getPosition(PartitionPosition key, Operator op, boolean updateCacheAndStats, boolean permitMatchPastLast, SSTableReadsListener listener)
     {
-        return delegate.keyIterator();
+        return (BigTableRowIndexEntry) delegate.getPosition(key, op, updateCacheAndStats, permitMatchPastLast, listener);
+    }
+
+    @Override
+    public UnfilteredRowIterator iterator(DecoratedKey key, Slices slices, ColumnFilter selectedColumns, boolean reversed, SSTableReadsListener listener)
+    {
+        return delegate.iterator(key, slices, selectedColumns, reversed, listener);
+    }
+
+    @Override
+    public UnfilteredRowIterator simpleIterator(FileDataInput dfile, DecoratedKey key, boolean tombstoneOnly)
+    {
+        return delegate.simpleIterator(dfile, key, tombstoneOnly);
     }
 
     @Override
@@ -280,7 +334,7 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public void markObsolete(Runnable tidier)
+    public void markObsolete(AbstractLogTransaction.ReaderTidier tidier)
     {
         delegate.markObsolete(tidier);
     }
@@ -334,9 +388,9 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public UnfilteredPartitionIterator partitionIterator(ColumnFilter columns, DataRange dataRange, SSTableReadsListener listener)
+    public ISSTableScanner getScanner(ColumnFilter columns, DataRange dataRange, SSTableReadsListener listener)
     {
-        return delegate.partitionIterator(columns, dataRange, listener);
+        return delegate.getScanner(columns, dataRange, listener);
     }
 
     @Override
@@ -346,9 +400,9 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public boolean newSince(long timestampMillis)
+    public boolean newSince(long age)
     {
-        return delegate.newSince(timestampMillis);
+        return delegate.newSince(age);
     }
 
     @Override
@@ -358,21 +412,15 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public void createLinks(String snapshotDirectoryPath, RateLimiter rateLimiter)
-    {
-        delegate.createLinks(snapshotDirectoryPath, rateLimiter);
-    }
-
-    @Override
     public boolean isRepaired()
     {
         return delegate.isRepaired();
     }
 
     @Override
-    public DecoratedKey keyAtPositionFromSecondaryIndex(long keyPositionFromSecondaryIndex) throws IOException
+    public DecoratedKey keyAt(FileDataInput reader) throws IOException
     {
-        return delegate.keyAtPositionFromSecondaryIndex(keyPositionFromSecondaryIndex);
+        return delegate.keyAt(reader);
     }
 
     @Override
@@ -382,7 +430,7 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public TimeUUID getPendingRepair()
+    public UUID getPendingRepair()
     {
         return delegate.getPendingRepair();
     }
@@ -406,6 +454,12 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
+    public InstrumentingCache<KeyCacheKey, BigTableRowIndexEntry> getKeyCache()
+    {
+        return delegate.getKeyCache();
+    }
+
+    @Override
     public EstimatedHistogram getEstimatedPartitionSize()
     {
         return delegate.getEstimatedPartitionSize();
@@ -418,13 +472,13 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public double getEstimatedDroppableTombstoneRatio(long gcBefore)
+    public double getEstimatedDroppableTombstoneRatio(int gcBefore)
     {
         return delegate.getEstimatedDroppableTombstoneRatio(gcBefore);
     }
 
     @Override
-    public double getDroppableTombstonesBefore(long gcBefore)
+    public double getDroppableTombstonesBefore(int gcBefore)
     {
         return delegate.getDroppableTombstonesBefore(gcBefore);
     }
@@ -448,13 +502,13 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public long getMinLocalDeletionTime()
+    public int getMinLocalDeletionTime()
     {
         return delegate.getMinLocalDeletionTime();
     }
 
     @Override
-    public long getMaxLocalDeletionTime()
+    public int getMaxLocalDeletionTime()
     {
         return delegate.getMaxLocalDeletionTime();
     }
@@ -502,18 +556,6 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public void mutateLevelAndReload(int newLevel) throws IOException
-    {
-        delegate.mutateLevelAndReload(newLevel);
-    }
-
-    @Override
-    public void mutateRepairedAndReload(long newRepairedAt, TimeUUID newPendingRepair, boolean isTransient) throws IOException
-    {
-        delegate.mutateRepairedAndReload(newRepairedAt, newPendingRepair, isTransient);
-    }
-
-    @Override
     public void reloadSSTableMetadata() throws IOException
     {
         delegate.reloadSSTableMetadata();
@@ -538,9 +580,15 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public void trySkipFileCacheBefore(DecoratedKey key)
+    public RandomAccessReader openIndexReader()
     {
-        delegate.trySkipFileCacheBefore(key);
+        return delegate.openIndexReader();
+    }
+
+    @Override
+    public RandomAccessReader openKeyComponentReader()
+    {
+        return delegate.openKeyComponentReader();
     }
 
     @Override
@@ -550,9 +598,33 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public long getDataCreationTime()
+    public ChannelProxy getIndexChannel()
     {
-        return delegate.getDataCreationTime();
+        return delegate.getIndexChannel();
+    }
+
+    @Override
+    public FileHandle getIndexFile()
+    {
+        return delegate.getIndexFile();
+    }
+
+    @Override
+    public long getCreationTimeFor(Component component)
+    {
+        return delegate.getCreationTimeFor(component);
+    }
+
+    @Override
+    public long getKeyCacheHit()
+    {
+        return delegate.getKeyCacheHit();
+    }
+
+    @Override
+    public long getKeyCacheRequest()
+    {
+        return delegate.getKeyCacheRequest();
     }
 
     @Override
@@ -583,12 +655,6 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     public Ref<SSTableReader> ref()
     {
         return delegate.ref();
-    }
-
-    @Override
-    protected List<AutoCloseable> setupInstance(boolean trackHotness)
-    {
-        return delegate.setupInstance(trackHotness);
     }
 
     @Override
@@ -640,39 +706,21 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public List<String> getAllFilePaths()
+    public ImmutableSet<Component> components()
     {
-        return delegate.getAllFilePaths();
+        return delegate.components();
+    }
+
+    @Override
+    public int getComponentSize()
+    {
+        return delegate.getComponentSize();
     }
 
     @Override
     public long bytesOnDisk()
     {
         return delegate.bytesOnDisk();
-    }
-
-    @Override
-    public long logicalBytesOnDisk()
-    {
-        return delegate.logicalBytesOnDisk();
-    }
-
-    @Override
-    public Set<Component> getComponents()
-    {
-        return delegate.getComponents();
-    }
-
-    @Override
-    public UnfilteredRowIterator rowIterator(DecoratedKey key)
-    {
-        return delegate.rowIterator(key);
-    }
-
-    @Override
-    public void maybePersistSSTableReadMeter()
-    {
-        delegate.maybePersistSSTableReadMeter();
     }
 
     @Override
@@ -688,7 +736,7 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public AbstractBounds<Token> getBounds()
+    public Bounds<Token> getBounds()
     {
         return delegate.getBounds();
     }
@@ -700,38 +748,15 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public IVerifier getVerifier(ColumnFamilyStore cfs, OutputHandler outputHandler, boolean isOffline, IVerifier.Options options)
+    public boolean hasIndex()
     {
-        return delegate.getVerifier(cfs, outputHandler, isOffline, options);
+        return delegate.hasIndex();
     }
 
     @Override
-    protected void notifySelected(SSTableReadsListener.SelectionReason reason, SSTableReadsListener localListener, Operator op, boolean updateStats, AbstractRowIndexEntry entry)
+    public ScrubPartitionIterator scrubPartitionsIterator() throws IOException
     {
-        delegate.notifySelected(reason, localListener, op, updateStats, entry);
+        return delegate.scrubPartitionsIterator();
     }
 
-    @Override
-    protected void notifySkipped(SSTableReadsListener.SkippingReason reason, SSTableReadsListener localListener, Operator op, boolean updateStats)
-    {
-        delegate.notifySkipped(reason, localListener, op, updateStats);
-    }
-
-    @Override
-    public boolean isEstimationInformative()
-    {
-        return delegate.isEstimationInformative();
-    }
-
-    @Override
-    public DataIntegrityMetadata.ChecksumValidator maybeGetChecksumValidator() throws IOException
-    {
-        return delegate.maybeGetChecksumValidator();
-    }
-
-    @Override
-    public DataIntegrityMetadata.FileDigestValidator maybeGetDigestValidator() throws IOException
-    {
-        return delegate.maybeGetDigestValidator();
-    }
 }

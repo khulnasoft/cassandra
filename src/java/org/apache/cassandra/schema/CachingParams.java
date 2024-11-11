@@ -28,7 +28,6 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.cassandra.exceptions.ConfigurationException;
 
 import static java.lang.String.format;
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 
 // CQL: {'keys' : 'ALL'|'NONE', 'rows_per_partition': '200'|'NONE'|'ALL'}
 public final class CachingParams
@@ -41,7 +40,7 @@ public final class CachingParams
         @Override
         public String toString()
         {
-            return toLowerCaseLocalized(name());
+            return name().toLowerCase();
         }
     }
 

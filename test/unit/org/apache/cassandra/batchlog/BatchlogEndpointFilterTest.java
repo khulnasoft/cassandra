@@ -35,10 +35,7 @@ import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
-
-import org.junit.After;
 import org.junit.Assert;
-import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
@@ -50,44 +47,18 @@ import org.apache.cassandra.locator.IEndpointSnitch;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.ReplicaPlans;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.tcm.ClusterMetadataService;
-import org.apache.cassandra.tcm.StubClusterMetadataService;
 import org.apache.cassandra.utils.FBUtilities;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.CoreMatchers.*;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertTrue;
-
 
 public class BatchlogEndpointFilterTest
 {
     private static final String LOCAL = "local";
-    private double oldBadness;
-
-    @BeforeClass
-    public static void initialiseServer()
-    {
-        DatabaseDescriptor.daemonInitialization();
-    }
-
-    @Before
-    public void before()
-    {
-        oldBadness = DatabaseDescriptor.getDynamicBadnessThreshold();
-        DatabaseDescriptor.setDynamicBadnessThreshold(0.1);
-        ClusterMetadataService.unsetInstance();
-        ClusterMetadataService.setInstance(StubClusterMetadataService.forTesting());
-        StorageService.instance.unsafeInitialize();
-    }
-
-    @After
-    public void after()
-    {
-        DatabaseDescriptor.setDynamicBadnessThreshold(oldBadness);
-    }
 
     // Repeat all tests some more times since we're dealing with random stuff - i.e. increase the
     // chance to hit issues.
@@ -95,6 +66,14 @@ public class BatchlogEndpointFilterTest
     private static final InetAddressAndPort[] INET_ADDRESSES = new InetAddressAndPort[0];
 
     private DynamicEndpointSnitch dsnitch;
+
+    @BeforeClass
+    public static void beforeClass()
+    {
+        DatabaseDescriptor.setConfig(new Config());
+        DatabaseDescriptor.daemonInitialization();
+        DatabaseDescriptor.setBroadcastAddress(endpointAddress(0, 0).address);
+    }
 
     @Test
     public void shouldUseLocalRackIfPreferLocalParameter() throws UnknownHostException
@@ -126,7 +105,6 @@ public class BatchlogEndpointFilterTest
                 .put("2", InetAddressAndPort.getByName("2"))
                 .put("2", InetAddressAndPort.getByName("22"))
                 .build();
-
         Collection<InetAddressAndPort> result = filterBatchlogEndpointsRandomForTests(false, endpoints);
         assertThat(result.size()).isEqualTo(2);
         assertThat(result).containsAnyElementsOf(endpoints.get(LOCAL));
@@ -164,7 +142,6 @@ public class BatchlogEndpointFilterTest
                                                          .put("3", InetAddressAndPort.getByName("33"))
                                                          .build();
         
-
         Collection<InetAddressAndPort> result = filterBatchlogEndpointsRandomForTests(false, endpoints);
         assertThat(result.size()).isEqualTo(2);
 
@@ -183,7 +160,6 @@ public class BatchlogEndpointFilterTest
                 .put(LOCAL, InetAddressAndPort.getByName("00"))
                 .put("1", InetAddressAndPort.getByName("1"))
                 .build();
-
         Collection<InetAddressAndPort> result = filterBatchlogEndpointsRandomForTests(false, endpoints);
         assertThat(result.size()).isEqualTo(2);
         assertTrue(result.contains(InetAddressAndPort.getByName("1")));
@@ -197,7 +173,6 @@ public class BatchlogEndpointFilterTest
         Multimap<String, InetAddressAndPort> endpoints = ImmutableMultimap.<String, InetAddressAndPort> builder()
                 .put(LOCAL, InetAddressAndPort.getByName("0"))
                 .build();
-
         Collection<InetAddressAndPort> result = filterBatchlogEndpointsRandomForTests(false, endpoints);
         assertThat(result.size()).isEqualTo(1);
         assertTrue(result.contains(InetAddressAndPort.getByName("0")));
@@ -214,11 +189,10 @@ public class BatchlogEndpointFilterTest
                 .put("1", InetAddressAndPort.getByName("11"))
                 .put("1", InetAddressAndPort.getByName("111"))
                 .build();
-
         Collection<InetAddressAndPort> result = filterBatchlogEndpointsRandomForTests(false, endpoints);
         // result should be the last two non-local replicas
         // (Collections.shuffle has been replaced with Collections.reverse for testing)
-        assertThat(result.size(), is(2));
+        assertThat(result.size()).isEqualTo(2);
         assertTrue(result.contains(InetAddressAndPort.getByName("11")));
         assertTrue(result.contains(InetAddressAndPort.getByName("111")));
     }
@@ -233,11 +207,10 @@ public class BatchlogEndpointFilterTest
                 .put(LOCAL, InetAddressAndPort.getByName("111"))
                 .put(LOCAL, InetAddressAndPort.getByName("1111"))
                 .build();
-
         Collection<InetAddressAndPort> result = filterBatchlogEndpointsRandomForTests(false, endpoints);
         // result should be the last two non-local replicas
         // (Collections.shuffle has been replaced with Collections.reverse for testing)
-        assertThat(result.size(), is(2));
+        assertThat(result.size()).isEqualTo(2);
         assertTrue(result.contains(InetAddressAndPort.getByName("111")));
         assertTrue(result.contains(InetAddressAndPort.getByName("1111")));
     }
@@ -250,7 +223,6 @@ public class BatchlogEndpointFilterTest
                                                          .put(LOCAL, InetAddressAndPort.getByName("1"))
                                                          .put(LOCAL, InetAddressAndPort.getByName("11"))
                                                          .build();
-
         Collection<InetAddressAndPort> result = filterBatchlogEndpointsRandomForTests(false, endpoints);
         assertThat(result.size()).isEqualTo(2);
         assertTrue(result.contains(InetAddressAndPort.getByName("1")));
@@ -945,7 +917,7 @@ public class BatchlogEndpointFilterTest
 
     private int nodeInRack(InetAddressAndPort input)
     {
-        return input.addressBytes[3];
+        return input.address.getAddress()[3];
     }
 
     private static InetAddressAndPort endpointAddress(int rack, int nodeInRack)
@@ -968,6 +940,9 @@ public class BatchlogEndpointFilterTest
                                                            List<String> racks,
                                                            int... nodesPerRack)
     {
+        DatabaseDescriptor.setDynamicBadnessThreshold(0.1);
+        StorageService.instance.unsafeInitialize();
+
         // if any of the three assertions fires, your test is busted
         assert !racks.isEmpty();
         assert racks.size() <= 10;

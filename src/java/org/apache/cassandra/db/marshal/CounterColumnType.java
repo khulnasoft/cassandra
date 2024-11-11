@@ -20,8 +20,7 @@ package org.apache.cassandra.db.marshal;
 import java.nio.ByteBuffer;
 
 import org.apache.cassandra.cql3.CQL3Type;
-import org.apache.cassandra.cql3.terms.Term;
-import org.apache.cassandra.cql3.functions.ArgumentDeserializer;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.db.context.CounterContext;
 import org.apache.cassandra.serializers.CounterSerializer;
 import org.apache.cassandra.serializers.MarshalException;
@@ -33,8 +32,6 @@ public class CounterColumnType extends NumberType<Long>
 {
     public static final CounterColumnType instance = new CounterColumnType();
 
-    private static final ByteBuffer MASKED_VALUE = instance.decompose(0L);
-
     CounterColumnType() {super(ComparisonType.NOT_COMPARABLE);} // singleton
 
     @Override
@@ -43,7 +40,6 @@ public class CounterColumnType extends NumberType<Long>
         return true;
     }
 
-    @Override
     public boolean isEmptyValueMeaningless()
     {
         return true;
@@ -104,79 +100,38 @@ public class CounterColumnType extends NumberType<Long>
     }
 
     @Override
-    public ArgumentDeserializer getArgumentDeserializer()
+    protected long toLong(ByteBuffer value)
     {
-        return LongType.instance.getArgumentDeserializer();
+        return ByteBufferUtil.toLong(value);
     }
 
-    @Override
-    public ByteBuffer add(Number left, Number right)
+    public ByteBuffer add(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
     {
-        return ByteBufferUtil.bytes(left.longValue() + right.longValue());
+        return ByteBufferUtil.bytes(leftType.toLong(left) + rightType.toLong(right));
     }
 
-    @Override
-    public ByteBuffer substract(Number left, Number right)
+    public ByteBuffer substract(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
     {
-        return ByteBufferUtil.bytes(left.longValue() - right.longValue());
+        return ByteBufferUtil.bytes(leftType.toLong(left) - rightType.toLong(right));
     }
 
-    @Override
-    public ByteBuffer multiply(Number left, Number right)
+    public ByteBuffer multiply(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
     {
-        return ByteBufferUtil.bytes(left.longValue() * right.longValue());
+        return ByteBufferUtil.bytes(leftType.toLong(left) * rightType.toLong(right));
     }
 
-    @Override
-    public ByteBuffer divide(Number left, Number right)
+    public ByteBuffer divide(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
     {
-        return ByteBufferUtil.bytes(left.longValue() / right.longValue());
+        return ByteBufferUtil.bytes(leftType.toLong(left) / rightType.toLong(right));
     }
 
-    @Override
-    public ByteBuffer mod(Number left, Number right)
+    public ByteBuffer mod(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
     {
-        return ByteBufferUtil.bytes(left.longValue() % right.longValue());
+        return ByteBufferUtil.bytes(leftType.toLong(left) % rightType.toLong(right));
     }
 
-    public ByteBuffer negate(Number input)
+    public ByteBuffer negate(ByteBuffer input)
     {
-        return ByteBufferUtil.bytes(-input.longValue());
-    }
-
-    @Override
-    public ByteBuffer abs(Number input)
-    {
-        return ByteBufferUtil.bytes(Math.abs(input.longValue()));
-    }
-
-    @Override
-    public ByteBuffer exp(Number input)
-    {
-        return ByteBufferUtil.bytes((long) Math.exp(input.longValue()));
-    }
-
-    @Override
-    public ByteBuffer log(Number input)
-    {
-        return ByteBufferUtil.bytes((long) Math.log(input.longValue()));
-    }
-
-    @Override
-    public ByteBuffer log10(Number input)
-    {
-        return ByteBufferUtil.bytes((long) Math.log10(input.longValue()));
-    }
-
-    @Override
-    public ByteBuffer round(Number input)
-    {
-        return decompose(input.longValue());
-    }
-
-    @Override
-    public ByteBuffer getMaskedValue()
-    {
-        return MASKED_VALUE;
+        return ByteBufferUtil.bytes(-toLong(input));
     }
 }

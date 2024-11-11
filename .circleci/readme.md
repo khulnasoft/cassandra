@@ -42,9 +42,10 @@ And for using lower resources comaptible with CircleCI's free tier:
 `cp .circleci/config.yml.FREE .circleci/config.yml`
 
 Alternatively, you can run the `generate.sh` script with the flags `-f`/`-p`
-to regenerate the `config.yml` file from `config_template.yml` using free or paid resources. 
-The script validates and applies any changes to the `config_template.yml` file, and they require the
-[CircleCI CLI](https://circleci.com/docs/2.0/local-cli/#install) to be installed.
+to regenerate the `config.yml` file from `config_template.yml` using free or paid resources.
+This script validates and applies any changes to the `config_template.yml` file, and it
+requires the [CircleCI CLI](https://circleci.com/docs/2.0/local-cli/#install) to be
+installed.
 
 ## Setting environment variables
 Both `config_template.yml` and `config.yml` files contain a set of environment variables
@@ -55,11 +56,10 @@ These environment variables can be directly edited in the `config.yml` file, alt
 you do this you should take into account that the entire set of env vars is repeated on
 every job.
 
-A probably better approach is editing them in `config_template.yml` and then regenerate the `config.yml`
-files using the `generate.sh` script. You can also 
-directly pass environment variable values to the `generate.sh` script
-with the `-e` flag. For example, to set the dtest repo and branch with PAID config 
-you can run:
+A probably better approach is editing them in `config_template.yml` and then regenerate the
+`config.yml` file using the `generate.sh` script. You can also directly pass environment
+variable values to the `generate.sh` script with the `-e` flag. For example, to set the
+dtest repo and branch with MIDRES config you can run:
 
 ```
 generate.sh -p \
@@ -69,10 +69,10 @@ generate.sh -p \
 ```
 
 ## Running tests in a loop
-Running the `generate.sh` script will use `git diff` to find the new or modified tests. 
-The scripts will then create jobs to run each of these new or modified tests for a certain number 
-of times, to verify that they are stable. You can use environment variables to specify the number of 
-iterations of each type of test:
+Running the `generate.sh` script with use `git diff` to find the new or modified tests.
+The script will then create jobs to run each of these new or modified tests for a certain
+number of times, to verify that they are stable. You can use environment variables to
+specify the number of iterations of each type of test:
 ```
 generate.sh -p \
   -e REPEATED_UTESTS_COUNT=500 \
@@ -99,7 +99,6 @@ generate.sh -p \
   -e REPEATED_UTESTS_FQLTOOL=org.apache.cassandra.fqltool.FQLCompareTest \
   -e REPEATED_UTESTS_LONG=org.apache.cassandra.io.sstable.CQLSSTableWriterLongTest#testWideRow \
   -e REPEATED_UTESTS_STRESS=org.apache.cassandra.stress.generate.DistributionGaussianTest \
-  -e REPEATED_SIMULATOR_DTESTS=org.apache.cassandra.simulator.test.TrivialSimulationTest \
   -e REPEATED_DTESTS=cql_test.py,consistency_test.py::TestAvailability::test_simple_strategy \
   -e REPEATED_LARGE_DTESTS=replace_address_test.py::TestReplaceAddress::test_replace_stopped_node \
   -e REPEATED_JVM_DTESTS=org.apache.cassandra.distributed.test.PagingTest#testPaging \
@@ -116,7 +115,6 @@ generate.sh -p \
   -e REPEATED_ANT_TEST_TARGET=test-cdc \
   -e REPEATED_ANT_TEST_CLASS=org.apache.cassandra.cql3.ViewTest \
   -e REPEATED_ANT_TEST_METHODS=testCompoundPartitionKey,testStaticTable \
-  -e REPEATED_ANT_TEST_VNODES=false \
   -e REPEATED_ANT_TEST_COUNT=500
 ```
 Putting all together, you can have runs as complex as:
@@ -131,8 +129,6 @@ generate.sh -p \
   -e REPEATED_UTESTS_LONG_COUNT=100 \
   -e REPEATED_UTESTS_STRESS=org.apache.cassandra.stress.generate.DistributionGaussianTest \
   -e REPEATED_UTESTS_STRESS_COUNT=500 \
-  -e REPEATED_SIMULATOR_DTESTS=org.apache.cassandra.simulator.test.TrivialSimulationTest \
-  -e REPEATED_SIMULATOR_DTESTS_COUNT=500 \
   -e REPEATED_DTESTS=cql_test.py,consistency_test.py::TestAvailability::test_simple_strategy \
   -e REPEATED_DTESTS_COUNT=500 \
   -e REPEATED_LARGE_DTESTS=replace_address_test.py,materialized_views_test.py \
@@ -146,7 +142,6 @@ generate.sh -p \
   -e REPEATED_ANT_TEST_TARGET=test-cdc \
   -e REPEATED_ANT_TEST_CLASS=org.apache.cassandra.cql3.ViewTest \
   -e REPEATED_ANT_TEST_METHODS=testCompoundPartitionKey,testStaticTable \
-  -e REPEATED_ANT_TEST_VNODES=false \
   -e REPEATED_ANT_TEST_COUNT=500
 ```
 
@@ -164,13 +159,12 @@ need to install the [CircleCI CLI](https://circleci.com/docs/2.0/local-cli/#inst
 As for temporal changes done while working in a patch, such as pointing to you dtest repo or
 running a test repeatedly, you can either directly edit `config.yml` or edit `config_template.yml`
 and then regenerate `config.yml` with the `generate.sh` script using a `-f`/`-p` flag.
-When this flag is used only the `config.yml` will be generated. Same workflow applies to the respective
-JDK11+17 CircleCI configuration files.
+When this flag is used only the `config.yml` will be generated.
 
 Please note that any previous swapping or edition of the generated files will be overriden
-by running `generate.sh` with `-a` argument, returning `config.yml`to the default FREE. 
-So if you previously swapped your `config.yml` to PAID you would need to either swap it again 
-or use the `-f`/`-p` script flags.
+by running `generate.sh` with `-a` argument, returning `config.yml` to the default FREE. So if
+you previously swapped your `config.yml` to MIDRES you would need to either swap it
+again or use the `-f`/`-p` script flags.
 
 Read below for details how to generate the files manually without the `generate.sh` script:
 
@@ -192,4 +186,3 @@ Read below for details how to generate the files manually without the `generate.
 7. add the Apache license header to the newly created PAID file:
    `cat license.yml config.yml.PAID > config.yml.PAID.new && mv config.yml.PAID.new config.yml.PAID`
 8. finally, remember to update the config.yml
-

@@ -17,13 +17,18 @@
  */
 package org.apache.cassandra.db.virtual;
 
+import java.util.Collection;
+
 import com.google.common.collect.ImmutableList;
 
-import org.apache.cassandra.db.virtual.model.ThreadPoolRow;
-import org.apache.cassandra.db.virtual.walker.ThreadPoolRowWalker;
-import org.apache.cassandra.index.sai.virtual.StorageAttachedIndexTables;
+import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.index.sai.virtual.IndexesSystemView;
+import org.apache.cassandra.index.sai.virtual.SSTablesSystemView;
+import org.apache.cassandra.index.sai.virtual.SegmentsSystemView;
+import org.apache.cassandra.nodes.virtual.LegacyPeersSystemView;
+import org.apache.cassandra.nodes.virtual.LocalNodeSystemView;
+import org.apache.cassandra.nodes.virtual.PeersSystemView;
 
-import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
 import static org.apache.cassandra.schema.SchemaConstants.VIRTUAL_VIEWS;
 
 public final class SystemViewsKeyspace extends VirtualKeyspace
@@ -32,42 +37,33 @@ public final class SystemViewsKeyspace extends VirtualKeyspace
 
     private SystemViewsKeyspace()
     {
-        super(VIRTUAL_VIEWS, new ImmutableList.Builder<VirtualTable>()
-                    .add(new CachesTable(VIRTUAL_VIEWS))
-                    .add(new ClientsTable(VIRTUAL_VIEWS))
-                    .add(new SettingsTable(VIRTUAL_VIEWS))
-                    .add(new SystemPropertiesTable(VIRTUAL_VIEWS))
-                    .add(new SSTableTasksTable(VIRTUAL_VIEWS))
-                    // Fully backward/forward compatible with the legace ThreadPoolsTable under the same "system_views.thread_pools" name.
-                    .add(CollectionVirtualTableAdapter.create(VIRTUAL_VIEWS,
-                                                              "thread_pools",
-                                                              "Thread pool metrics for all thread pools",
-                                                              new ThreadPoolRowWalker(),
-                                                              Metrics.allThreadPoolMetrics(),
-                                                              ThreadPoolRow::new))
-                    .add(new InternodeOutboundTable(VIRTUAL_VIEWS))
-                    .add(new InternodeInboundTable(VIRTUAL_VIEWS))
-                    .add(new PendingHintsTable(VIRTUAL_VIEWS))
-                    .addAll(TableMetricTables.getAll(VIRTUAL_VIEWS))
-                    .add(new CredentialsCacheKeysTable(VIRTUAL_VIEWS))
-                    .add(new JmxPermissionsCacheKeysTable(VIRTUAL_VIEWS))
-                    .add(new NetworkPermissionsCacheKeysTable(VIRTUAL_VIEWS))
-                    .add(new PermissionsCacheKeysTable(VIRTUAL_VIEWS))
-                    .add(new RolesCacheKeysTable(VIRTUAL_VIEWS))
-                    .add(new CQLMetricsTable(VIRTUAL_VIEWS))
-                    .add(new BatchMetricsTable(VIRTUAL_VIEWS))
-                    .add(new StreamingVirtualTable(VIRTUAL_VIEWS))
-                    .add(new GossipInfoTable(VIRTUAL_VIEWS))
-                    .add(new QueriesTable(VIRTUAL_VIEWS))
-                    .add(new LogMessagesTable(VIRTUAL_VIEWS))
-                    .add(new SnapshotsTable(VIRTUAL_VIEWS))
-                    .add(new PeersTable(VIRTUAL_VIEWS))
-                    .add(new LocalTable(VIRTUAL_VIEWS))
-                    .add(new ClusterMetadataLogTable(VIRTUAL_VIEWS))
-                    .add(new ClusterMetadataDirectoryTable(VIRTUAL_VIEWS))
-                    .addAll(LocalRepairTables.getAll(VIRTUAL_VIEWS))
-                    .addAll(CIDRFilteringMetricsTable.getAll(VIRTUAL_VIEWS))
-                    .addAll(StorageAttachedIndexTables.getAll(VIRTUAL_VIEWS))
-                    .build());
+        super(VIRTUAL_VIEWS, buildTables());
+    }
+
+    private static Collection<VirtualTable> buildTables()
+    {
+        ImmutableList.Builder<VirtualTable> tables = new ImmutableList.Builder<>();
+        if (CassandraRelevantProperties.SYSTEM_VIEWS_INCLUDE_ALL.getBoolean())
+            tables.add(new CachesTable(VIRTUAL_VIEWS))
+                  .add(new ClientsTable(VIRTUAL_VIEWS))
+                  .add(new SettingsTable(VIRTUAL_VIEWS))
+                  .add(new SystemPropertiesTable(VIRTUAL_VIEWS))
+                  .add(new SSTableTasksTable(VIRTUAL_VIEWS))
+                  .add(new ThreadPoolsTable(VIRTUAL_VIEWS))
+                  .add(new InternodeOutboundTable(VIRTUAL_VIEWS))
+                  .add(new InternodeInboundTable(VIRTUAL_VIEWS))
+                  .add(new SSTablesSystemView(VIRTUAL_VIEWS))
+                  .add(new SegmentsSystemView(VIRTUAL_VIEWS))
+                  .addAll(TableMetricTables.getAll(VIRTUAL_VIEWS));
+        if (CassandraRelevantProperties.SYSTEM_VIEWS_INCLUDE_ALL.getBoolean()
+            || CassandraRelevantProperties.SYSTEM_VIEWS_INCLUDE_LOCAL_AND_PEERS.getBoolean())
+            tables.add(new LocalNodeSystemView())
+                  .add(new PeersSystemView())
+                  .add(new LegacyPeersSystemView());
+        if (CassandraRelevantProperties.SYSTEM_VIEWS_INCLUDE_ALL.getBoolean()
+            || CassandraRelevantProperties.SYSTEM_VIEWS_INCLUDE_INDEXES.getBoolean())
+            tables.add(new IndexesSystemView(VIRTUAL_VIEWS));
+
+        return tables.build();
     }
 }

@@ -48,6 +48,7 @@ import org.apache.cassandra.dht.ByteOrderedPartitioner.BytesToken;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.locator.TokenMetadata;
 import org.apache.cassandra.metrics.ClearableHistogram;
 import org.apache.cassandra.schema.CachingParams;
 import org.apache.cassandra.schema.KeyspaceMetadata;
@@ -56,10 +57,9 @@ import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaTestUtil;
 import org.apache.cassandra.service.CacheService;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.service.reads.range.TokenUpdater;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_ORG_CAFFINITAS_OHC_SEGMENTCOUNT;
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -74,7 +74,7 @@ public class RowCacheTest
     @BeforeClass
     public static void defineSchema() throws ConfigurationException
     {
-        TEST_ORG_CAFFINITAS_OHC_SEGMENTCOUNT.setInt(16);
+        System.setProperty("org.caffinitas.ohc.segmentCount", "16");
         SchemaLoader.prepareServer();
         SchemaLoader.createKeyspace(KEYSPACE_CACHED,
                                     KeyspaceParams.simple(1),
@@ -104,7 +104,7 @@ public class RowCacheTest
         // empty the row cache
         CacheService.instance.invalidateRowCache();
 
-        // set global row cache size to 1 MiB
+        // set global row cache size to 1 MB
         CacheService.instance.setRowCacheCapacityInMB(1);
 
         ByteBuffer key = ByteBufferUtil.bytes("rowcachekey");
@@ -149,7 +149,7 @@ public class RowCacheTest
         // empty the row cache
         CacheService.instance.invalidateRowCache();
 
-        // set global row cache size to 1 MiB
+        // set global row cache size to 1 MB
         CacheService.instance.setRowCacheCapacityInMB(1);
 
         // inserting 100 rows into both column families
@@ -231,7 +231,7 @@ public class RowCacheTest
         // empty the row cache
         CacheService.instance.invalidateRowCache();
 
-        // set global row cache size to 1 MiB
+        // set global row cache size to 1 MB
         CacheService.instance.setRowCacheCapacityInMB(1);
 
         // inserting 100 rows into column family
@@ -299,7 +299,7 @@ public class RowCacheTest
     @Test
     public void testRowCacheCleanup() throws Exception
     {
-        StorageService.instance.initServer();
+        StorageService.instance.initServer(0);
         CacheService.instance.setRowCacheCapacityInMB(1);
         rowCacheLoad(100, Integer.MAX_VALUE, 1000);
 
@@ -307,12 +307,12 @@ public class RowCacheTest
         assertEquals(CacheService.instance.rowCache.size(), 100);
         store.cleanupCache();
         assertEquals(CacheService.instance.rowCache.size(), 100);
+        TokenMetadata tmd = StorageService.instance.getTokenMetadata();
         byte[] tk1, tk2;
         tk1 = "key1000".getBytes();
         tk2 = "key1050".getBytes();
-        new TokenUpdater().withTokens(InetAddressAndPort.getByName("127.0.0.1"), new BytesToken(tk1))
-                          .withTokens(InetAddressAndPort.getByName("127.0.0.2"), new BytesToken(tk2))
-                          .update();
+        tmd.updateNormalToken(new BytesToken(tk1), InetAddressAndPort.getByName("127.0.0.1"));
+        tmd.updateNormalToken(new BytesToken(tk2), InetAddressAndPort.getByName("127.0.0.2"));
         store.cleanupCache();
         assertEquals(50, CacheService.instance.rowCache.size());
         CacheService.instance.setRowCacheCapacityInMB(0);
@@ -321,7 +321,7 @@ public class RowCacheTest
     @Test
     public void testInvalidateRowCache() throws Exception
     {
-        StorageService.instance.initServer();
+        StorageService.instance.initServer(0);
         CacheService.instance.setRowCacheCapacityInMB(1);
         rowCacheLoad(100, Integer.MAX_VALUE, 1000);
 
@@ -421,7 +421,7 @@ public class RowCacheTest
         // empty the row cache
         CacheService.instance.invalidateRowCache();
 
-        // set global row cache size to 1 MiB
+        // set global row cache size to 1 MB
         CacheService.instance.setRowCacheCapacityInMB(1);
 
         ByteBuffer key = ByteBufferUtil.bytes("rowcachekey");
@@ -496,16 +496,16 @@ public class RowCacheTest
         // empty the row cache
         CacheService.instance.invalidateRowCache();
 
-        // set global row cache size to 1 MiB
+        // set global row cache size to 1 MB
         CacheService.instance.setRowCacheCapacityInMB(1);
 
         // inserting 100 rows into both column families
         SchemaLoader.insertData(KEYSPACE_CACHED, CF_CACHED, 0, 100);
 
         //force flush for confidence that SSTables exists
-        Util.flush(cachedStore);
+        cachedStore.forceBlockingFlush(UNIT_TESTS);
 
-        ((ClearableHistogram)cachedStore.metric.sstablesPerReadHistogram.cf).clear();
+        ((ClearableHistogram)cachedStore.metric.sstablesPerReadHistogram.tableOrKeyspaceHistogram()).clear();
 
         for (int i = 0; i < 100; i++)
         {
@@ -513,14 +513,14 @@ public class RowCacheTest
 
             Util.getAll(Util.cmd(cachedStore, key).build());
 
-            long count_before = cachedStore.metric.sstablesPerReadHistogram.cf.getCount();
+            long count_before = cachedStore.metric.sstablesPerReadHistogram.tableOrKeyspaceHistogram().getCount();
             Util.getAll(Util.cmd(cachedStore, key).build());
 
             // check that SSTablePerReadHistogram has been updated by zero,
             // so count has been increased and in a 1/2 of requests there were zero read SSTables
-            long count_after = cachedStore.metric.sstablesPerReadHistogram.cf.getCount();
-            double belowMedian = cachedStore.metric.sstablesPerReadHistogram.cf.getSnapshot().getValue(0.49D);
-            double mean_after = cachedStore.metric.sstablesPerReadHistogram.cf.getSnapshot().getMean();
+            long count_after = cachedStore.metric.sstablesPerReadHistogram.tableOrKeyspaceHistogram().getCount();
+            double belowMedian = cachedStore.metric.sstablesPerReadHistogram.tableOrKeyspaceHistogram().getSnapshot().getValue(0.49D);
+            double mean_after = cachedStore.metric.sstablesPerReadHistogram.tableOrKeyspaceHistogram().getSnapshot().getMean();
             assertEquals("SSTablePerReadHistogram should be updated even key found in row cache", count_before + 1, count_after);
             assertTrue("In half of requests we have not touched SSTables, " +
                        "so 49 percentile (" + belowMedian + ") must be strongly less than 0.9", belowMedian < 0.9D);
@@ -528,7 +528,7 @@ public class RowCacheTest
                        "so mean value (" + mean_after + ") must be strongly less than 1, but greater than 0", mean_after < 0.999D && mean_after > 0.001D);
         }
 
-        assertEquals("Min value of SSTablesPerRead should be zero", 0, cachedStore.metric.sstablesPerReadHistogram.cf.getSnapshot().getMin());
+        assertEquals("Min value of SSTablesPerRead should be zero", 0, cachedStore.metric.sstablesPerReadHistogram.tableOrKeyspaceHistogram().getSnapshot().getMin());
 
         CacheService.instance.setRowCacheCapacityInMB(0);
     }

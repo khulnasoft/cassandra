@@ -24,30 +24,33 @@ import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 import javax.annotation.concurrent.GuardedBy;
 
+import com.google.common.util.concurrent.AbstractFuture;
+import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+
 import org.apache.cassandra.utils.Pair;
-import org.apache.cassandra.utils.concurrent.AsyncFuture;
-import org.apache.cassandra.utils.concurrent.Future;
 
 /**
  * Task scheduler that limits the number of concurrent tasks across multiple executors.
  */
-public interface Scheduler
+public abstract class Scheduler
 {
-    default <T> Future<T> schedule(Supplier<Future<T>> task, Executor executor)
+    public final <T> ListenableFuture<T> schedule(Supplier<ListenableFuture<T>> task, Executor executor)
     {
-        return schedule(new Task<>(task), executor);
+        return schedule(new Task<>(task, executor), executor);
     }
 
-    <T> Task<T> schedule(Task<T> task, Executor executor);
+    protected abstract <T> Task<T> schedule(Task<T> task, Executor executor);
 
-    static Scheduler build(int concurrentValidations)
+    public static Scheduler build(int concurrentValidations)
     {
         return concurrentValidations <= 0
                ? new NoopScheduler()
                : new LimitedConcurrentScheduler(concurrentValidations);
     }
 
-    final class NoopScheduler implements Scheduler
+    private static final class NoopScheduler extends Scheduler
     {
         @Override
         public <T> Task<T> schedule(Task<T> task, Executor executor)
@@ -57,17 +60,17 @@ public interface Scheduler
         }
     }
 
-    final class LimitedConcurrentScheduler implements Scheduler
+    private static final class LimitedConcurrentScheduler extends Scheduler
     {
-        private final int concurrentValidations;
+        private final int concurrentTasks;
         @GuardedBy("this")
         private int inflight = 0;
         @GuardedBy("this")
         private final Queue<Pair<Task<?>, Executor>> tasks = new LinkedList<>();
 
-        LimitedConcurrentScheduler(int concurrentValidations)
+        LimitedConcurrentScheduler(int concurrentTasks)
         {
-            this.concurrentValidations = concurrentValidations;
+            this.concurrentTasks = concurrentTasks;
         }
 
         @Override
@@ -84,35 +87,58 @@ public interface Scheduler
             maybeSchedule();
         }
 
+        @SuppressWarnings("UnstableApiUsage")
         private void maybeSchedule()
         {
-            if (inflight == concurrentValidations || tasks.isEmpty())
+            if (inflight == concurrentTasks || tasks.isEmpty())
                 return;
             inflight++;
             Pair<Task<?>, Executor> pair = tasks.poll();
-            pair.left.addCallback((s, f) -> onDone());
+            Futures.addCallback(pair.left, new FutureCallback<Object>() {
+                @Override
+                public void onSuccess(Object result)
+                {
+                    onDone();
+                }
+
+                @Override
+                public void onFailure(Throwable t)
+                {
+                    onDone();
+                }
+            }, pair.right);
             pair.right.execute(pair.left);
         }
     }
 
-    class Task<T> extends AsyncFuture<T> implements Runnable
+    private static class Task<T> extends AbstractFuture<T> implements Runnable
     {
-        private final Supplier<Future<T>> supplier;
+        private final Supplier<ListenableFuture<T>> supplier;
+        private final Executor executor;
 
-        public Task(Supplier<Future<T>> supplier)
+        public Task(Supplier<ListenableFuture<T>> supplier, Executor executor)
         {
             this.supplier = supplier;
+            this.executor = executor;
         }
 
         @Override
+        @SuppressWarnings("UnstableApiUsage")
         public void run()
         {
-            supplier.get().addCallback((s, f) -> {
-                if (f != null)
-                    tryFailure(f);
-                else
-                    trySuccess(s);
-            });
+            Futures.addCallback(supplier.get(), new FutureCallback<T>() {
+                @Override
+                public void onSuccess(T result)
+                {
+                    set(result);
+                }
+
+                @Override
+                public void onFailure(Throwable t)
+                {
+                    setException(t);
+                }
+            }, executor);
         }
     }
 }

@@ -22,13 +22,11 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.distributed.shared.ClusterUtils;
-import org.apache.cassandra.utils.concurrent.Condition;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -39,16 +37,14 @@ import org.apache.cassandra.distributed.api.ICluster;
 import org.apache.cassandra.distributed.api.IInstanceConfig;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.concurrent.SimpleCondition;
+import org.apache.cassandra.utils.progress.ProgressEventType;
 
-import static com.google.common.collect.ImmutableList.of;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.apache.cassandra.distributed.api.Feature.GOSSIP;
 import static org.apache.cassandra.distributed.api.Feature.NETWORK;
 import static org.apache.cassandra.distributed.shared.AssertUtils.assertRows;
 import static org.apache.cassandra.distributed.test.ExecUtil.rethrow;
-import static org.apache.cassandra.service.StorageService.instance;
-import static org.apache.cassandra.utils.concurrent.Condition.newOneTimeCondition;
-import static org.apache.cassandra.utils.progress.ProgressEventType.COMPLETE;
 
 public class RepairTest extends TestBaseImpl
 {
@@ -81,14 +77,14 @@ public class RepairTest extends TestBaseImpl
     private static void flush(ICluster<IInvokableInstance> cluster, String keyspace, int ... nodes)
     {
         for (int node : nodes)
-            cluster.get(node).runOnInstance(rethrow(() -> StorageService.instance.forceKeyspaceFlush(keyspace,
-                                                                                                     ColumnFamilyStore.FlushReason.UNIT_TESTS)));
+            cluster.get(node).runOnInstance(rethrow(() -> StorageService.instance.forceKeyspaceFlush(keyspace)));
     }
 
     private static ICluster create(Consumer<IInstanceConfig> configModifier) throws IOException
     {
         configModifier = configModifier.andThen(
         config -> config.set("hinted_handoff_enabled", false)
+                        .set("commitlog_sync_batch_window_in_ms", 5)
                         .with(NETWORK)
                         .with(GOSSIP)
         );
@@ -99,9 +95,9 @@ public class RepairTest extends TestBaseImpl
     static void repair(ICluster<IInvokableInstance> cluster, String keyspace, Map<String, String> options)
     {
         cluster.get(1).runOnInstance(rethrow(() -> {
-            Condition await = newOneTimeCondition();
-            instance.repair(keyspace, options, of((tag, event) -> {
-                if (event.getType() == COMPLETE)
+            SimpleCondition await = new SimpleCondition();
+            StorageService.instance.repair(keyspace, options, ImmutableList.of((tag, event) -> {
+                if (event.getType() == ProgressEventType.COMPLETE)
                     await.signalAll();
             })).right.get();
             await.await(1L, MINUTES);
@@ -143,7 +139,7 @@ public class RepairTest extends TestBaseImpl
     void shutDownNodesAndForceRepair(ICluster<IInvokableInstance> cluster, String keyspace, int downNode) throws Exception
     {
         populate(cluster, keyspace, "{'enabled': false}");
-        ClusterUtils.stopUnchecked(cluster.get(downNode));
+        cluster.get(downNode).shutdown().get(5, TimeUnit.SECONDS);
         repair(cluster, keyspace, ImmutableMap.of("forceRepair", "true"));
     }
 
@@ -202,7 +198,6 @@ public class RepairTest extends TestBaseImpl
         // The test uses its own keyspace with rf == 2
         String forceRepairKeyspace = "test_force_repair_keyspace";
         int rf = 2;
-        int tokenCount = ClusterUtils.getTokenCount(cluster.get(1));
         cluster.schemaChange("CREATE KEYSPACE " + forceRepairKeyspace + " WITH replication = {'class': 'SimpleStrategy', 'replication_factor': " + rf + "};");
 
         try
@@ -213,9 +208,9 @@ public class RepairTest extends TestBaseImpl
                 Set<String> requestedRanges = row.getSet("requested_ranges");
                 Assert.assertNotNull("Found no successful ranges", successfulRanges);
                 Assert.assertNotNull("Found no requested ranges", requestedRanges);
-                Assert.assertEquals("Requested ranges count should equals to replication factor", rf * tokenCount, requestedRanges.size());
-                Assert.assertTrue("Given clusterSize = 3, RF = 2 and 1 node down in the replica set, it should yield only " + tokenCount + " successful repaired range.",
-                                  successfulRanges.size() == tokenCount && !successfulRanges.contains("")); // the successful ranges set should not only contain empty string
+                Assert.assertEquals("Requested ranges count should equals to replication factor", rf, requestedRanges.size());
+                Assert.assertTrue("Given clusterSize = 3, RF = 2 and 1 node down in the replica set, it should yield only 1 successful repaired range.",
+                                  successfulRanges.size() == 1 && !successfulRanges.contains("")); // the successful ranges set should not only contain empty string
             });
         }
         finally

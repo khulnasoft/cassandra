@@ -26,10 +26,10 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.net.AsyncStreamingOutputPlus;
 import org.apache.cassandra.streaming.ProgressInfo;
 import org.apache.cassandra.streaming.StreamManager;
 import org.apache.cassandra.streaming.StreamSession;
-import org.apache.cassandra.streaming.StreamingDataOutputPlus;
 
 import static org.apache.cassandra.streaming.StreamManager.StreamRateLimiter;
 import static org.apache.cassandra.utils.FBUtilities.prettyPrintMemory;
@@ -53,7 +53,7 @@ public class CassandraEntireSSTableStreamWriter
         this.sstable = sstable;
         this.context = context;
         this.manifest = context.manifest();
-        this.limiter = StreamManager.getEntireSSTableRateLimiter(session.peer);
+        this.limiter = StreamManager.getRateLimiter(session.peer);
     }
 
     /**
@@ -63,7 +63,7 @@ public class CassandraEntireSSTableStreamWriter
      * @param out where this writes data to
      * @throws IOException on any I/O error
      */
-    public void write(StreamingDataOutputPlus out) throws IOException
+    public void write(AsyncStreamingOutputPlus out) throws IOException
     {
         long totalSize = manifest.totalSize();
         logger.debug("[Stream #{}] Start streaming sstable {} to {}, repairedAt = {}, totalSize = {}",
@@ -88,11 +88,12 @@ public class CassandraEntireSSTableStreamWriter
                          component,
                          prettyPrintMemory(length));
 
+            @SuppressWarnings("resource") // this is closed after the file is transferred by AsyncChannelOutputPlus
             FileChannel channel = context.channel(sstable.descriptor, component, length);
             long bytesWritten = out.writeFileToChannel(channel, limiter);
             progress += bytesWritten;
 
-            session.progress(sstable.descriptor.fileFor(component).toString(), ProgressInfo.Direction.OUT, bytesWritten, bytesWritten, length);
+            session.progress(sstable.descriptor.fileFor(component).toString(), ProgressInfo.Direction.OUT, bytesWritten, length);
 
             logger.debug("[Stream #{}] Finished streaming {}.{} gen {} component {} to {}, xfered = {}, length = {}, totalSize = {}",
                          session.planId(),

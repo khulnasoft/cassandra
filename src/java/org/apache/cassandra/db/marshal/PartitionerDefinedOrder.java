@@ -18,54 +18,45 @@
 package org.apache.cassandra.db.marshal;
 
 import java.nio.ByteBuffer;
-import java.util.Objects;
+import java.util.Iterator;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.cql3.terms.Term;
-import org.apache.cassandra.cql3.functions.ArgumentDeserializer;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.PartitionPosition;
-import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.serializers.TypeSerializer;
+import org.apache.cassandra.serializers.MarshalException;
+import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable.Version;
 import org.apache.cassandra.utils.bytecomparable.ByteSource;
-
-import javax.annotation.Nullable;
+import org.apache.cassandra.utils.FBUtilities;
 
 /** for sorting columns representing row keys in the row ordering as determined by a partitioner.
  * Not intended for user-defined CFs, and will in fact error out if used with such. */
 public class PartitionerDefinedOrder extends AbstractType<ByteBuffer>
 {
     private final IPartitioner partitioner;
-    private final AbstractType<?> partitionKeyType;
-    
+
     public PartitionerDefinedOrder(IPartitioner partitioner)
     {
         super(ComparisonType.CUSTOM);
         this.partitioner = partitioner;
-        this.partitionKeyType = null;
-    }
-
-    public PartitionerDefinedOrder(IPartitioner partitioner, AbstractType<?> partitionKeyType)
-    {
-        super(ComparisonType.CUSTOM);
-        this.partitioner = partitioner;
-        this.partitionKeyType = partitionKeyType;
     }
 
     public static AbstractType<?> getInstance(TypeParser parser)
     {
-        return parser.getPartitionerDefinedOrder();
+        IPartitioner partitioner = DatabaseDescriptor.getPartitioner();
+        Iterator<String> argIterator = parser.getKeyValueParameters().keySet().iterator();
+        if (argIterator.hasNext())
+        {
+            partitioner = FBUtilities.newPartitioner(argIterator.next());
+            assert !argIterator.hasNext();
+        }
+        return partitioner.partitionOrdering();
     }
 
-    public AbstractType<?> withPartitionKeyType(AbstractType<?> partitionKeyType)
-    {
-        return new PartitionerDefinedOrder(partitioner, partitionKeyType);
-    }
-    
     @Override
     public <V> ByteBuffer compose(V value, ValueAccessor<V> accessor)
     {
@@ -97,8 +88,7 @@ public class PartitionerDefinedOrder extends AbstractType<ByteBuffer>
     @Override
     public String toJSONString(ByteBuffer buffer, ProtocolVersion protocolVersion)
     {
-        assert partitionKeyType != null : "PartitionerDefinedOrder's toJSONString method needs a partition key type but now is null.";
-        return partitionKeyType.toJSONString(buffer, protocolVersion);
+        throw new UnsupportedOperationException();
     }
 
     public <VL, VR> int compareCustom(VL left, ValueAccessor<VL> accessorL, VR right, ValueAccessor<VR> accessorR)
@@ -114,7 +104,7 @@ public class PartitionerDefinedOrder extends AbstractType<ByteBuffer>
         ByteBuffer buf = ByteBufferAccessor.instance.convert(data, accessor);
         if (version != Version.LEGACY)
         {
-            // For ByteComparable.Version.OSS50 and above we encode an empty key with a null byte source. This
+            // For ByteComparable.Version.OSS41 and above we encode an empty key with a null byte source. This
             // way we avoid the need to special-handle a sentinel value when we decode the byte source for such a key
             // (e.g. for ByteComparable.Version.Legacy we use the minimum key bound of the partitioner's minimum token as
             // a sentinel value, and that results in the need to go twice through the byte source that is being
@@ -140,53 +130,14 @@ public class PartitionerDefinedOrder extends AbstractType<ByteBuffer>
         throw new IllegalStateException("You shouldn't be validating this.");
     }
 
-    @Override
-    public <V> boolean isNull(V buffer, ValueAccessor<V> accessor)
-    {
-        return buffer == null || accessor.isEmpty(buffer);
-    }
-
-    @Override
     public TypeSerializer<ByteBuffer> getSerializer()
     {
         throw new UnsupportedOperationException("You can't do this with a local partitioner.");
     }
 
     @Override
-    public ArgumentDeserializer getArgumentDeserializer()
+    public String toString(boolean ignoreFreezing)
     {
-        throw new UnsupportedOperationException("You can't do this with a local partitioner.");
-    }
-
-    @Override
-    public String toString()
-    {
-        if (partitionKeyType != null && !DatabaseDescriptor.getStorageCompatibilityMode().isBefore(5))
-        {
-            return String.format("%s(%s:%s)", getClass().getName(), partitioner.getClass().getName(), partitionKeyType);
-        }
-        // if Cassandra's major version is before 5, use the old behaviour
         return String.format("%s(%s)", getClass().getName(), partitioner.getClass().getName());
-    }
-    
-    @Nullable
-    public AbstractType<?>  getPartitionKeyType()
-    {
-        return partitionKeyType;
-    }
-
-    @Override
-    public boolean equals(Object obj)
-    {
-        if (this == obj)
-        {
-            return true;
-        }
-        if (obj instanceof PartitionerDefinedOrder)
-        {
-            PartitionerDefinedOrder other = (PartitionerDefinedOrder) obj;
-            return partitioner.equals(other.partitioner) && Objects.equals(partitionKeyType, other.partitionKeyType);
-        }
-        return false;
     }
 }

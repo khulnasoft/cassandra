@@ -22,23 +22,21 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.function.UnaryOperator;
 
+import com.google.common.base.Throwables;
+import org.apache.cassandra.db.lifecycle.LifecycleNewTracker;
+import org.apache.cassandra.io.util.File;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
-import org.apache.cassandra.db.lifecycle.LifecycleNewTracker;
-import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.IOOptions;
 import org.apache.cassandra.io.sstable.SSTableMultiWriter;
-import org.apache.cassandra.io.sstable.SSTableZeroCopyWriter;
+import org.apache.cassandra.io.sstable.format.SSTableFormat;
+import org.apache.cassandra.io.sstable.format.SSTableZeroCopyWriter;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.File;
-import org.apache.cassandra.io.util.SequentialWriterOption;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.streaming.ProgressInfo;
 import org.apache.cassandra.streaming.StreamReceiver;
@@ -63,6 +61,9 @@ public class CassandraEntireSSTableStreamReader implements IStreamReader
 
     public CassandraEntireSSTableStreamReader(StreamMessageHeader messageHeader, CassandraStreamHeader streamHeader, StreamSession session)
     {
+        if (streamHeader.format != SSTableFormat.Type.BIG && streamHeader.format != SSTableFormat.Type.BTI)
+            throw new AssertionError("Unsupported SSTable format " + streamHeader.format);
+
         if (session.getPendingRepair() != null)
         {
             // we should only ever be streaming pending repair sstables if the session has a pending repair id
@@ -82,6 +83,7 @@ public class CassandraEntireSSTableStreamReader implements IStreamReader
      * @return SSTable transferred
      * @throws IOException if reading the remote sstable fails. Will throw an RTE if local write fails.
      */
+    @SuppressWarnings("resource") // input needs to remain open, streams on top of it can't be closed
     @Override
     public SSTableMultiWriter read(DataInputPlus in) throws IOException
     {
@@ -120,8 +122,8 @@ public class CassandraEntireSSTableStreamReader implements IStreamReader
                              prettyPrintMemory(bytesRead),
                              prettyPrintMemory(totalSize));
 
-                writer.writeComponent(component, in, length);
-                session.progress(writer.descriptor.fileFor(component).toString(), ProgressInfo.Direction.IN, length, length, length);
+                writer.writeComponent(component.type, in, length);
+                session.progress(writer.descriptor.fileFor(component).toString(), ProgressInfo.Direction.IN, length, length);
                 bytesRead += length;
 
                 logger.debug("[Stream #{}] Finished receiving {} component from {}, componentSize = {}, readBytes = {}, totalSize = {}",
@@ -144,12 +146,9 @@ public class CassandraEntireSSTableStreamReader implements IStreamReader
         {
             logger.error("[Stream {}] Error while reading sstable from stream for table = {}", session.planId(), cfs.metadata(), e);
             if (writer != null)
-            {
-                Throwable e2 = writer.abort(null);
-                if (e2 != null)
-                    e.addSuppressed(e2);
-            }
-            throw e;
+                e = writer.abort(e);
+            Throwables.throwIfUnchecked(e);
+            throw new RuntimeException(e);
         }
     }
 
@@ -167,6 +166,7 @@ public class CassandraEntireSSTableStreamReader implements IStreamReader
         return dir;
     }
 
+    @SuppressWarnings("resource")
     protected SSTableZeroCopyWriter createWriter(ColumnFamilyStore cfs, long totalSize, Collection<Component> components) throws IOException
     {
         File dataDir = getDataDir(cfs, totalSize);
@@ -176,26 +176,10 @@ public class CassandraEntireSSTableStreamReader implements IStreamReader
 
         LifecycleNewTracker lifecycleNewTracker = CassandraStreamReceiver.fromReceiver(session.getAggregator(tableId)).createLifecycleNewTracker();
 
-        Descriptor desc = cfs.newSSTableDescriptor(dataDir, header.version);
+        Descriptor desc = cfs.newSSTableDescriptor(dataDir, header.version, header.format);
 
-        IOOptions ioOptions = new IOOptions(DatabaseDescriptor.getDiskOptimizationStrategy(),
-                                            DatabaseDescriptor.getDiskAccessMode(),
-                                            DatabaseDescriptor.getIndexAccessMode(),
-                                            DatabaseDescriptor.getDiskOptimizationEstimatePercentile(),
-                                            SequentialWriterOption.newBuilder()
-                                                                  .trickleFsync(false)
-                                                                  .bufferSize(2 << 20)
-                                                                  .bufferType(BufferType.OFF_HEAP)
-                                                                  .build(),
-                                            DatabaseDescriptor.getFlushCompression());
+        logger.debug("[Table #{}] {} Components to write: {}", cfs.metadata(), desc.fileFor(Component.DATA), components);
 
-        logger.debug("[Table #{}] {} Components to write: {}", cfs.metadata(), desc, components);
-        return desc.getFormat()
-                   .getWriterFactory()
-                   .builder(desc)
-                   .setComponents(components)
-                   .setTableMetadataRef(cfs.metadata)
-                   .setIOOptions(ioOptions)
-                   .createZeroCopyWriter(lifecycleNewTracker, cfs);
+        return new SSTableZeroCopyWriter(desc, cfs.metadata, lifecycleNewTracker, components);
     }
 }

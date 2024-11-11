@@ -18,21 +18,22 @@
  */
 package org.apache.cassandra.db.marshal;
 
-import com.google.common.collect.Lists;
+import java.util.Arrays;
+import java.util.List;
+
+import com.google.common.collect.ImmutableMap;
 import org.junit.BeforeClass;
 import org.junit.Test;
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.*;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.SyntaxException;
 
-import java.util.function.Consumer;
+import static org.apache.cassandra.Util.makeUDT;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.fail;
 
 public class TypeParserTest
 {
@@ -100,123 +101,62 @@ public class TypeParserTest
     @Test
     public void testParsePartitionerOrder() throws ConfigurationException, SyntaxException
     {
-        assertForEachPartitioner(partitioner -> {
-            AbstractType<?> type = partitioner.partitionOrdering(null);
-            assertEquals(type, TypeParser.parse(type.toString()));
-        });
-        assertEquals(DatabaseDescriptor.getPartitioner().partitionOrdering(null), TypeParser.parse("PartitionerDefinedOrder"));
-    }
-    
-    @Test
-    public void testParsePartitionerOrderWithBaseType()
-    {
-        // default partitioner
-        assertEquals(DatabaseDescriptor.getPartitioner().partitionOrdering(null), TypeParser.parse("PartitionerDefinedOrder"));
-
-        // PartitionerDefinedOrder's base type is not composite type
-        differentBaseTypeValidation(Int32Type.instance);
-        // PartitionerDefinedOrder's base type is composite type
-        differentBaseTypeValidation(CompositeType.getInstance(Int32Type.instance, UTF8Type.instance));
-        // PartitionerDefinedOrder's base type is tuple type
-        differentBaseTypeValidation(new TupleType(Lists.newArrayList(Int32Type.instance, UTF8Type.instance)));
-        // PartitionerDefinedOrder's base type is ReversedType
-        differentBaseTypeValidation(ReversedType.getInstance(Int32Type.instance));
-        // PartitionerDefinedOrder's base type is CollectionType
-        differentBaseTypeValidation(MapType.getInstance(Int32Type.instance, UTF8Type.instance, false));
-    }
-
-    @Test
-    public void testParsePartitionerOrderMistMatch()
-    {
-        assertForEachPartitioner(partitioner -> {
-            AbstractType<?> type = partitioner.partitionOrdering(null);
-            if (type instanceof PartitionerDefinedOrder && !DatabaseDescriptor.getStorageCompatibilityMode().isBefore(5))
-            {
-                PartitionerDefinedOrder tmp = (PartitionerDefinedOrder) type;
-                type = tmp.withPartitionKeyType(Int32Type.instance);
-                boolean result = partitioner.partitionOrdering(null).equals(TypeParser.parse(type.toString()));
-                assertFalse(result);
-            }
-            else
-            {
-                // ByteOrderedPartitioner.instance and OrderPreservingPartitioner.instance's partitionOrdering will not be PartitionerDefinedOrder
-                boolean result = partitioner.partitionOrdering(null).equals(TypeParser.parse(type.toString()));
-                assertTrue(result);
-            }
-        });
-        assertEquals(DatabaseDescriptor.getPartitioner().partitionOrdering(null), TypeParser.parse("PartitionerDefinedOrder"));
-    }
-
-    @Test
-    public void testParsePartitionerOrderWithErrorFormat()
-    {
-        assertForEachPartitioner(partitioner -> {
-            AbstractType<?> type = partitioner.partitionOrdering(null);
-            if (type instanceof PartitionerDefinedOrder)
-            {
-                // only Murmur3Partitioner and RandomPartitioner's partitionOrdering() are instanceof PartitionerDefinedOrder
-                String msgPartitioner = partitioner instanceof Murmur3Partitioner ? "Murmur3Partitioner" : "RandomPartitioner";
-                // error format PartitionerDefinedOrder(org.apache.cassandra.dht.Murmur3Partitioner,
-                String tmpStr1 =  type.toString().replace(')', ',');
-                try
-                {
-                    TypeParser.parse(tmpStr1);
-                    fail();
-                }
-                catch (Throwable t)
-                {
-                    assertTrue(t.getCause().getMessage().contains("Syntax error parsing 'org.apache.cassandra.db.marshal.PartitionerDefinedOrder(org.apache.cassandra.dht." + msgPartitioner + ",: for msg unexpected character ','"));
-                }
-
-                // error format PartitionerDefinedOrder(org.apache.cassandra.dht.Murmur3Partitioner>
-                String tmpStr2 =  type.toString().replace(')', '>');
-                try
-                {
-                    TypeParser.parse(tmpStr2);
-                    fail();
-                }
-                catch (Throwable t)
-                {
-                    assertTrue(t.getCause().getMessage().contains("Syntax error parsing 'org.apache.cassandra.db.marshal.PartitionerDefinedOrder(org.apache.cassandra.dht." + msgPartitioner + ">: for msg unexpected character '>'"));
-                }
-
-                // error format PartitionerDefinedOrder(org.apache.cassandra.dht.Murmur3Partitioner>
-                String tmpStr3 =  type.toString().replace(')', ':');
-                try
-                {
-                    TypeParser.parse(tmpStr3);
-                    fail();
-                }
-                catch (Throwable t)
-                {
-                    assertTrue(t.getCause().getMessage().contains("Unable to find abstract-type class 'org.apache.cassandra.db.marshal.'"));
-                }
-            }
-        });
-        assertEquals(DatabaseDescriptor.getPartitioner().partitionOrdering(null), TypeParser.parse("PartitionerDefinedOrder"));
-    }
-
-    private void differentBaseTypeValidation(AbstractType<?> baseType)
-    {
-        assertForEachPartitioner(partitioner -> {
-            AbstractType<?> type = partitioner.partitionOrdering(null);
-            if (type instanceof PartitionerDefinedOrder && !DatabaseDescriptor.getStorageCompatibilityMode().isBefore(5))
-            {
-                PartitionerDefinedOrder tmp = (PartitionerDefinedOrder) type;
-                type = tmp.withPartitionKeyType(baseType);
-            }
-            assertEquals(type, TypeParser.parse(type.toString()));
-        });
-    }
-
-    public static void assertForEachPartitioner(Consumer<IPartitioner> consumer)
-    {
-        for (IPartitioner partitioner : new IPartitioner[] { Murmur3Partitioner.instance,
-                                                             ByteOrderedPartitioner.instance,
-                                                             RandomPartitioner.instance,
-                                                             OrderPreservingPartitioner.instance })
+        for (IPartitioner partitioner: new IPartitioner[] { Murmur3Partitioner.instance,
+                                                            ByteOrderedPartitioner.instance,
+                                                            RandomPartitioner.instance,
+                                                            OrderPreservingPartitioner.instance })
         {
-            consumer.accept(partitioner);
+            AbstractType<?> type = partitioner.partitionOrdering();
+            assertSame(type, TypeParser.parse(type.toString()));
+        }
+        assertSame(DatabaseDescriptor.getPartitioner().partitionOrdering(), TypeParser.parse("PartitionerDefinedOrder"));
+    }
+
+    @Test
+    public void testTuple()
+    {
+        List<TupleType> tupleTypes = Arrays.asList(
+                new TupleType(Arrays.asList(UTF8Type.instance, Int32Type.instance), false),
+                new TupleType(Arrays.asList(UTF8Type.instance, Int32Type.instance), true),
+                new TupleType(Arrays.asList(UTF8Type.instance, new TupleType(Arrays.asList(Int32Type.instance, LongType.instance), false)), false),
+                new TupleType(Arrays.asList(UTF8Type.instance, new TupleType(Arrays.asList(Int32Type.instance, LongType.instance), false)), true),
+                new TupleType(Arrays.asList(UTF8Type.instance, new TupleType(Arrays.asList(Int32Type.instance, LongType.instance), true)), false),
+                new TupleType(Arrays.asList(UTF8Type.instance, new TupleType(Arrays.asList(Int32Type.instance, LongType.instance), true)), true),
+                new TupleType(Arrays.asList(UTF8Type.instance, makeUDT("udt", ImmutableMap.of("a", UTF8Type.instance, "b", LongType.instance), false)), false),
+                new TupleType(Arrays.asList(UTF8Type.instance, makeUDT("udt", ImmutableMap.of("a", UTF8Type.instance, "b", LongType.instance), false)), true),
+                new TupleType(Arrays.asList(UTF8Type.instance, makeUDT("udt", ImmutableMap.of("a", UTF8Type.instance, "b", LongType.instance), true)), false),
+                new TupleType(Arrays.asList(UTF8Type.instance, makeUDT("udt", ImmutableMap.of("a", UTF8Type.instance, "b", LongType.instance), true)), true)
+        );
+
+        for (TupleType tupleType : tupleTypes)
+        {
+            assertEquals(tupleType, TypeParser.parse(tupleType.toString()));
+            assertEquals(tupleType.freeze(), TypeParser.parse(tupleType.freeze().toString()));
+            assertEquals(tupleType.expandUserTypes(), TypeParser.parse(tupleType.expandUserTypes().toString()));
+        }
+    }
+
+    @Test
+    public void testParseUDT()
+    {
+        List<UserType> userTypes = Arrays.asList(
+                makeUDT("udt", ImmutableMap.of("a", UTF8Type.instance, "b", LongType.instance), false),
+                makeUDT("udt", ImmutableMap.of("a", UTF8Type.instance, "b", LongType.instance), true),
+                makeUDT("udt", ImmutableMap.of("a", UTF8Type.instance, "b", new TupleType(Arrays.asList(Int32Type.instance, LongType.instance), false)), false),
+                makeUDT("udt", ImmutableMap.of("a", UTF8Type.instance, "b", new TupleType(Arrays.asList(Int32Type.instance, LongType.instance), false)), true),
+                makeUDT("udt", ImmutableMap.of("a", UTF8Type.instance, "b", new TupleType(Arrays.asList(Int32Type.instance, LongType.instance), true)), false),
+                makeUDT("udt", ImmutableMap.of("a", UTF8Type.instance, "b", new TupleType(Arrays.asList(Int32Type.instance, LongType.instance), true)), true),
+                makeUDT("udt", ImmutableMap.of("a", UTF8Type.instance, "b", makeUDT("udt2", ImmutableMap.of("a", UTF8Type.instance, "b", LongType.instance), false)), false),
+                makeUDT("udt", ImmutableMap.of("a", UTF8Type.instance, "b", makeUDT("udt2", ImmutableMap.of("a", UTF8Type.instance, "b", LongType.instance), false)), true),
+                makeUDT("udt", ImmutableMap.of("a", UTF8Type.instance, "b", makeUDT("udt2", ImmutableMap.of("a", UTF8Type.instance, "b", LongType.instance), true)), false),
+                makeUDT("udt", ImmutableMap.of("a", UTF8Type.instance, "b", makeUDT("udt2", ImmutableMap.of("a", UTF8Type.instance, "b", LongType.instance), true)), true)
+        );
+
+        for (UserType userType : userTypes)
+        {
+            assertEquals(userType, TypeParser.parse(userType.toString()));
+            assertEquals(userType.freeze(), TypeParser.parse(userType.freeze().toString()));
+            assertEquals(userType.expandUserTypes(), TypeParser.parse(userType.expandUserTypes().toString()));
         }
     }
 }

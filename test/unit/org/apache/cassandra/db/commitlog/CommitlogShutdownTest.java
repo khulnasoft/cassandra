@@ -22,7 +22,6 @@ import java.nio.ByteBuffer;
 import java.util.Random;
 
 import com.google.common.collect.ImmutableMap;
-import org.apache.cassandra.io.util.File;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -38,6 +37,7 @@ import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.marshal.BytesType;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableId;
 import org.jboss.byteman.contrib.bmunit.BMRule;
@@ -67,7 +67,6 @@ public class CommitlogShutdownTest
         DatabaseDescriptor.setCommitLogSegmentSize(1);
         DatabaseDescriptor.setCommitLogSync(Config.CommitLogSync.periodic);
         DatabaseDescriptor.setCommitLogSyncPeriod(10 * 1000);
-        DatabaseDescriptor.initializeCommitLogDiskAccessMode();
         SchemaLoader.prepareServer();
         SchemaLoader.createKeyspace(KEYSPACE1,
                                     KeyspaceParams.simple(1),
@@ -94,6 +93,6 @@ public class CommitlogShutdownTest
         CommitLog.instance.shutdownBlocking();
 
         // the shutdown should block until all logs except the currently active one and perhaps a new, empty one are gone
-        Assert.assertTrue(new File(DatabaseDescriptor.getCommitLogLocation()).tryList().length <= 2);
+        Assert.assertTrue(DatabaseDescriptor.getCommitLogLocation().tryList().length <= 2);
     }
 }

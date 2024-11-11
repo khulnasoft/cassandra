@@ -18,9 +18,6 @@
 
 package org.apache.cassandra.tools;
 
-import org.apache.cassandra.utils.Shared;
-
-@Shared
 public class SystemExitException extends Error
 {
     public final int status;

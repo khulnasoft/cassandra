@@ -19,7 +19,6 @@ package org.apache.cassandra.concurrent;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -27,24 +26,18 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import com.google.common.annotations.VisibleForTesting;
 
-import org.apache.cassandra.utils.WithResources;
-import org.apache.cassandra.utils.concurrent.Future;
-import org.apache.cassandra.utils.MBeanWrapper;
-import org.apache.cassandra.utils.concurrent.Condition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.metrics.ThreadPoolMetrics;
+import org.apache.cassandra.utils.MBeanWrapper;
+import org.apache.cassandra.utils.concurrent.SimpleCondition;
 
-import static org.apache.cassandra.concurrent.SEPExecutor.TakeTaskPermitResult.*;
 import static org.apache.cassandra.concurrent.SEPWorker.Work;
-import static org.apache.cassandra.utils.concurrent.Condition.newOneTimeCondition;
 
-public class SEPExecutor implements LocalAwareExecutorPlus, SEPExecutorMBean
+public class SEPExecutor extends AbstractLocalAwareExecutorService implements SEPExecutorMBean
 {
     private static final Logger logger = LoggerFactory.getLogger(SEPExecutor.class);
-    private static final TaskFactory taskFactory = TaskFactory.localAware();
-
     private final SharedExecutorPool pool;
 
     private final AtomicInteger maximumPoolSize;
@@ -62,15 +55,15 @@ public class SEPExecutor implements LocalAwareExecutorPlus, SEPExecutorMBean
     private final AtomicLong completedTasks = new AtomicLong();
 
     volatile boolean shuttingDown = false;
-    final Condition shutdown = newOneTimeCondition();
+    final SimpleCondition shutdown = new SimpleCondition();
 
     // TODO: see if other queue implementations might improve throughput
-    protected final ConcurrentLinkedQueue<Runnable> tasks = new ConcurrentLinkedQueue<>();
+    protected final ConcurrentLinkedQueue<FutureTask<?>> tasks = new ConcurrentLinkedQueue<>();
 
     SEPExecutor(SharedExecutorPool pool, int maximumPoolSize, MaximumPoolSizeListener maximumPoolSizeListener, String jmxPath, String name)
     {
         this.pool = pool;
-        this.name = NamedThreadFactory.globalPrefix() + name;
+        this.name = name;
         this.mbeanName = "org.apache.cassandra." + jmxPath + ":type=" + name;
         this.maximumPoolSize = new AtomicInteger(maximumPoolSize);
         this.maximumPoolSizeListener = maximumPoolSizeListener;
@@ -82,21 +75,6 @@ public class SEPExecutor implements LocalAwareExecutorPlus, SEPExecutorMBean
     protected void onCompletion()
     {
         completedTasks.incrementAndGet();
-    }
-
-    @Override
-    public long oldestTaskQueueTime()
-    {
-        Runnable task = tasks.peek();
-        if (!(task instanceof FutureTask))
-            return 0L;
-
-        FutureTask<?> futureTask = (FutureTask<?>) task;
-        DebuggableTask debuggableTask = futureTask.debuggableTask();
-        if (debuggableTask == null)
-            return 0L;
-
-        return debuggableTask.elapsedSinceCreation();
     }
 
     @Override
@@ -116,7 +94,7 @@ public class SEPExecutor implements LocalAwareExecutorPlus, SEPExecutorMBean
         return true;
     }
 
-    protected <T extends Runnable> T addTask(T task)
+    protected void addTask(FutureTask<?> task)
     {
         // we add to the queue first, so that when a worker takes a task permit it can be certain there is a task available
         // this permits us to schedule threads non-spuriously; it also means work is serviced fairly
@@ -141,7 +119,6 @@ public class SEPExecutor implements LocalAwareExecutorPlus, SEPExecutorMBean
             // worker, we simply start a worker in a spinning state
             pool.maybeStartSpinningWorker();
         }
-        return task;
     }
 
     public enum TakeTaskPermitResult
@@ -149,7 +126,7 @@ public class SEPExecutor implements LocalAwareExecutorPlus, SEPExecutorMBean
         NONE_AVAILABLE,        // No task permits available
         TOOK_PERMIT,           // Took a permit and reduced task permits
         RETURNED_WORK_PERMIT   // Detected pool shrinking and returned work permit ahead of SEPWorker exit.
-    }
+    };
 
     // takes permission to perform a task, if any are available; once taken it is guaranteed
     // that a proceeding call to tasks.poll() will return some work
@@ -167,14 +144,14 @@ public class SEPExecutor implements LocalAwareExecutorPlus, SEPExecutorMBean
                 // Work permits are negative when the pool is reducing in size.  Atomically
                 // adjust the number of work permits so there is no race of multiple SEPWorkers
                 // exiting.  On conflicting update, recheck.
-                result = RETURNED_WORK_PERMIT;
+                result = TakeTaskPermitResult.RETURNED_WORK_PERMIT;
                 updated = updateWorkPermits(current, workPermits + 1);
             }
             else
             {
                 if (taskPermits == 0)
-                    return NONE_AVAILABLE;
-                result = TOOK_PERMIT;
+                    return TakeTaskPermitResult.NONE_AVAILABLE;
+                result = TakeTaskPermitResult.TOOK_PERMIT;
                 updated = updateTaskPermits(current, taskPermits - 1);
             }
             if (permits.compareAndSet(current, updated))
@@ -215,18 +192,18 @@ public class SEPExecutor implements LocalAwareExecutorPlus, SEPExecutorMBean
     }
 
     @Override
-    public void maybeExecuteImmediately(Runnable task)
+    public void maybeExecuteImmediately(Runnable command)
     {
-        task = taskFactory.toExecute(task);
+        FutureTask<?> ft = newTaskFor(command, null);
         if (!takeWorkPermit(false))
         {
-            addTask(task);
+            addTask(ft);
         }
         else
         {
             try
             {
-                task.run();
+                ft.run();
             }
             finally
             {
@@ -237,60 +214,6 @@ public class SEPExecutor implements LocalAwareExecutorPlus, SEPExecutorMBean
                 maybeSchedule();
             }
         }
-    }
-
-    @Override
-    public void execute(Runnable run)
-    {
-        addTask(taskFactory.toExecute(run));
-    }
-
-    @Override
-    public void execute(WithResources withResources, Runnable run)
-    {
-        addTask(taskFactory.toExecute(withResources, run));
-    }
-
-    @Override
-    public Future<?> submit(Runnable run)
-    {
-        return addTask(taskFactory.toSubmit(run));
-    }
-
-    @Override
-    public <T> Future<T> submit(Runnable run, T result)
-    {
-        return addTask(taskFactory.toSubmit(run, result));
-    }
-
-    @Override
-    public <T> Future<T> submit(Callable<T> call)
-    {
-        return addTask(taskFactory.toSubmit(call));
-    }
-
-    @Override
-    public <T> Future<T> submit(WithResources withResources, Runnable run, T result)
-    {
-        return addTask(taskFactory.toSubmit(withResources, run, result));
-    }
-
-    @Override
-    public Future<?> submit(WithResources withResources, Runnable run)
-    {
-        return addTask(taskFactory.toSubmit(withResources, run));
-    }
-
-    @Override
-    public <T> Future<T> submit(WithResources withResources, Callable<T> call)
-    {
-        return addTask(taskFactory.toSubmit(withResources, call));
-    }
-
-    @Override
-    public boolean inExecutor()
-    {
-        throw new UnsupportedOperationException();
     }
 
     public synchronized void shutdown()
@@ -311,7 +234,7 @@ public class SEPExecutor implements LocalAwareExecutorPlus, SEPExecutorMBean
     {
         shutdown();
         List<Runnable> aborted = new ArrayList<>();
-        while (takeTaskPermit(false) == TOOK_PERMIT)
+        while (takeTaskPermit(false) == TakeTaskPermitResult.TOOK_PERMIT)
             aborted.add(tasks.poll());
         return aborted;
     }
@@ -323,7 +246,7 @@ public class SEPExecutor implements LocalAwareExecutorPlus, SEPExecutorMBean
 
     public boolean isTerminated()
     {
-        return shuttingDown && shutdown.isSignalled();
+        return shuttingDown && shutdown.isSignaled();
     }
 
     public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException

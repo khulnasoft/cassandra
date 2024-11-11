@@ -17,21 +17,15 @@
  */
 package org.apache.cassandra.schema;
 
-import java.io.IOException;
 import java.util.*;
 import java.util.stream.Stream;
 
 import com.google.common.collect.ImmutableMap;
-
-import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.tcm.serialization.MetadataSerializer;
-import org.apache.cassandra.tcm.serialization.Version;
+import com.google.common.collect.Sets;
 
 import static java.lang.String.format;
 
 import static com.google.common.collect.Iterables.filter;
-import static org.apache.cassandra.db.TypeSizes.sizeof;
 
 /**
  * For backwards compatibility, in the first instance an IndexMetadata must have
@@ -44,8 +38,6 @@ import static org.apache.cassandra.db.TypeSizes.sizeof;
  */
 public final class Indexes implements Iterable<IndexMetadata>
 {
-    public static final Serializer serializer = new Serializer();
-
     private final ImmutableMap<String, IndexMetadata> indexesByName;
     private final ImmutableMap<UUID, IndexMetadata> indexesById;
 
@@ -222,33 +214,6 @@ public final class Indexes implements Iterable<IndexMetadata>
         {
             indexes.forEach(this::add);
             return this;
-        }
-    }
-
-    public static class Serializer implements MetadataSerializer<Indexes>
-    {
-        public void serialize(Indexes t, DataOutputPlus out, Version version) throws IOException
-        {
-            out.writeInt(t.size());
-            for (IndexMetadata im : t.indexesById.values())
-                IndexMetadata.metadataSerializer.serialize(im, out, version);
-        }
-
-        public Indexes deserialize(DataInputPlus in, Version version) throws IOException
-        {
-            int size = in.readInt();
-            Indexes.Builder builder = Indexes.builder();
-            for (int i = 0; i < size; i++)
-                builder.add(IndexMetadata.metadataSerializer.deserialize(in, version));
-            return builder.build();
-        }
-
-        public long serializedSize(Indexes t, Version version)
-        {
-            int size = sizeof(t.size());
-            for (IndexMetadata metadata : t.indexesById.values())
-                size += IndexMetadata.metadataSerializer.serializedSize(metadata, version);
-            return size;
         }
     }
 }

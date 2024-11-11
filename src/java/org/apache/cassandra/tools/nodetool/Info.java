@@ -51,8 +51,6 @@ public class Info extends NodeToolCmd
         out.printf("%-23s: %s%n", "Gossip active", gossipInitialized);
         out.printf("%-23s: %s%n", "Native Transport active", probe.isNativeTransportRunning());
         out.printf("%-23s: %s%n", "Load", probe.getLoadString());
-        out.printf("%-23s: %s%n", "Uncompressed load", probe.getUncompressedLoadString());
-
         if (gossipInitialized)
             out.printf("%-23s: %s%n", "Generation No", probe.getCurrentGenerationNumber());
         else
@@ -177,16 +175,11 @@ public class Info extends NodeToolCmd
         {
             out.printf("%-23s: (node is not joined to the cluster)%n", "Token");
         }
-
-        out.printf("%-23s: %s%n", "Bootstrap state", probe.getStorageService().getBootstrapState());
-        out.printf("%-23s: %s%n", "Bootstrap failed", probe.getStorageService().isBootstrapFailed());
-        out.printf("%-23s: %s%n", "Decommissioning", probe.getStorageService().isDecommissioning());
-        out.printf("%-23s: %s%n", "Decommission failed", probe.getStorageService().isDecommissionFailed());
     }
 
     /**
-     * Returns the total off heap memory used in MiB.
-     * @return the total off heap memory used in MiB.
+     * Returns the total off heap memory used in MB.
+     * @return the total off heap memory used in MB.
      */
     private static double getOffHeapMemoryUsed(NodeProbe probe)
     {

@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.index.sai.virtual;
 
+import java.util.List;
 import java.util.function.Consumer;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -28,10 +29,15 @@ import org.apache.cassandra.db.virtual.AbstractVirtualTable;
 import org.apache.cassandra.db.virtual.SimpleDataSet;
 import org.apache.cassandra.db.virtual.VirtualTable;
 import org.apache.cassandra.dht.LocalPartitioner;
+import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.index.Index;
+import org.apache.cassandra.index.sai.IndexContext;
+import org.apache.cassandra.index.sai.SSTableIndex;
 import org.apache.cassandra.index.sai.StorageAttachedIndex;
 import org.apache.cassandra.index.sai.StorageAttachedIndexGroup;
-import org.apache.cassandra.index.sai.disk.SSTableIndex;
-import org.apache.cassandra.schema.KeyspaceMetadata;
+import org.apache.cassandra.index.sai.disk.v1.SegmentMetadata;
+import org.apache.cassandra.io.sstable.Descriptor;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
 
@@ -40,7 +46,7 @@ import org.apache.cassandra.schema.TableMetadata;
  */
 public class SegmentsSystemView extends AbstractVirtualTable
 {
-    public static final String NAME = "sai_sstable_index_segments";
+    public static final String NAME = "sstable_index_segments";
 
     public static final String KEYSPACE_NAME = "keyspace_name";
     public static final String INDEX_NAME = "index_name";
@@ -88,8 +94,8 @@ public class SegmentsSystemView extends AbstractVirtualTable
     {
         SimpleDataSet dataset = new SimpleDataSet(metadata());
 
-        forEachIndex(index -> {
-            for (SSTableIndex sstableIndex : index.view())
+        forEachIndex(indexContext -> {
+            for (SSTableIndex sstableIndex : indexContext.getView())
             {
                 sstableIndex.populateSegmentView(dataset);
             }
@@ -98,20 +104,25 @@ public class SegmentsSystemView extends AbstractVirtualTable
         return dataset;
     }
 
-    private void forEachIndex(Consumer<StorageAttachedIndex> process)
+    private void forEachIndex(Consumer<IndexContext> process)
     {
-        for (KeyspaceMetadata ks : Schema.instance.getUserKeyspaces())
+        for (String ks : Schema.instance.getUserKeyspaces().names())
         {
-            Keyspace keyspace = Schema.instance.getKeyspaceInstance(ks.name);
+            Keyspace keyspace = Schema.instance.getKeyspaceInstance(ks);
             if (keyspace == null)
-                throw new IllegalStateException("Unknown keyspace " + ks + ". This can occur if the keyspace is being dropped.");
+                throw new IllegalArgumentException("Unknown keyspace " + ks);
 
             for (ColumnFamilyStore cfs : keyspace.getColumnFamilyStores())
             {
                 StorageAttachedIndexGroup group = StorageAttachedIndexGroup.getIndexGroup(cfs);
 
                 if (group != null)
-                    group.getIndexes().stream().map(index -> (StorageAttachedIndex) index).forEach(process);
+                {
+                    for (Index index : group.getIndexes())
+                    {
+                        process.accept(((StorageAttachedIndex)index).getIndexContext());
+                    }
+                }
             }
         }
     }

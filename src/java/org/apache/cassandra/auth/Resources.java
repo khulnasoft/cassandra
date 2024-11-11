@@ -20,6 +20,8 @@ package org.apache.cassandra.auth;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.apache.cassandra.utils.Hex;
+
 public final class Resources
 {
     /**
@@ -30,7 +32,7 @@ public final class Resources
      */
     public static List<? extends IResource> chain(IResource resource)
     {
-        List<IResource> chain = new ArrayList<>();
+        List<IResource> chain = new ArrayList<IResource>();
         while (true)
         {
            chain.add(resource);
@@ -45,7 +47,7 @@ public final class Resources
      * Creates an IResource instance from its external name.
      * Resource implementation class is inferred by matching against the known IResource
      * impls' root level resources.
-     * @param name external name to create IResource from
+     * @param name
      * @return an IResource instance created from the name
      */
     public static IResource fromName(String name)
@@ -60,5 +62,25 @@ public final class Resources
             return JMXResource.fromName(name);
         else
             throw new IllegalArgumentException(String.format("Name %s is not valid for any resource type", name));
+    }
+
+    @Deprecated
+    public final static String ROOT = "cassandra";
+    @Deprecated
+    public final static String KEYSPACES = "keyspaces";
+
+    @Deprecated
+    public static String toString(List<Object> resource)
+    {
+        StringBuilder buff = new StringBuilder();
+        for (Object component : resource)
+        {
+            buff.append("/");
+            if (component instanceof byte[])
+                buff.append(Hex.bytesToHex((byte[])component));
+            else
+                buff.append(component);
+        }
+        return buff.toString();
     }
 }

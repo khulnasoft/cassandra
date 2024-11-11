@@ -26,6 +26,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -34,10 +35,10 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.exceptions.AuthenticationException;
+import com.khulnasoft.driver.core.Cluster;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.Session;
+import com.khulnasoft.driver.core.exceptions.AuthenticationException;
 import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.audit.AuditEvent;
 import org.apache.cassandra.audit.AuditLogEntryType;
@@ -49,8 +50,6 @@ import org.apache.cassandra.diag.DiagnosticEventService;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.service.EmbeddedCassandraService;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.SUPERUSER_SETUP_DELAY_MS;
-import static org.apache.cassandra.utils.concurrent.BlockingQueues.newBlockingQueue;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -58,20 +57,20 @@ import static org.junit.Assert.assertTrue;
 public class CQLUserAuditTest
 {
     private static EmbeddedCassandraService embedded;
-    private static final BlockingQueue<AuditEvent> auditEvents = newBlockingQueue();
+    private static final BlockingQueue<AuditEvent> auditEvents = new LinkedBlockingQueue<>();
 
     @BeforeClass
     public static void setup() throws Exception
     {
         OverrideConfigurationLoader.override((config) -> {
-            config.authenticator = new ParameterizedClass("PasswordAuthenticator");
-            config.role_manager = new ParameterizedClass("CassandraRoleManager");
+            config.authenticator = "PasswordAuthenticator";
+            config.role_manager = "CassandraRoleManager";
             config.diagnostic_events_enabled = true;
             config.audit_logging_options.enabled = true;
             config.audit_logging_options.logger = new ParameterizedClass("DiagnosticEventAuditLogger", null);
         });
 
-        SUPERUSER_SETUP_DELAY_MS.setLong(0);
+        System.setProperty("cassandra.superuser_setup_delay_ms", "0");
 
         embedded = ServerTestUtils.startEmbeddedCassandraService();
 
@@ -230,9 +229,9 @@ public class CQLUserAuditTest
         AuditEvent event = auditEvents.poll(100, TimeUnit.MILLISECONDS);
         assertEquals(expectedAuthType, event.getType());
         assertTrue(!authFailed || event.getType() == AuditLogEntryType.LOGIN_ERROR);
-        assertEquals(InetAddressAndPort.getLoopbackAddress().getAddress(),
-                     event.getEntry().getSource().getAddress());
-        assertTrue(event.getEntry().getSource().getPort() > 0);
+        assertEquals(InetAddressAndPort.getLoopbackAddress().address,
+                     event.getEntry().getSource().address);
+        assertTrue(event.getEntry().getSource().port > 0);
         if (event.getType() != AuditLogEntryType.LOGIN_ERROR)
             assertEquals(username, event.toMap().get("user"));
 

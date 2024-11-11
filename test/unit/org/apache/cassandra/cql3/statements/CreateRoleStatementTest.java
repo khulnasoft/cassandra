@@ -22,7 +22,6 @@ import com.google.common.collect.Sets;
 import org.junit.Assert;
 import org.junit.Test;
 
-import org.apache.cassandra.auth.CIDRPermissions;
 import org.apache.cassandra.auth.DCPermissions;
 import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.CQLTester;
@@ -43,19 +42,14 @@ public class CreateRoleStatementTest extends CQLTester
         return parse(query).dcPermissions;
     }
 
-    private static CIDRPermissions cidrPerms(String query)
-    {
-        return parse(query).cidrPermissions;
-    }
-
     @Test
-    public void allDcsImplicit()
+    public void allDcsImplicit() throws Exception
     {
         Assert.assertFalse(dcPerms("CREATE ROLE role").restrictsAccess());
     }
 
     @Test
-    public void allDcsExplicit()
+    public void allDcsExplicit() throws Exception
     {
         Assert.assertFalse(dcPerms("CREATE ROLE role WITH ACCESS TO ALL DATACENTERS").restrictsAccess());
     }
@@ -69,38 +63,11 @@ public class CreateRoleStatementTest extends CQLTester
     }
 
     @Test
-    public void multiDcs()
+    public void multiDcs() throws Exception
     {
         DCPermissions perms = dcPerms("CREATE ROLE role WITH ACCESS TO DATACENTERS {'dc1', 'dc2'}");
         Assert.assertTrue(perms.restrictsAccess());
         Assert.assertEquals(Sets.newHashSet("dc1", "dc2"), perms.allowedDCs());
-    }
 
-    @Test
-    public void allCidrsImplicit() throws Exception
-    {
-        Assert.assertFalse(cidrPerms("CREATE ROLE role").restrictsAccess());
-    }
-
-    @Test
-    public void allCidrsExplicit()
-    {
-        Assert.assertFalse(dcPerms("CREATE ROLE role WITH ACCESS FROM ALL CIDRS").restrictsAccess());
-    }
-
-    @Test
-    public void singleCidr()
-    {
-        CIDRPermissions perms = cidrPerms("CREATE ROLE role WITH ACCESS FROM CIDRS {'aodc'}");
-        Assert.assertTrue(perms.restrictsAccess());
-        Assert.assertEquals(Sets.newHashSet("aodc"), perms.allowedCIDRGroups());
-    }
-
-    @Test
-    public void multiCidrs()
-    {
-        CIDRPermissions perms = cidrPerms("CREATE ROLE role WITH ACCESS FROM CIDRS {'aodc', 'aws'}");
-        Assert.assertTrue(perms.restrictsAccess());
-        Assert.assertEquals(Sets.newHashSet("aodc", "aws"), perms.allowedCIDRGroups());
     }
 }

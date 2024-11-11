@@ -22,15 +22,11 @@ import java.util.Map;
 
 import io.netty.buffer.ByteBuf;
 
-import org.apache.cassandra.auth.IAuthenticator;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.*;
 import org.apache.cassandra.utils.CassandraVersion;
-
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
-import static org.apache.cassandra.utils.LocalizeString.toUpperCaseLocalized;
 
 /**
  * The initial message of the protocol.
@@ -44,6 +40,10 @@ public class StartupMessage extends Message.Request
     public static final String DRIVER_NAME = "DRIVER_NAME";
     public static final String DRIVER_VERSION = "DRIVER_VERSION";
     public static final String THROW_ON_OVERLOAD = "THROW_ON_OVERLOAD";
+    public static final String EMULATE_DBAAS_DEFAULTS = "EMULATE_DBAAS_DEFAULTS";
+    public static final String PAGE_UNIT = "PAGE_UNIT";
+    public static final String SERVER_VERSION = "SERVER_VERSION";
+    public static final String PRODUCT_TYPE = "PRODUCT_TYPE";
 
     public static final Message.Codec<StartupMessage> codec = new Message.Codec<StartupMessage>()
     {
@@ -63,8 +63,6 @@ public class StartupMessage extends Message.Request
         }
     };
 
-    private static final byte[] EMPTY_CLIENT_RESPONSE = new byte[0];
-
     public final Map<String, String> options;
 
     public StartupMessage(Map<String, String> options)
@@ -74,7 +72,7 @@ public class StartupMessage extends Message.Request
     }
 
     @Override
-    protected Message.Response execute(QueryState state, Dispatcher.RequestTime requestTime, boolean traceRequest)
+    protected Message.Response execute(QueryState state, long queryStartNanoTime, boolean traceRequest)
     {
         String cqlVersion = options.get(CQL_VERSION);
         if (cqlVersion == null)
@@ -92,7 +90,7 @@ public class StartupMessage extends Message.Request
 
         if (options.containsKey(COMPRESSION))
         {
-            String compression = toLowerCaseLocalized(options.get(COMPRESSION));
+            String compression = options.get(COMPRESSION).toLowerCase();
             if (compression.equals("snappy"))
             {
                 if (Compressor.SnappyCompressor.instance == null)
@@ -116,7 +114,6 @@ public class StartupMessage extends Message.Request
         connection.setThrowOnOverload("1".equals(options.get(THROW_ON_OVERLOAD)));
 
         ClientState clientState = state.getClientState();
-        clientState.setClientOptions(options);
         String driverName = options.get(DRIVER_NAME);
         if (null != driverName)
         {
@@ -124,35 +121,8 @@ public class StartupMessage extends Message.Request
             clientState.setDriverVersion(options.get(DRIVER_VERSION));
         }
 
-        IAuthenticator authenticator = DatabaseDescriptor.getAuthenticator();
-        if (authenticator.requireAuthentication())
-        {
-            // If the authenticator supports early authentication, attempt to authenticate.
-            if (authenticator.supportsEarlyAuthentication())
-            {
-                IAuthenticator.SaslNegotiator negotiator = ((ServerConnection) connection).getSaslNegotiator(state);
-                // If the negotiator determines that sending an authenticate message is not necessary, attempt to authenticate here,
-                // otherwise, send an Authenticate message to begin the traditional authentication flow.
-                if (!negotiator.shouldSendAuthenticateMessage())
-                {
-                    // Attempt to authenticate the user.
-                    return AuthUtil.handleLogin(connection, state, EMPTY_CLIENT_RESPONSE, (negotiationComplete, challenge) ->
-                    {
-                        if (negotiationComplete)
-                        {
-                            // Authentication was successful, proceed.
-                            return new ReadyMessage();
-                        } else
-                        {
-                            // It's expected that any negotiator that requires a challenge will likely not support early
-                            // authentication, in this case we can just go through the traditional auth flow.
-                            return authenticator.getAuthenticateMessage(clientState);
-                        }
-                    });
-                }
-            }
-            return authenticator.getAuthenticateMessage(clientState);
-        }
+        if (DatabaseDescriptor.getAuthenticator().requireAuthentication())
+            return new AuthenticateMessage(DatabaseDescriptor.getAuthenticator().getClass().getName());
         else
             return new ReadyMessage();
     }
@@ -161,7 +131,7 @@ public class StartupMessage extends Message.Request
     {
         Map<String, String> newMap = new HashMap<String, String>(options.size());
         for (Map.Entry<String, String> entry : options.entrySet())
-            newMap.put(toUpperCaseLocalized(entry.getKey()), entry.getValue());
+            newMap.put(entry.getKey().toUpperCase(), entry.getValue());
         return newMap;
     }
 

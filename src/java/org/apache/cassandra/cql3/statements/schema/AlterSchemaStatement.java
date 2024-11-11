@@ -17,7 +17,9 @@
  */
 package org.apache.cassandra.cql3.statements.schema;
 
+import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 import com.google.common.collect.ImmutableSet;
 
@@ -26,75 +28,44 @@ import org.apache.cassandra.auth.IResource;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.QueryOptions;
-import org.apache.cassandra.db.compaction.TimeWindowCompactionStrategy;
-import org.apache.cassandra.db.guardrails.Guardrails;
+import org.apache.cassandra.cql3.statements.RawKeyspaceAwareStatement;
 import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.apache.cassandra.schema.*;
+import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.Keyspaces.KeyspacesDiff;
-import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.schema.SchemaConstants;
+import org.apache.cassandra.schema.SchemaTransformation;
 import org.apache.cassandra.service.ClientWarn;
 import org.apache.cassandra.service.QueryState;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.Event.SchemaChange;
 import org.apache.cassandra.transport.messages.ResultMessage;
 
-abstract public class AlterSchemaStatement implements CQLStatement.SingleKeyspaceCqlStatement, SchemaTransformation
+public abstract class AlterSchemaStatement implements CQLStatement.SingleKeyspaceCqlStatement, SchemaTransformation
 {
-    protected final String keyspaceName; // name of the keyspace affected by the statement
-    protected ClientState state;
-    // TODO: not sure if this is going to stay the same, or will be replaced by more efficient serialization/sanitation means
-    // or just `toString` for every statement
-    private String cql;
+    private final String rawCQLStatement;
+    protected String keyspaceName; // name of the keyspace affected by the statement
 
-    protected AlterSchemaStatement(String keyspaceName)
+    protected AlterSchemaStatement(String queryString, String keyspaceName)
     {
+        this.rawCQLStatement = queryString;
         this.keyspaceName = keyspaceName;
     }
 
-    public void setCql(String cql)
+    @Override
+    public String getRawCQLStatement()
     {
-        this.cql = cql;
+        return rawCQLStatement;
     }
 
     @Override
-    public String cql()
+    public void validate(QueryState state)
     {
-        assert cql != null;
-        return cql;
+        // no-op; validation is performed while executing the statement, in apply()
     }
 
-    @Override
-    public void enterExecution()
+    public ResultMessage execute(QueryState state, QueryOptions options, long queryStartNanoTime)
     {
-        ClientWarn.instance.pauseCapture();
-        ClientState localState = state;
-        if (localState != null)
-            localState.pauseGuardrails();
-    }
-
-    @Override
-    public void exitExecution()
-    {
-        ClientWarn.instance.resumeCapture();
-        ClientState localState = state;
-        if (localState != null)
-            localState.resumeGuardrails();
-    }
-
-    // TODO: validation should be performed during application
-    public void validate(ClientState state)
-    {
-        // validation is performed while executing the statement, in apply()
-
-        // Cache our ClientState for use by guardrails
-        this.state = state;
-    }
-
-    @Override
-    public ResultMessage execute(QueryState state, QueryOptions options, Dispatcher.RequestTime requestTime)
-    {
-        return execute(state);
+        return execute(state, false);
     }
 
     @Override
@@ -103,9 +74,14 @@ abstract public class AlterSchemaStatement implements CQLStatement.SingleKeyspac
         return keyspaceName;
     }
 
+    public void overrideKeyspace(Function<String, String> overrideKeyspace)
+    {
+        this.keyspaceName = overrideKeyspace.apply(keyspaceName);
+    }
+
     public ResultMessage executeLocally(QueryState state, QueryOptions options)
     {
-        return execute(state);
+        return execute(state, true);
     }
 
     /**
@@ -137,7 +113,7 @@ abstract public class AlterSchemaStatement implements CQLStatement.SingleKeyspac
         return ImmutableSet.of();
     }
 
-    public ResultMessage execute(QueryState state)
+    public ResultMessage execute(QueryState state, boolean locally)
     {
         if (SchemaConstants.isLocalSystemKeyspace(keyspaceName))
             throw ire("System keyspace '%s' is not user-modifiable", keyspaceName);
@@ -147,24 +123,12 @@ abstract public class AlterSchemaStatement implements CQLStatement.SingleKeyspac
             throw ire("Virtual keyspace '%s' is not user-modifiable", keyspaceName);
 
         validateKeyspaceName();
-        // Perform a 'dry-run' attempt to apply the transformation locally before submitting to the CMS. This can save a
-        // round trip to the CMS for things syntax errors, but also fail fast for things like configuration errors.
-        // Such failures may be dependent on the specific node's config (for things like guardrails/memtable
-        // config/etc), but executing a schema change which has already been committed by the CMS should always succeed
-        // or else the node cannot make progress on any subsequent metadata changes. For this reason, validation errors
-        // during execution are trapped and the node will fall back to safe default config wherever possible. Attempting
-        // to apply the SchemaTransformation at this point will catch any such error which occurs locally before
-        // submission to the CMS, but it can't guarantee that the statement can be applied as-is on every node in the
-        // cluster, as config can be heterogenous falling back to safe defaults may occur on some nodes.
-        ClusterMetadata metadata = ClusterMetadata.current();
-        apply(metadata);
 
-        ClusterMetadata result = Schema.instance.submit(this);
+        SchemaTransformationResult result = Schema.instance.transform(this, locally);
 
-        KeyspacesDiff diff = Keyspaces.diff(metadata.schema.getKeyspaces(), result.schema.getKeyspaces());
-        clientWarnings(diff).forEach(ClientWarn.instance::warn);
+        clientWarnings(result.diff).forEach(ClientWarn.instance::warn);
 
-        if (diff.isEmpty())
+        if (result.diff.isEmpty())
             return new ResultMessage.Void();
 
         /*
@@ -176,9 +140,9 @@ abstract public class AlterSchemaStatement implements CQLStatement.SingleKeyspac
          */
         AuthenticatedUser user = state.getClientState().getUser();
         if (null != user && !user.isAnonymous())
-            createdResources(diff).forEach(r -> grantPermissionsOnResource(r, user));
+            createdResources(result.diff).forEach(r -> grantPermissionsOnResource(r, user));
 
-        return new ResultMessage.SchemaChange(schemaChangeEvent(diff));
+        return new ResultMessage.SchemaChange(schemaChangeEvent(result.diff));
     }
 
     private void validateKeyspaceName()
@@ -189,14 +153,6 @@ abstract public class AlterSchemaStatement implements CQLStatement.SingleKeyspac
                       "or contain non-alphanumeric-underscore characters (got '%s')",
                       SchemaConstants.NAME_LENGTH, keyspaceName);
         }
-    }
-
-    protected void validateDefaultTimeToLive(TableParams params)
-    {
-        if (params.defaultTimeToLive == 0
-            && !SchemaConstants.isSystemKeyspace(keyspaceName)
-            && TimeWindowCompactionStrategy.class.isAssignableFrom(params.compaction.klass()))
-            Guardrails.zeroTTLOnTWCSEnabled.ensureEnabled(state);
     }
 
     private void grantPermissionsOnResource(IResource resource, AuthenticatedUser user)
@@ -220,11 +176,12 @@ abstract public class AlterSchemaStatement implements CQLStatement.SingleKeyspac
         return new InvalidRequestException(String.format(format, args));
     }
 
-    public String toString()
+    public static interface WithKeyspaceAttributes
     {
-        return "AlterSchemaStatement{" +
-               "keyspaceName='" + keyspaceName + '\'' +
-               ", cql='" + cql() + '\'' +
-               '}';
+        Object getAttribute(String key);
+
+        void overrideAttribute(String oldKey, String newKey, String newValue);
+
+        void overrideAttribute(String oldKey, String newKey, Map<String, String> newValue);
     }
 }

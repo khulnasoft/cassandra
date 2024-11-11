@@ -18,23 +18,33 @@
 
 package org.apache.cassandra.db.streaming;
 
-import java.io.IOException;
-import java.nio.channels.FileChannel;
-import java.util.HashMap;
-import java.util.Map;
-
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Sets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
 
+import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Mutable SSTable components and their hardlinks to avoid concurrent sstable component modification
+ * during entire-sstable-streaming.
+ */
 public class ComponentContext implements AutoCloseable
 {
     private static final Logger logger = LoggerFactory.getLogger(ComponentContext.class);
+
+    private static final Set<Component> MUTABLE_COMPONENTS = ImmutableSet.of(Component.STATS, Component.SUMMARY);
 
     private final Map<Component, File> hardLinks;
     private final ComponentManifest manifest;
@@ -45,23 +55,25 @@ public class ComponentContext implements AutoCloseable
         this.manifest = manifest;
     }
 
-    public static ComponentContext create(SSTable sstable)
+    public static ComponentContext create(Descriptor descriptor)
     {
-        Descriptor descriptor = sstable.descriptor;
+        if (!DatabaseDescriptor.supportsHardlinksForEntireSSTableStreaming())
+            return new ComponentContext(Collections.emptyMap(), ComponentManifest.create(descriptor));
+
         Map<Component, File> hardLinks = new HashMap<>(1);
 
-        for (Component component : descriptor.getFormat().mutableComponents())
+        for (Component component : Sets.intersection(MUTABLE_COMPONENTS, descriptor.getFormat().supportedComponents()))
         {
             File file = descriptor.fileFor(component);
             if (!file.exists())
                 continue;
 
-            File hardlink = descriptor.tmpFileForStreaming(component);
+            File hardlink = new File(descriptor.tmpFilenameForStreaming(component));
             FileUtils.createHardLink(file, hardlink);
             hardLinks.put(component, hardlink);
         }
 
-        return new ComponentContext(hardLinks, ComponentManifest.create(sstable));
+        return new ComponentContext(hardLinks, ComponentManifest.create(descriptor));
     }
 
     public ComponentManifest manifest()

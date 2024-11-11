@@ -37,14 +37,13 @@ import org.apache.cassandra.net.Message.Header;
 import org.apache.cassandra.net.FrameDecoder.IntactFrame;
 import org.apache.cassandra.net.FrameDecoder.CorruptFrame;
 import org.apache.cassandra.net.ResourceLimits.Limit;
-import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tracing.TraceState;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.NoSpamLogger;
 
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
-import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
+import static org.apache.cassandra.utils.MonotonicClock.approxTime;
 
 /**
  * Implementation of {@link AbstractMessageHandler} for processing internode messages from peers.
@@ -119,6 +118,12 @@ public class InboundMessageHandler extends AbstractMessageHandler
         this.consumer = consumer;
     }
 
+    @Override
+    protected void onDecoderReactivated()
+    {
+        // No-op for this implementation, as the InboundMessageHandler should not use ClientMetrics
+    }
+
     protected boolean processOneContainedMessage(ShareableBytes bytes, Limit endpointReserve, Limit globalReserve) throws IOException
     {
         ByteBuffer buf = bytes.get();
@@ -173,15 +178,6 @@ public class InboundMessageHandler extends AbstractMessageHandler
         {
             callbacks.onFailedDeserialize(size, header, e);
             noSpamLogger.info("{} incompatible schema encountered while deserializing a message", this, e);
-            ClusterMetadataService.instance().fetchLogFromPeerAsync(header.from, header.epoch);
-        }
-        catch (CMSIdentifierMismatchException e)
-        {
-            callbacks.onFailedDeserialize(size, header, e);
-            logger.error("{} is a member of a different CMS group. Forcing connection close.", header.from, e);
-            MessagingService.instance().closeOutbound(header.from);
-            // Sharable bytes will be released by the frame decoder
-            channel.close();
         }
         catch (Throwable t)
         {
@@ -380,14 +376,6 @@ public class InboundMessageHandler extends AbstractMessageHandler
                 callbacks.onFailedDeserialize(size, header, e);
                 noSpamLogger.info("{} incompatible schema encountered while deserializing a message", InboundMessageHandler.this, e);
             }
-            catch (CMSIdentifierMismatchException e)
-            {
-                callbacks.onFailedDeserialize(size, header, e);
-                noSpamLogger.info("{} is a member of a different CMS group, and should not be tried. Forcing connection close.", header.from);
-                // Sharable bytes will be released by the frame decoder
-                channel.close();
-                MessagingService.instance().closeOutbound(header.from);
-            }
             catch (Throwable t)
             {
                 JVMStabilityInspector.inspectThrowable(t);
@@ -414,31 +402,31 @@ public class InboundMessageHandler extends AbstractMessageHandler
         if (state != null) state.trace("{} message received from {}", header.verb, header.from);
 
         callbacks.onDispatched(task.size(), header);
-        header.verb.stage.execute(ExecutorLocals.create(state), task);
+        header.verb.stage.execute(task, ExecutorLocals.create(state));
     }
 
     private abstract class ProcessMessage implements Runnable
     {
         /**
          * Actually handle the message. Runs on the appropriate {@link Stage} for the {@link Verb}.
-         * <p>
+         *
          * Small messages will come pre-deserialized. Large messages will be deserialized on the stage,
          * just in time, and only then processed.
          */
         public void run()
         {
             Header header = header();
-            long approxStartTimeNanos = approxTime.now();
-            boolean expired = approxTime.isAfter(approxStartTimeNanos, header.expiresAtNanos);
+            long currentTimeNanos = approxTime.now();
+            boolean expired = approxTime.isAfter(currentTimeNanos, header.expiresAtNanos);
 
             boolean processed = false;
             try
             {
-                callbacks.onExecuting(size(), header, approxStartTimeNanos - header.createdAtNanos, NANOSECONDS);
+                callbacks.onExecuting(size(), header, currentTimeNanos - header.createdAtNanos, NANOSECONDS);
 
                 if (expired)
                 {
-                    callbacks.onExpired(size(), header, approxStartTimeNanos - header.createdAtNanos, NANOSECONDS);
+                    callbacks.onExpired(size(), header, currentTimeNanos - header.createdAtNanos, NANOSECONDS);
                     return;
                 }
 
@@ -459,7 +447,7 @@ public class InboundMessageHandler extends AbstractMessageHandler
 
                 releaseResources();
 
-                callbacks.onExecuted(size(), header, approxTime.now() - approxStartTimeNanos, NANOSECONDS);
+                callbacks.onExecuted(size(), header, approxTime.now() - currentTimeNanos, NANOSECONDS);
             }
         }
 

@@ -21,58 +21,129 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Set;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Objects;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 
-import org.slf4j.LoggerFactory;
-
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.config.InheritingClass;
-import org.apache.cassandra.config.ParameterizedClass;
+import org.apache.cassandra.db.memtable.DefaultMemtableFactory;
 import org.apache.cassandra.db.memtable.Memtable;
-import org.apache.cassandra.db.memtable.SkipListMemtableFactory;
 import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.utils.ImmutableUtils;
 
 /**
- * Memtable types and options are specified with these parameters. Memtable classes must either contain a static
- * {@code FACTORY} field (if they take no arguments other than class), or implement a
- * {@code factory(Map<String, String>)} method.
+ * Memtable types and options are specified with these parameters. Memtable classes must either contain a static FACTORY
+ * field (if they take no arguments other than class), or implement a factory(Map<String, String>) method.
  *
- * The latter should consume any further options (using {@code map.remove}).
+ * The latter should consume any further options (using map.remove).
  *
- * See Memtable_API.md for further details on the configuration and usage of memtable implementations.
-  */
+ *
+ * CQL: {'class' : 'SkipListMemtable'}
+ */
 public final class MemtableParams
 {
-    private final Memtable.Factory factory;
-    private final String configurationKey;
-
-    private MemtableParams(Memtable.Factory factory, String configurationKey)
+    public enum Option
     {
-        this.configurationKey = configurationKey;
+        CLASS;
+
+        @Override
+        public String toString()
+        {
+            return name().toLowerCase();
+        }
+    }
+
+    public static final MemtableParams DEFAULT = new MemtableParams();
+
+    public final Memtable.Factory factory;
+    public final ImmutableMap<String, String> options;
+
+    private MemtableParams()
+    {
+        this.options = ImmutableMap.of();
+        this.factory = new DefaultMemtableFactory();
+    }
+
+    public MemtableParams(Map<String, String> options)
+    {
+        this.options = ImmutableMap.copyOf(options);
+        this.factory = getMemtableFactory(options);
+    }
+
+    /**
+     * Useful for testing where we can provide a factory that produces spied instances of memtable so that we can
+     * modify behaviour of certains methods.
+     */
+    @VisibleForTesting
+    public MemtableParams(Memtable.Factory factory, Map<String, String> options)
+    {
+        Preconditions.checkNotNull(factory);
         this.factory = factory;
+        this.options = ImmutableUtils.without(ImmutableMap.copyOf(options), Option.CLASS.toString());
     }
 
-    public String configurationKey()
+    private static Memtable.Factory getMemtableFactory(Map<String, String> options)
     {
-        return configurationKey;
+        Map<String, String> copy = new HashMap<>(options);
+        String className = copy.remove(Option.CLASS.toString());
+        if (className.isEmpty() || className == null)
+            throw new ConfigurationException(
+            "The 'class' option must not be empty. To use default implementation, remove option.");
+
+        className = className.contains(".") ? className : "org.apache.cassandra.db.memtable." + className;
+        try
+        {
+            Memtable.Factory factory;
+            Class<?> clazz = Class.forName(className);
+            try
+            {
+                Method factoryMethod = clazz.getDeclaredMethod("factory", Map.class);
+                factory = (Memtable.Factory) factoryMethod.invoke(null, copy);
+            }
+            catch (NoSuchMethodException e)
+            {
+                // continue with FACTORY field
+                Field factoryField = clazz.getDeclaredField("FACTORY");
+                factory = (Memtable.Factory) factoryField.get(null);
+            }
+            if (!copy.isEmpty())
+                throw new ConfigurationException("Memtable class " + className + " does not accept any futher parameters, but " +
+                                                 copy + " were given.");
+            return factory;
+        }
+        catch (NoSuchFieldException | ClassNotFoundException | IllegalAccessException | InvocationTargetException | ClassCastException e)
+        {
+            if (e.getCause() instanceof ConfigurationException)
+                throw (ConfigurationException) e.getCause();
+            throw new ConfigurationException("Could not create memtable factory for type " + className +
+                                             " and options " + copy, e);
+        }
     }
 
-    public Memtable.Factory factory()
+    public static MemtableParams fromMap(Map<String, String> map)
     {
-        return factory;
+        if (map == null || map.isEmpty())
+        {
+            map = DatabaseDescriptor.getMemtableOptions();
+            if (map == null || map.isEmpty())
+                return DEFAULT;
+        }
+
+        return new MemtableParams(map);
+    }
+
+    public Map<String, String> asMap()
+    {
+        // options is an immutable map, ok to share
+        return options;
     }
 
     @Override
     public String toString()
     {
-        return configurationKey;
+        return options.toString();
     }
 
     @Override
@@ -86,173 +157,12 @@ public final class MemtableParams
 
         MemtableParams c = (MemtableParams) o;
 
-        return Objects.equal(configurationKey, c.configurationKey);
+        return factory.equals(c.factory);
     }
 
     @Override
     public int hashCode()
     {
-        return configurationKey.hashCode();
-    }
-
-    private static final String DEFAULT_CONFIGURATION_KEY = "default";
-    private static final Memtable.Factory DEFAULT_MEMTABLE_FACTORY = SkipListMemtableFactory.INSTANCE;
-    private static final ParameterizedClass DEFAULT_CONFIGURATION = SkipListMemtableFactory.CONFIGURATION;
-    private static final Map<String, ParameterizedClass>
-        CONFIGURATION_DEFINITIONS = expandDefinitions(DatabaseDescriptor.getMemtableConfigurations());
-    private static final Map<String, MemtableParams> CONFIGURATIONS = new HashMap<>();
-    public static final MemtableParams DEFAULT = get(null);
-
-    public static Set<String> knownDefinitions()
-    {
-        return CONFIGURATION_DEFINITIONS.keySet();
-    }
-
-    public static MemtableParams get(String key)
-    {
-        if (key == null)
-            key = DEFAULT_CONFIGURATION_KEY;
-
-        synchronized (CONFIGURATIONS)
-        {
-            return CONFIGURATIONS.computeIfAbsent(key, MemtableParams::parseConfiguration);
-        }
-    }
-
-    public static MemtableParams getWithFallback(String key)
-    {
-        try
-        {
-            return get(key);
-        }
-        catch (ConfigurationException e)
-        {
-            LoggerFactory.getLogger(MemtableParams.class).error("Invalid memtable configuration \"" + key + "\" in schema. " +
-                                                                "Falling back to default to avoid schema mismatch.\n" +
-                                                                "Please ensure the correct definition is given in cassandra.yaml.",
-                                                                e);
-            return new MemtableParams(DEFAULT.factory(), key);
-        }
-    }
-
-    @VisibleForTesting
-    static Map<String, ParameterizedClass> expandDefinitions(Map<String, InheritingClass> memtableConfigurations)
-    {
-        if (memtableConfigurations == null)
-            return ImmutableMap.of(DEFAULT_CONFIGURATION_KEY, DEFAULT_CONFIGURATION);
-
-        LinkedHashMap<String, ParameterizedClass> configs = new LinkedHashMap<>(memtableConfigurations.size() + 1);
-
-        // If default is not overridden, add an entry first so that other configurations can inherit from it.
-        // If it is, process it in its point of definition, so that the default can inherit from another configuration.
-        if (!memtableConfigurations.containsKey(DEFAULT_CONFIGURATION_KEY))
-            configs.put(DEFAULT_CONFIGURATION_KEY, DEFAULT_CONFIGURATION);
-
-        Map<String, InheritingClass> inheritingClasses = new LinkedHashMap<>();
-
-        for (Map.Entry<String, InheritingClass> entry : memtableConfigurations.entrySet())
-        {
-            if (entry.getValue().inherits != null)
-            {
-                if (entry.getKey().equals(entry.getValue().inherits))
-                    throw new ConfigurationException(String.format("Configuration entry %s can not inherit itself.", entry.getKey()));
-
-                if (memtableConfigurations.get(entry.getValue().inherits) == null && !entry.getValue().inherits.equals(DEFAULT_CONFIGURATION_KEY))
-                    throw new ConfigurationException(String.format("Configuration entry %s inherits non-existing entry %s.",
-                                                                   entry.getKey(), entry.getValue().inherits));
-
-                inheritingClasses.put(entry.getKey(), entry.getValue());
-            }
-            else
-                configs.put(entry.getKey(), entry.getValue().resolve(configs));
-        }
-
-        for (Map.Entry<String, InheritingClass> inheritingEntry : inheritingClasses.entrySet())
-        {
-            String inherits = inheritingEntry.getValue().inherits;
-            while (inherits != null)
-            {
-                InheritingClass nextInheritance = inheritingClasses.get(inherits);
-                if (nextInheritance == null)
-                    inherits = null;
-                else
-                    inherits = nextInheritance.inherits;
-
-                if (inherits != null && inherits.equals(inheritingEntry.getKey()))
-                    throw new ConfigurationException(String.format("Detected loop when processing key %s", inheritingEntry.getKey()));
-            }
-        }
-
-        while (!inheritingClasses.isEmpty())
-        {
-            Set<String> forRemoval = new HashSet<>();
-            for (Map.Entry<String, InheritingClass> inheritingEntry : inheritingClasses.entrySet())
-            {
-                if (configs.get(inheritingEntry.getValue().inherits) != null)
-                {
-                    configs.put(inheritingEntry.getKey(), inheritingEntry.getValue().resolve(configs));
-                    forRemoval.add(inheritingEntry.getKey());
-                }
-            }
-
-            assert !forRemoval.isEmpty();
-
-            for (String toRemove : forRemoval)
-                inheritingClasses.remove(toRemove);
-        }
-
-        return ImmutableMap.copyOf(configs);
-    }
-
-    private static MemtableParams parseConfiguration(String configurationKey)
-    {
-        ParameterizedClass definition = CONFIGURATION_DEFINITIONS.get(configurationKey);
-
-        if (definition == null)
-            throw new ConfigurationException("Memtable configuration \"" + configurationKey + "\" not found.");
-        return new MemtableParams(getMemtableFactory(definition), configurationKey);
-    }
-
-
-    private static Memtable.Factory getMemtableFactory(ParameterizedClass options)
-    {
-        // Special-case this so that we don't initialize memtable class for tests that need to delay that.
-        if (options == DEFAULT_CONFIGURATION)
-            return DEFAULT_MEMTABLE_FACTORY;
-
-        String className = options.class_name;
-        if (className == null || className.isEmpty())
-            throw new ConfigurationException("The 'class_name' option must be specified.");
-
-        className = className.contains(".") ? className : "org.apache.cassandra.db.memtable." + className;
-        try
-        {
-            Memtable.Factory factory;
-            Class<?> clazz = Class.forName(className);
-            final Map<String, String> parametersCopy = options.parameters != null
-                                                       ? new HashMap<>(options.parameters)
-                                                       : new HashMap<>();
-            try
-            {
-                Method factoryMethod = clazz.getDeclaredMethod("factory", Map.class);
-                factory = (Memtable.Factory) factoryMethod.invoke(null, parametersCopy);
-            }
-            catch (NoSuchMethodException e)
-            {
-                // continue with FACTORY field
-                Field factoryField = clazz.getDeclaredField("FACTORY");
-                factory = (Memtable.Factory) factoryField.get(null);
-            }
-            if (!parametersCopy.isEmpty())
-                throw new ConfigurationException("Memtable class " + className + " does not accept any futher parameters, but " +
-                                                 parametersCopy + " were given.");
-            return factory;
-        }
-        catch (NoSuchFieldException | ClassNotFoundException | IllegalAccessException | InvocationTargetException | ClassCastException e)
-        {
-            if (e.getCause() instanceof ConfigurationException)
-                throw (ConfigurationException) e.getCause();
-            throw new ConfigurationException("Could not create memtable factory for class " + options, e);
-        }
+        return factory.hashCode();
     }
 }

@@ -1,4 +1,0 @@
-= Overview
-
-* xref:overview/terminology.adoc[]
-* xref:overview/faq/index.adoc[]

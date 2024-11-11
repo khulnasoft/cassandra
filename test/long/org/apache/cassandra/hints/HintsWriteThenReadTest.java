@@ -27,8 +27,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
 
 import com.google.common.collect.Iterables;
-
-import org.apache.cassandra.io.util.File;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
@@ -36,6 +34,7 @@ import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.Schema;
@@ -47,8 +46,6 @@ import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
-
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 
 public class HintsWriteThenReadTest
 {
@@ -63,7 +60,7 @@ public class HintsWriteThenReadTest
         SchemaLoader.prepareServer();
         SchemaLoader.createKeyspace(KEYSPACE, KeyspaceParams.simple(1), SchemaLoader.standardCFMD(KEYSPACE, TABLE));
 
-        HintsDescriptor descriptor = new HintsDescriptor(UUID.randomUUID(), currentTimeMillis());
+        HintsDescriptor descriptor = new HintsDescriptor(UUID.randomUUID(), System.currentTimeMillis());
 
         File directory = new File(Files.createTempDirectory(null));
         try
@@ -98,8 +95,8 @@ public class HintsWriteThenReadTest
 
     private static void verifyChecksum(File directory, HintsDescriptor descriptor) throws IOException
     {
-        File hintsFile = descriptor.file(directory);
-        File checksumFile = descriptor.checksumFile(directory);
+        File hintsFile = new File(directory, descriptor.fileName());
+        File checksumFile = new File(directory, descriptor.checksumFileName());
 
         assertTrue(checksumFile.exists());
 
@@ -114,7 +111,7 @@ public class HintsWriteThenReadTest
         long baseTimestamp = descriptor.timestamp;
         int index = 0;
 
-        try (HintsReader reader = HintsReader.open(descriptor.file(directory)))
+        try (HintsReader reader = HintsReader.open(new File(directory, descriptor.fileName())))
         {
             for (HintsReader.Page page : reader)
             {
@@ -124,12 +121,12 @@ public class HintsWriteThenReadTest
                     Hint hint = hints.next();
 
                     long timestamp = baseTimestamp + index;
-                    Mutation mutation = hint.mutation;
+                    Mutation mutation = hint.mutation();
 
                     assertEquals(timestamp, hint.creationTime);
                     assertEquals(dk(bytes(index)), mutation.key());
 
-                    Row row = mutation.getPartitionUpdates().iterator().next().iterator().next();
+                    Row row = mutation.getPartitionUpdates().iterator().next().rowIterator().next();
                     assertEquals(1, Iterables.size(row.cells()));
                     assertEquals(bytes(index), toByteBuffer(row.clustering().get(0)));
                     Cell<?> cell = row.cells().iterator().next();

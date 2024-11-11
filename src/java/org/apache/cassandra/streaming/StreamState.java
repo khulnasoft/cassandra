@@ -20,22 +20,21 @@ package org.apache.cassandra.streaming;
 import java.io.Serializable;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-
-import org.apache.cassandra.utils.TimeUUID;
 
 /**
  * Current snapshot of streaming progress.
  */
 public class StreamState implements Serializable
 {
-    public final TimeUUID planId;
+    public final UUID planId;
     public final StreamOperation streamOperation;
     public final Set<SessionInfo> sessions;
 
-    public StreamState(TimeUUID planId, StreamOperation streamOperation, Set<SessionInfo> sessions)
+    public StreamState(UUID planId, StreamOperation streamOperation, Set<SessionInfo> sessions)
     {
         this.planId = planId;
         this.sessions = sessions;
@@ -55,9 +54,5 @@ public class StreamState implements Serializable
     public List<SessionSummary> createSummaries()
     {
         return Lists.newArrayList(Iterables.transform(sessions, SessionInfo::createSummary));
-    }
-
-    public Set<SessionInfo> sessions() {
-        return sessions;
     }
 }

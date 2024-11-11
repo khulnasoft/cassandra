@@ -57,31 +57,17 @@ public class NativeCell extends AbstractCell<ByteBuffer>
              cell.column(),
              cell.timestamp(),
              cell.ttl(),
-             cell.localDeletionTimeAsUnsignedInt(),
+             cell.localDeletionTime(),
              cell.buffer(),
              cell.path());
     }
 
-    // Please keep both int/long overloaded ctros public. Otherwise silent casts will mess timestamps when one is not
-    // available.
     public NativeCell(NativeAllocator allocator,
                       OpOrder.Group writeOp,
                       ColumnMetadata column,
                       long timestamp,
                       int ttl,
-                      long localDeletionTime,
-                      ByteBuffer value,
-                      CellPath path)
-    {
-        this(allocator, writeOp, column, timestamp, ttl, deletionTimeLongToUnsignedInteger(localDeletionTime), value, path);
-    }
-
-    public NativeCell(NativeAllocator allocator,
-                      OpOrder.Group writeOp,
-                      ColumnMetadata column,
-                      long timestamp,
-                      int ttl,
-                      int localDeletionTimeUnsignedInteger,
+                      int localDeletionTime,
                       ByteBuffer value,
                       CellPath path)
     {
@@ -104,7 +90,7 @@ public class NativeCell extends AbstractCell<ByteBuffer>
         MemoryUtil.setByte(peer + HAS_CELLPATH, (byte)(path == null ? 0 : 1));
         MemoryUtil.setLong(peer + TIMESTAMP, timestamp);
         MemoryUtil.setInt(peer + TTL, ttl);
-        MemoryUtil.setInt(peer + DELETION, localDeletionTimeUnsignedInteger);
+        MemoryUtil.setInt(peer + DELETION, localDeletionTime);
         MemoryUtil.setInt(peer + LENGTH, value.remaining());
         MemoryUtil.setBytes(peer + VALUE, value);
 
@@ -134,6 +120,11 @@ public class NativeCell extends AbstractCell<ByteBuffer>
         return MemoryUtil.getInt(peer + TTL);
     }
 
+    public int localDeletionTime()
+    {
+        return MemoryUtil.getInt(peer + DELETION);
+    }
+
     public ByteBuffer value()// FIXME: add native accessor
     {
         int length = MemoryUtil.getInt(peer + LENGTH);
@@ -160,28 +151,21 @@ public class NativeCell extends AbstractCell<ByteBuffer>
         throw new UnsupportedOperationException();
     }
 
-    public Cell<?> withUpdatedTimestampAndLocalDeletionTime(long newTimestamp, long newLocalDeletionTime)
+    public Cell<?> withUpdatedTimestampAndLocalDeletionTime(long newTimestamp, int newLocalDeletionTime)
     {
         return new BufferCell(column, newTimestamp, ttl(), newLocalDeletionTime, value(), path());
     }
 
     public Cell<?> withUpdatedColumn(ColumnMetadata column)
     {
-        return new BufferCell(column, timestamp(), ttl(), localDeletionTimeAsUnsignedInt(), value(), path());
+        return new BufferCell(column, timestamp(), ttl(), localDeletionTime(), value(), path());
     }
 
     public Cell withSkippedValue()
     {
-        return new BufferCell(column, timestamp(), ttl(), localDeletionTimeAsUnsignedInt(), ByteBufferUtil.EMPTY_BYTE_BUFFER, path());
+        return new BufferCell(column, timestamp(), ttl(), localDeletionTime(), ByteBufferUtil.EMPTY_BYTE_BUFFER, path());
     }
 
-    @Override
-    public long unsharedHeapSize()
-    {
-        return EMPTY_SIZE;
-    }
-
-    @Override
     public long unsharedHeapSizeExcludingData()
     {
         return EMPTY_SIZE;
@@ -198,11 +182,5 @@ public class NativeCell extends AbstractCell<ByteBuffer>
     private boolean hasPath()
     {
         return MemoryUtil.getByte(peer+ HAS_CELLPATH) != 0;
-    }
-
-    @Override
-    protected int localDeletionTimeAsUnsignedInt()
-    {
-        return MemoryUtil.getInt(peer + DELETION);
     }
 }

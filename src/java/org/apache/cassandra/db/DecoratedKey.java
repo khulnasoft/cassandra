@@ -19,23 +19,17 @@ package org.apache.cassandra.db;
 
 import java.nio.ByteBuffer;
 import java.util.Comparator;
-import java.util.List;
-import java.util.StringJoiner;
 import java.util.function.BiFunction;
 
-import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.dht.Token.KeyBound;
-import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.IFilter.FilterKey;
-import org.apache.cassandra.utils.MurmurHash;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 import org.apache.cassandra.utils.bytecomparable.ByteSource;
 import org.apache.cassandra.utils.bytecomparable.ByteSourceInverse;
-import org.apache.cassandra.utils.memory.HeapCloner;
+import org.apache.cassandra.utils.IFilter.FilterKey;
+import org.apache.cassandra.utils.MurmurHash;
 
 /**
  * Represents a decorated key, handy for certain operations
@@ -48,7 +42,13 @@ import org.apache.cassandra.utils.memory.HeapCloner;
  */
 public abstract class DecoratedKey implements PartitionPosition, FilterKey
 {
-    public static final Comparator<DecoratedKey> comparator = DecoratedKey::compareTo;
+    public static final Comparator<DecoratedKey> comparator = new Comparator<DecoratedKey>()
+    {
+        public int compare(DecoratedKey o1, DecoratedKey o2)
+        {
+            return o1.compareTo(o2);
+        }
+    };
 
     private final Token token;
 
@@ -76,6 +76,7 @@ public abstract class DecoratedKey implements PartitionPosition, FilterKey
         return ByteBufferUtil.compareUnsigned(getKey(), other.getKey()) == 0; // we compare faster than BB.equals for array backed BB
     }
 
+    @Override
     public int compareTo(PartitionPosition pos)
     {
         if (this == pos)
@@ -106,7 +107,7 @@ public abstract class DecoratedKey implements PartitionPosition, FilterKey
     {
         // Note: In the legacy version one encoding could be a prefix of another as the escaping is only weakly
         // prefix-free (see ByteSourceTest.testDecoratedKeyPrefixes()).
-        // The OSS50 version avoids this by adding a terminator.
+        // The OSS41 and 50 versions avoids this by adding a terminator.
         return ByteSource.withTerminatorMaybeLegacy(version,
                                                     ByteSource.END_OF_STREAM,
                                                     token.asComparableBytes(version),
@@ -160,33 +161,6 @@ public abstract class DecoratedKey implements PartitionPosition, FilterKey
         return "DecoratedKey(" + getToken() + ", " + keystring + ")";
     }
 
-    /**
-     * Returns a CQL representation of this key.
-     *
-     * @param metadata the metadata of the table that this key belogs to
-     * @return a CQL representation of this key
-     */
-    public String toCQLString(TableMetadata metadata)
-    {
-        List<ColumnMetadata> columns = metadata.partitionKeyColumns();
-
-        if (columns.size() == 1)
-            return toCQLString(columns.get(0), getKey());
-
-        ByteBuffer[] values = ((CompositeType) metadata.partitionKeyType).split(getKey());
-        StringJoiner joiner = new StringJoiner(" AND ");
-
-        for (int i = 0; i < columns.size(); i++)
-            joiner.add(toCQLString(columns.get(i), values[i]));
-
-        return joiner.toString();
-    }
-
-    private static String toCQLString(ColumnMetadata metadata, ByteBuffer key)
-    {
-        return String.format("%s = %s", metadata.name.toCQLString(), metadata.type.toCQLString(key));
-    }
-
     public Token getToken()
     {
         return token;
@@ -194,17 +168,6 @@ public abstract class DecoratedKey implements PartitionPosition, FilterKey
 
     public abstract ByteBuffer getKey();
     public abstract int getKeyLength();
-
-    /**
-     * If this key occupies only part of a larger buffer, allocate a new buffer that is only as large as necessary.
-     * Otherwise, it returns this key.
-     */
-    public DecoratedKey retainable()
-    {
-        return ByteBufferUtil.canMinimize(getKey())
-               ? new BufferDecoratedKey(getToken(), HeapCloner.instance.clone(getKey()))
-               : this;
-    }
 
     public void filterHash(long[] dest)
     {
@@ -220,17 +183,22 @@ public abstract class DecoratedKey implements PartitionPosition, FilterKey
                                                          IPartitioner partitioner,
                                                          BiFunction<Token, byte[], T> decoratedKeyFactory)
     {
-        ByteSource.Peekable peekable = ByteSource.peekable(byteComparable.asComparableBytes(version));
+        ByteSource.Peekable peekable = byteComparable.asPeekableBytes(version);
         // Decode the token from the first component of the multi-component sequence representing the whole decorated key.
         Token token = partitioner.getTokenFactory().fromComparableBytes(ByteSourceInverse.nextComponentSource(peekable), version);
         // Decode the key bytes from the second component.
         byte[] keyBytes = ByteSourceInverse.getUnescapedBytes(ByteSourceInverse.nextComponentSource(peekable));
-        // Consume the terminator byte.
-        int terminator = peekable.next();
-        assert terminator == ByteSource.TERMINATOR : "Decorated key encoding must end in terminator.";
         // Instantiate a decorated key from the decoded token and key bytes, using the provided factory method.
         return decoratedKeyFactory.apply(token, keyBytes);
     }
+
+    public static byte[] keyFromByteComparable(ByteComparable byteComparable,
+                                               Version version,
+                                               IPartitioner partitioner)
+    {
+        return keyFromByteSource(byteComparable.asPeekableBytes(version), version, partitioner);
+    }
+
 
     public static byte[] keyFromByteSource(ByteSource.Peekable peekableByteSource,
                                            Version version,

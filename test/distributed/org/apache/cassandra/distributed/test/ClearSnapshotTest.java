@@ -60,7 +60,7 @@ public class ClearSnapshotTest extends TestBaseImpl
                                           .withInstanceInitializer(BB::install)
                                           .start()))
         {
-            int tableCount = 20;
+            int tableCount = 50;
             for (int i = 0; i < tableCount; i++)
             {
                 String ksname = "ks"+i;
@@ -100,10 +100,10 @@ public class ClearSnapshotTest extends TestBaseImpl
             long activeRepairs;
             do
             {
-                activeRepairs = cluster.get(1).callOnInstance(() -> ActiveRepairService.instance().parentRepairSessionCount());
+                activeRepairs = cluster.get(1).callOnInstance(() -> ActiveRepairService.instance.parentRepairSessionCount());
                 Thread.sleep(50);
             }
-            while (activeRepairs < 10);
+            while (activeRepairs < 35);
 
             cluster.setUncaughtExceptionsFilter((t) -> t.getMessage() != null && t.getMessage().contains("Parent repair session with id") );
             cluster.get(2).shutdown().get();
@@ -157,6 +157,7 @@ public class ClearSnapshotTest extends TestBaseImpl
         try(Cluster cluster = init(Cluster.build(3).withConfig(config ->
                                                                config.with(GOSSIP)
                                                                      .with(NETWORK))
+                                          .withInstanceInitializer(BB::install)
                                           .start()))
         {
             cluster.schemaChange(withKeyspace("create table %s.tbl (id int primary key, x int)"));

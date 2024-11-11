@@ -23,9 +23,8 @@ import java.nio.ByteBuffer;
 import java.util.Objects;
 
 import org.apache.cassandra.cql3.CQL3Type;
-import org.apache.cassandra.cql3.terms.Constants;
-import org.apache.cassandra.cql3.terms.Term;
-import org.apache.cassandra.cql3.functions.ArgumentDeserializer;
+import org.apache.cassandra.cql3.Constants;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.serializers.TypeSerializer;
 import org.apache.cassandra.serializers.IntegerSerializer;
 import org.apache.cassandra.serializers.MarshalException;
@@ -38,10 +37,6 @@ import org.apache.cassandra.utils.bytecomparable.ByteSourceInverse;
 public final class IntegerType extends NumberType<BigInteger>
 {
     public static final IntegerType instance = new IntegerType();
-
-    private static final ArgumentDeserializer ARGUMENT_DESERIALIZER = new DefaultArgumentDeserializer(instance);
-
-    private static final ByteBuffer MASKED_VALUE = instance.decompose(BigInteger.ZERO);
 
     // Constants or escaping values needed to encode/decode variable-length integers in our custom byte-ordered
     // encoding scheme.
@@ -86,7 +81,6 @@ public final class IntegerType extends NumberType<BigInteger>
         return true;
     }
 
-    @Override
     public boolean isEmptyValueMeaningless()
     {
         return true;
@@ -183,7 +177,7 @@ public final class IntegerType extends NumberType<BigInteger>
      *    2^56-1        as FEFFFFFFFFFFFFFF
      *    2^56          as FF000100000000000000
      *
-     * See {@link #asComparableBytesLegacy} for description of the legacy format.
+     * See {@link #asComparableBytes41} for description of the legacy format.
      */
     @Override
     public <V> ByteSource asComparableBytes(ValueAccessor<V> accessor, V data, ByteComparable.Version version)
@@ -204,12 +198,12 @@ public final class IntegerType extends NumberType<BigInteger>
             }
         }
 
-        if (version != ByteComparable.Version.LEGACY)
+        if (version == ByteComparable.Version.OSS50)
             return (limit - p < FULL_FORM_THRESHOLD)
                    ? encodeAsVarInt(accessor, data, limit)
-                   : asComparableBytesCurrent(accessor, data, p, limit, (signbyte >> 7) & 0xFF);
+                   : asComparableBytes50(accessor, data, p, limit, (signbyte >> 7) & 0xFF);
         else
-            return asComparableBytesLegacy(accessor, data, p, limit, signbyte);
+            return asComparableBytes41(accessor, data, p, limit, signbyte);
     }
 
     /**
@@ -266,13 +260,14 @@ public final class IntegerType extends NumberType<BigInteger>
      * The representations are prefix-free, because representations of different length always have length bytes that
      * differ.
      */
-    private <V> ByteSource asComparableBytesCurrent(ValueAccessor<V> accessor, V data, int startpos, int limit, int signbyte)
+    private <V> ByteSource asComparableBytes50(ValueAccessor<V> accessor, V data, int startpos, int limit, int signbyte)
     {
+        assert startpos >= 0 && startpos + FULL_FORM_THRESHOLD <= limit;
         // start with sign as a byte, then variable-length-encoded length, then bytes (stripped leading sign)
         return new ByteSource()
         {
             int pos = -2;
-            ByteSource lengthEncoding = new VariableLengthUnsignedInteger(limit - startpos - FULL_FORM_THRESHOLD);
+            ByteSource lengthEncoding = new VariableLengthUnsignedInteger(limit - (startpos + FULL_FORM_THRESHOLD));
 
             @Override
             public int next()
@@ -323,7 +318,7 @@ public final class IntegerType extends NumberType<BigInteger>
      *    2^31          as 8380000000
      *    2^32          as 840100000000
      */
-    private <V> ByteSource asComparableBytesLegacy(ValueAccessor<V> accessor, V data, int startpos, int limit, int signbyte)
+    private <V> ByteSource asComparableBytes41(ValueAccessor<V> accessor, V data, int startpos, int limit, int signbyte)
     {
         return new ByteSource()
         {
@@ -362,10 +357,54 @@ public final class IntegerType extends NumberType<BigInteger>
     @Override
     public <V> V fromComparableBytes(ValueAccessor<V> accessor, ByteSource.Peekable comparableBytes, ByteComparable.Version version)
     {
-        assert version != ByteComparable.Version.LEGACY;
         if (comparableBytes == null)
             return accessor.empty();
 
+        switch (version)
+        {
+            case OSS41:
+                return fromComparableBytes41(accessor, comparableBytes);
+            case OSS50:
+                return fromComparableBytes50(accessor, comparableBytes);
+            case LEGACY:
+                throw new AssertionError("Legacy byte-comparable format is not revertible.");
+            default:
+                throw new AssertionError();
+        }
+    }
+
+    private <V> V fromComparableBytes41(ValueAccessor<V> accessor, ByteSource.Peekable comparableBytes)
+    {
+        int valueBytes;
+        byte signedZero;
+        // Consume the first byte to determine whether the encoded number is positive and
+        // start iterating through the length header bytes and collecting the number of value bytes.
+        int curr = comparableBytes.next();
+        if (curr >= POSITIVE_VARINT_HEADER) // positive number
+        {
+            valueBytes = curr - POSITIVE_VARINT_HEADER + 1;
+            while (curr == POSITIVE_VARINT_LENGTH_HEADER)
+            {
+                curr = comparableBytes.next();
+                valueBytes += curr - POSITIVE_VARINT_HEADER + 1;
+            }
+            signedZero = 0;
+        }
+        else // negative number
+        {
+            valueBytes = POSITIVE_VARINT_HEADER - curr;
+            while (curr == NEGATIVE_VARINT_LENGTH_HEADER)
+            {
+                curr = comparableBytes.next();
+                valueBytes += POSITIVE_VARINT_HEADER - curr;
+            }
+            signedZero = -1;
+        }
+        return extractBytes(accessor, comparableBytes, signedZero, valueBytes);
+    }
+
+    public <V> V fromComparableBytes50(ValueAccessor<V> accessor, ByteSource.Peekable comparableBytes)
+    {
         // Consume the first byte to determine whether the encoded number is positive and
         // start iterating through the length header bytes and collecting the number of value bytes.
         int sign = comparableBytes.peek() ^ 0xFF;   // FF if negative, 00 if positive
@@ -507,96 +546,68 @@ public final class IntegerType extends NumberType<BigInteger>
     }
 
     @Override
-    public ArgumentDeserializer getArgumentDeserializer()
+    protected int toInt(ByteBuffer value)
     {
-        return ARGUMENT_DESERIALIZER;
+        throw new UnsupportedOperationException();
     }
 
-    private BigInteger toBigInteger(Number number)
+    @Override
+    protected float toFloat(ByteBuffer value)
     {
-        if (number instanceof BigInteger)
-            return (BigInteger) number;
-
-        return BigInteger.valueOf(number.longValue());
+        throw new UnsupportedOperationException();
     }
 
-    public ByteBuffer add(Number left, Number right)
+    @Override
+    protected long toLong(ByteBuffer value)
     {
-        return decompose(toBigInteger(left).add(toBigInteger(right)));
+        throw new UnsupportedOperationException();
     }
 
-    public ByteBuffer substract(Number left, Number right)
+    @Override
+    protected double toDouble(ByteBuffer value)
     {
-        return decompose(toBigInteger(left).subtract(toBigInteger(right)));
+        throw new UnsupportedOperationException();
     }
 
-    public ByteBuffer multiply(Number left, Number right)
+    @Override
+    protected BigInteger toBigInteger(ByteBuffer value)
     {
-        return decompose(toBigInteger(left).multiply(toBigInteger(right)));
+        return compose(value);
     }
 
-    public ByteBuffer divide(Number left, Number right)
+    @Override
+    public BigDecimal toBigDecimal(ByteBuffer value)
     {
-        return decompose(toBigInteger(left).divide(toBigInteger(right)));
+        return new BigDecimal(compose(value));
     }
 
-    public ByteBuffer mod(Number left, Number right)
+    public ByteBuffer add(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
     {
-        return decompose(toBigInteger(left).remainder(toBigInteger(right)));
+        return decompose(leftType.toBigInteger(left).add(rightType.toBigInteger(right)));
     }
 
-    public ByteBuffer negate(Number input)
+    public ByteBuffer substract(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
+    {
+        return decompose(leftType.toBigInteger(left).subtract(rightType.toBigInteger(right)));
+    }
+
+    public ByteBuffer multiply(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
+    {
+        return decompose(leftType.toBigInteger(left).multiply(rightType.toBigInteger(right)));
+    }
+
+    public ByteBuffer divide(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
+    {
+        return decompose(leftType.toBigInteger(left).divide(rightType.toBigInteger(right)));
+    }
+
+    public ByteBuffer mod(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
+    {
+        return decompose(leftType.toBigInteger(left).remainder(rightType.toBigInteger(right)));
+    }
+
+    public ByteBuffer negate(ByteBuffer input)
     {
         return decompose(toBigInteger(input).negate());
-    }
-
-    @Override
-    public ByteBuffer abs(Number input)
-    {
-        return decompose(toBigInteger(input).abs());
-    }
-
-    @Override
-    public ByteBuffer exp(Number input)
-    {
-        BigInteger bi = toBigInteger(input);
-        BigDecimal bd = new BigDecimal(bi);
-        BigDecimal result = DecimalType.instance.exp(bd);
-        BigInteger out = result.toBigInteger();
-        return IntegerType.instance.decompose(out);
-    }
-
-    @Override
-    public ByteBuffer log(Number input)
-    {
-        BigInteger bi = toBigInteger(input);
-        if (bi.compareTo(BigInteger.ZERO) <= 0) throw new ArithmeticException("Natural log of number zero or less");
-        BigDecimal bd = new BigDecimal(bi);
-        BigDecimal result = DecimalType.instance.log(bd);
-        BigInteger out = result.toBigInteger();
-        return IntegerType.instance.decompose(out);
-    }
-
-    @Override
-    public ByteBuffer log10(Number input)
-    {
-        BigInteger bi = toBigInteger(input);
-        if (bi.compareTo(BigInteger.ZERO) <= 0) throw new ArithmeticException("Log10 of number zero or less");
-        BigDecimal bd = new BigDecimal(bi);
-        BigDecimal result = DecimalType.instance.log10(bd);
-        BigInteger out = result.toBigInteger();
-        return IntegerType.instance.decompose(out);
-    }
-
-    @Override
-    public ByteBuffer round(Number input)
-    {
-        return decompose(toBigInteger(input));
-    }
-
-    @Override
-    public ByteBuffer getMaskedValue()
-    {
-        return MASKED_VALUE;
     }
 }

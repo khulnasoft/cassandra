@@ -20,16 +20,18 @@ package org.apache.cassandra;
  */
 
 import java.io.Closeable;
-import java.io.DataInputStream;
 import java.io.EOFException;
 import java.io.IOError;
 import java.io.IOException;
-import java.io.InputStream;
+import java.lang.reflect.Field;
 import java.math.BigInteger;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -37,13 +39,16 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.IntFunction;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -53,19 +58,13 @@ import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
-
-import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
-import org.apache.cassandra.gms.ApplicationState;
-import org.apache.cassandra.gms.Gossiper;
-import org.apache.cassandra.gms.VersionedValue;
-import org.apache.cassandra.io.util.File;
 import org.apache.commons.lang3.StringUtils;
-import org.junit.Assume;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.ColumnIdentifier;
+import org.apache.cassandra.cql3.FieldIdentifier;
 import org.apache.cassandra.db.AbstractReadCommandBuilder;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ClusteringComparator;
@@ -83,20 +82,16 @@ import org.apache.cassandra.db.PartitionRangeReadCommand;
 import org.apache.cassandra.db.ReadCommand;
 import org.apache.cassandra.db.ReadExecutionController;
 import org.apache.cassandra.db.compaction.AbstractCompactionTask;
-import org.apache.cassandra.db.compaction.ActiveCompactionsTracker;
 import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.db.compaction.CompactionSSTable;
 import org.apache.cassandra.db.compaction.CompactionTasks;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
-import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.locator.ReplicaCollection;
-import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.schema.TableId;
-import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.marshal.Int32Type;
+import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.db.partitions.FilteredPartition;
 import org.apache.cassandra.db.partitions.ImmutableBTreePartition;
 import org.apache.cassandra.db.partitions.Partition;
@@ -114,32 +109,36 @@ import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
-import org.apache.cassandra.db.view.TableViews;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.RandomPartitioner.BigIntegerToken;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.index.internal.CassandraIndex;
+import org.apache.cassandra.gms.ApplicationState;
+import org.apache.cassandra.gms.EndpointState;
+import org.apache.cassandra.gms.Gossiper;
+import org.apache.cassandra.gms.IFailureDetector;
+import org.apache.cassandra.gms.VersionedValue;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableId;
+import org.apache.cassandra.io.sstable.SSTableIdFactory;
 import org.apache.cassandra.io.sstable.SSTableLoader;
 import org.apache.cassandra.io.sstable.SequenceBasedSSTableId;
 import org.apache.cassandra.io.sstable.UUIDBasedSSTableId;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.SSTableReaderWithFilter;
-import org.apache.cassandra.io.util.DataInputPlus;
+import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Replica;
+import org.apache.cassandra.locator.ReplicaCollection;
+import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.schema.TableId;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.service.pager.PagingState;
 import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamState;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.tcm.membership.NodeAddresses;
-import org.apache.cassandra.tcm.membership.NodeVersion;
-import org.apache.cassandra.tcm.serialization.Version;
-import org.apache.cassandra.tcm.transformations.Register;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.CassandraVersion;
@@ -147,12 +146,15 @@ import org.apache.cassandra.utils.CounterId;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.FilterFactory;
 import org.apache.cassandra.utils.OutputHandler;
+import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.Throwables;
+import org.assertj.core.api.Assertions;
 import org.awaitility.Awaitility;
-import org.hamcrest.Matcher;
-import org.mockito.Mockito;
-import org.mockito.internal.stubbing.defaultanswers.ForwardsInvocations;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.equalTo;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.Assert.assertEquals;
@@ -163,6 +165,10 @@ import static org.junit.Assert.assertTrue;
 public class Util
 {
     private static final Logger logger = LoggerFactory.getLogger(Util.class);
+
+    private static List<UUID> hostIdPool = new ArrayList<>();
+
+    public final static TimeUnit supportedMTimeGranularity = getSupportedMTimeGranularity();
 
     public static IPartitioner testPartitioner()
     {
@@ -267,7 +273,7 @@ public class Util
             rm.applyUnsafe();
 
         ColumnFamilyStore store = Keyspace.open(keyspaceName).getColumnFamilyStore(tableId);
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
         return store;
     }
 
@@ -279,19 +285,13 @@ public class Util
     /**
      * Creates initial set of nodes and tokens. Nodes are added to StorageService as 'normal'
      */
-    public static void createInitialRing(List<Token> endpointTokens, List<Token> keyTokens, List<InetAddressAndPort> hosts, List<UUID> hostIds, int howMany) throws UnknownHostException
+    public static void createInitialRing(StorageService ss, IPartitioner partitioner, List<Token> endpointTokens,
+                                         List<Token> keyTokens, List<InetAddressAndPort> hosts, List<UUID> hostIds, int howMany)
+        throws UnknownHostException
     {
-        createInitialRing(endpointTokens, keyTokens, hosts, hostIds, howMany, true);
-    }
-
-    public static void createInitialRing(List<Token> endpointTokens, List<Token> keyTokens, List<InetAddressAndPort> hosts, List<UUID> hostIds, int howMany, boolean bootstrap) throws UnknownHostException
-    {
-        // TODO should probably rewrite tests that use this post CEP-21
-        List<UUID> hostIdPool = new ArrayList<>(howMany);
+        // Expand pool of host IDs as necessary
         for (int i = hostIdPool.size(); i < howMany; i++)
-        {
-            hostIdPool.add(ClusterMetadataTestHelper.register(i + 1).toUUID());
-        }
+            hostIdPool.add(UUID.randomUUID());
 
         boolean endpointTokenPrefilled = endpointTokens != null && !endpointTokens.isEmpty();
         for (int i=0; i<howMany; i++)
@@ -304,40 +304,24 @@ public class Util
 
         for (int i=0; i<endpointTokens.size(); i++)
         {
-            InetAddressAndPort ep = InetAddressAndPort.getByName("127.0.0." + (i + 1));
-            if (bootstrap)
-                ClusterMetadataTestHelper.join(ep, keyTokens.get(i));
+            InetAddressAndPort ep = InetAddressAndPort.getByName("127.0.0." + String.valueOf(i + 1));
+            Gossiper.instance.initializeNodeUnsafe(ep, hostIds.get(i), MessagingService.current_version, 1);
+            Gossiper.instance.injectApplicationState(ep, ApplicationState.TOKENS, new VersionedValue.VersionedValueFactory(partitioner).tokens(Collections.singleton(endpointTokens.get(i))));
+            ss.onChange(ep,
+                        ApplicationState.STATUS_WITH_PORT,
+                        new VersionedValue.VersionedValueFactory(partitioner).normal(Collections.singleton(endpointTokens.get(i))));
+            ss.onChange(ep,
+                        ApplicationState.STATUS,
+                        new VersionedValue.VersionedValueFactory(partitioner).normal(Collections.singleton(endpointTokens.get(i))));
             hosts.add(ep);
         }
 
         // check that all nodes are in token metadata
         for (int i=0; i<endpointTokens.size(); ++i)
-            assertTrue(!bootstrap || ClusterMetadata.current().directory.allAddresses().contains(hosts.get(i)));
+            assertThat(ss.getTokenMetadata().isMember(hosts.get(i))).withFailMessage("%s is not a member of token metadata", hosts.get(i)).isTrue();
     }
 
-    public static void initGossipTokens(IPartitioner partitioner,
-                                        List<Token> endpointTokens,
-                                        List<InetAddressAndPort> hosts,
-                                        List<UUID> hostIds,
-                                        int howMany) throws UnknownHostException
-    {
-        for (int i=0; i<howMany; i++)
-        {
-            InetAddressAndPort ep = InetAddressAndPort.getByName("127.0.0." + (i + 1));
-            hosts.add(ep);
-            UUID hostId = new UUID(0L, (long)i+1);
-            hostIds.add(hostId);
-            Token t = partitioner.getRandomToken();
-            endpointTokens.add(t);
-            Collection<Token> tokens = Collections.singleton(partitioner.getRandomToken());
-
-            Gossiper.instance.initializeNodeUnsafe(ep, hostId, MessagingService.current_version, 1);
-            VersionedValue.VersionedValueFactory values = new VersionedValue.VersionedValueFactory(partitioner);
-            Gossiper.instance.injectApplicationState(ep, ApplicationState.TOKENS, values.tokens(tokens));
-        }
-    }
-
-    public static Future<?> compactAll(ColumnFamilyStore cfs, long gcBefore)
+    public static Future<?> compactAll(ColumnFamilyStore cfs, int gcBefore)
     {
         List<Descriptor> descriptors = new ArrayList<>();
         for (SSTableReader sstable : cfs.getLiveSSTables())
@@ -347,12 +331,45 @@ public class Util
 
     public static void compact(ColumnFamilyStore cfs, Collection<SSTableReader> sstables)
     {
-        long gcBefore = cfs.gcBefore(FBUtilities.nowInSeconds());
-        try (CompactionTasks tasks = cfs.getCompactionStrategyManager().getUserDefinedTasks(sstables, gcBefore))
+        int gcBefore = cfs.gcBefore(FBUtilities.nowInSeconds());
+        try (CompactionTasks tasks = cfs.getCompactionStrategy().getUserDefinedTasks(sstables, gcBefore))
         {
             for (AbstractCompactionTask task : tasks)
-                task.execute(ActiveCompactionsTracker.NOOP);
+                task.execute();
         }
+    }
+
+    /**
+     * Checks that the provided SSTable set does not overlap. The result of a major compaction should satisfy this.
+     */
+    public static void assertNoOverlap(Collection<? extends CompactionSSTable> liveSet)
+    {
+        for (CompactionSSTable rdr1 : liveSet)
+        {
+            for (CompactionSSTable rdr2 : liveSet)
+            {
+                if (rdr1 == rdr2)
+                    continue;
+
+                assertFalse(rdr1.getBounds().intersects(rdr2.getBounds()));
+            }
+        }
+    }
+
+    /**
+     * Perform full compaction, everything in the given CFS to one file. Unlike major compaction, this must also compact
+     * non-overlapping files, and should try to not split output.
+     */
+    public static void forceFullCompaction(ColumnFamilyStore cfs, int timeoutInSeconds)
+    {
+        FBUtilities.await(
+            CompactionManager.instance.submitUserDefined(cfs,
+                                                         cfs.getLiveSSTables()
+                                                            .stream()
+                                                            .map(s -> s.getDescriptor())
+                                                            .collect(Collectors.toList()),
+                                                         FBUtilities.nowInSeconds()),
+            Duration.ofSeconds(timeoutInSeconds));
     }
 
     public static void expectEOF(Callable<?> callable)
@@ -426,17 +443,17 @@ public class Util
         }
     }
 
-    public static List<ImmutableBTreePartition> getAllUnfiltered(ReadCommand command)
+    public static List<Partition> getAllUnfiltered(ReadCommand command)
     {
         try (ReadExecutionController controller = command.executionController())
         {
             return getAllUnfiltered(command, controller);
         }
     }
-    
-    public static List<ImmutableBTreePartition> getAllUnfiltered(ReadCommand command, ReadExecutionController controller)
+
+    public static List<Partition> getAllUnfiltered(ReadCommand command, ReadExecutionController controller)
     {
-        List<ImmutableBTreePartition> results = new ArrayList<>();
+        List<Partition> results = new ArrayList<>();
         try (UnfilteredPartitionIterator iterator = command.executeLocally(controller))
         {
             while (iterator.hasNext())
@@ -457,7 +474,7 @@ public class Util
             return getAll(command, controller);
         }
     }
-    
+
     public static List<FilteredPartition> getAll(ReadCommand command, ReadExecutionController controller)
     {
         List<FilteredPartition> results = new ArrayList<>();
@@ -509,15 +526,15 @@ public class Util
         }
     }
 
-    public static ImmutableBTreePartition getOnlyPartitionUnfiltered(ReadCommand cmd)
+    public static Partition getOnlyPartitionUnfiltered(ReadCommand cmd)
     {
         try (ReadExecutionController controller = cmd.executionController())
         {
             return getOnlyPartitionUnfiltered(cmd, controller);
         }
     }
-    
-    public static ImmutableBTreePartition getOnlyPartitionUnfiltered(ReadCommand cmd, ReadExecutionController controller)
+
+    public static Partition getOnlyPartitionUnfiltered(ReadCommand cmd, ReadExecutionController controller)
     {
         try (UnfilteredPartitionIterator iterator = cmd.executeLocally(controller))
         {
@@ -534,7 +551,7 @@ public class Util
     {
         return getOnlyPartition(cmd, false);
     }
-    
+
     public static FilteredPartition getOnlyPartition(ReadCommand cmd, boolean trackRepairedStatus)
     {
         try (ReadExecutionController executionController = cmd.executionController(trackRepairedStatus);
@@ -688,12 +705,6 @@ public class Util
         return new PartitionerSwitcher(p);
     }
 
-    public static void assumeLegacySecondaryIndex()
-    {
-        Assume.assumeTrue("Test only valid for legacy secondary index",
-                          DatabaseDescriptor.getDefaultSecondaryIndex().equals(CassandraIndex.NAME));
-    }
-
     public static class PartitionerSwitcher implements AutoCloseable
     {
         final IPartitioner oldP;
@@ -719,16 +730,11 @@ public class Util
 
     public static <T> void spinAssertEquals(String message, T expected, Supplier<? extends T> actualSupplier, long timeout, TimeUnit timeUnit)
     {
-        spinAssert(message, equalTo(expected), actualSupplier, timeout, timeUnit);
-    }
-
-    public static <T> void spinAssert(String message, Matcher<T> matcher, Supplier<? extends T> actualSupplier, long timeout, TimeUnit timeUnit)
-    {
         Awaitility.await()
                   .pollInterval(Duration.ofMillis(100))
                   .pollDelay(0, TimeUnit.MILLISECONDS)
                   .atMost(timeout, timeUnit)
-                  .untilAsserted(() -> assertThat(message, actualSupplier.get(), matcher));
+                  .untilAsserted(() -> assertThat(message, actualSupplier.get(), equalTo(expected)));
     }
 
     public static void joinThread(Thread thread) throws InterruptedException
@@ -846,6 +852,15 @@ public class Util
         return () -> DisallowedDirectories.clearUnwritableUnsafe();
     }
 
+    public static boolean getDirectoriesWriteable(ColumnFamilyStore cfs)
+    {
+        boolean ret = true;
+        for (File dir : cfs.getDirectories().getCFDirectories())
+            ret &= !DisallowedDirectories.isUnwritable(dir);
+
+        return ret;
+    }
+
     public static PagingState makeSomePagingState(ProtocolVersion protocolVersion)
     {
         return makeSomePagingState(protocolVersion, Integer.MAX_VALUE);
@@ -897,7 +912,7 @@ public class Util
             {
                 if (sst.name().contains("Data"))
                 {
-                    Descriptor d = Descriptor.fromFileWithComponent(sst, false).left;
+                    Descriptor d = Descriptor.fromFilename(sst.absolutePath());
                     assertTrue(liveIdentifiers.contains(d.id));
                     fileCount++;
                 }
@@ -1109,7 +1124,7 @@ public class Util
         {
             for (SSTableReader sstable : sstables)
             {
-                sstable = ((SSTableReaderWithFilter) sstable).cloneAndReplace(FilterFactory.AlwaysPresent);
+                sstable = sstable.cloneAndReplace(FilterFactory.AlwaysPresent);
                 txn.update(sstable, true);
                 txn.checkpoint();
             }
@@ -1117,37 +1132,32 @@ public class Util
         }
 
         for (SSTableReader reader : cfs.getLiveSSTables())
-            assertEquals(0, ((SSTableReaderWithFilter) reader).getFilterOffHeapSize());
-    }
-
-    public static void setUpgradeFromVersion(String version)
-    {
-        InetAddressAndPort ep = InetAddressAndPort.getByNameUnchecked("127.0.0.10");
-        Register.register(new NodeAddresses(ep),
-                          new NodeVersion(new CassandraVersion(version), Version.OLD));
+            assertEquals(FilterFactory.AlwaysPresent, reader.getBloomFilter());
     }
 
     /**
-     * Sets the length of the file to given size. File will be created if not exist.
-     *
-     * @param file file for which length needs to be set
-     * @param size new szie
-     * @throws IOException on any I/O error.
+     * Setups Gossiper to mimic the upgrade behaviour when {@link Gossiper#isUpgradingFromVersionLowerThan(CassandraVersion)}
+     * or {@link Gossiper#hasMajorVersion3Nodes()} is called.
      */
-    public static void setFileLength(File file, long size) throws IOException
+    public static void setUpgradeFromVersion(String version)
     {
-        try (FileChannel fileChannel = file.newReadWriteChannel())
+        int v = Optional.ofNullable(Gossiper.instance.getEndpointStateForEndpoint(FBUtilities.getBroadcastAddressAndPort()))
+                        .map(ep -> ep.getApplicationState(ApplicationState.RELEASE_VERSION))
+                        .map(rv -> rv.version)
+                        .orElse(0);
+
+        Gossiper.instance.addLocalApplicationState(ApplicationState.RELEASE_VERSION,
+                                                   VersionedValue.unsafeMakeVersionedValue(version, v + 1));
+        try
         {
-            if (file.length() >= size)
-            {
-                fileChannel.truncate(size);
-            }
-            else
-            {
-                fileChannel.position(size - 1);
-                fileChannel.write(ByteBuffer.wrap(new byte[1]));
-            }
+            // add dummy host to avoid returning early in Gossiper.instance.upgradeFromVersionSupplier
+            Gossiper.instance.initializeNodeUnsafe(InetAddressAndPort.getByName("127.0.0.2"), UUID.randomUUID(), 1);
         }
+        catch (UnknownHostException e)
+        {
+            throw new RuntimeException(e);
+        }
+        Gossiper.instance.expireUpgradeFromVersion();
     }
 
     public static Supplier<SequenceBasedSSTableId> newSeqGen(int ... existing)
@@ -1235,52 +1245,78 @@ public class Util
         cfs.forceBlockingFlush(ColumnFamilyStore.FlushReason.UNIT_TESTS);
     }
 
-    public static void flushTable(Keyspace keyspace, String table)
+    public static void assertSSTableIds(SSTableId v1, SSTableId v2, IntFunction<Boolean> predicate)
     {
-        flush(keyspace.getColumnFamilyStore(table));
+        Assertions.assertThat(Pair.create(v1, v2))
+                  .matches(p -> predicate.apply(SSTableIdFactory.COMPARATOR.compare(p.left, p.right)));
     }
 
-    public static void flushTable(Keyspace keyspace, TableId table)
-    {
-        flush(keyspace.getColumnFamilyStore(table));
-    }
-
-    public static void flushTable(String keyspace, String table)
-    {
-        flushTable(Keyspace.open(keyspace), table);
-    }
-
-    public static void flush(Keyspace keyspace)
-    {
-        FBUtilities.waitOnFutures(keyspace.flush(ColumnFamilyStore.FlushReason.UNIT_TESTS));
-    }
-
-    public static void flushKeyspace(String keyspaceName)
-    {
-        flush(Keyspace.open(keyspaceName));
-    }
-
-    public static void flush(TableViews view)
-    {
-        view.forceBlockingFlush(ColumnFamilyStore.FlushReason.UNIT_TESTS);
-    }
-
-    public static class DataInputStreamPlusImpl extends DataInputStream implements DataInputPlus
-    {
-        private DataInputStreamPlusImpl(InputStream in)
+    private static TimeUnit getSupportedMTimeGranularity() {
+        try
         {
-            super(in);
+            Path p = Files.createTempFile(Util.class.getSimpleName(), "dummy-file");
+            FileTime ft = Files.getLastModifiedTime(p);
+            Files.deleteIfExists(p);
+            Field f = FileTime.class.getDeclaredField("unit");
+            f.setAccessible(true);
+            return (TimeUnit) f.get(ft);
         }
-
-        public static DataInputStreamPlus wrap(InputStream in)
+        catch (IOException |  NoSuchFieldException | IllegalAccessException e)
         {
-            DataInputStreamPlusImpl impl = new DataInputStreamPlusImpl(in);
-            return Mockito.mock(DataInputStreamPlus.class, new ForwardsInvocations(impl));
+            throw new AssertionError("Failed to read supported file modification time granularity");
         }
     }
 
-    public static RuntimeException testMustBeImplementedForSSTableFormat()
+    public static void markNodeAsDead(InetAddressAndPort address)
     {
-        return new UnsupportedOperationException("Test must be implemented for sstable format " + DatabaseDescriptor.getSelectedSSTableFormat().getClass().getName());
+        EndpointState endpointState = Gossiper.instance.getEndpointStateForEndpoint(address);
+        Gossiper.runInGossipStageBlocking(() -> Gossiper.instance.markDead(address, endpointState));
+        IFailureDetector.instance.report(address);
+        IFailureDetector.instance.interpret(address);
+        assertFalse("Node not convicted", IFailureDetector.instance.isAlive(address));
+    }
+
+    public static void joinNodeToRing(InetAddressAndPort address, Token token, IPartitioner partitioner)
+    {
+        joinNodeToRing(address, token, partitioner, UUID.randomUUID(), 1);
+    }
+
+    public static void joinNodeToRing(InetAddressAndPort address, Token token, IPartitioner partitioner, UUID hostId, int generationNbr)
+    {
+        Gossiper.instance.initializeNodeUnsafe(address, hostId, MessagingService.current_version, generationNbr);
+        Gossiper.instance.injectApplicationState(address, ApplicationState.TOKENS, new VersionedValue.VersionedValueFactory(partitioner).tokens(Collections.singleton(token)));
+        StorageService.instance.onChange(address,
+                    ApplicationState.STATUS_WITH_PORT,
+                    new VersionedValue.VersionedValueFactory(partitioner).normal(Collections.singleton(token)));
+    }
+
+    public static boolean isListeningOn(InetSocketAddress address)
+    {
+        try (ServerSocket socket = new ServerSocket())
+        {
+            socket.bind(address);
+            return false;
+        }
+        catch (IOException ex)
+        {
+            return true;
+        }
+    }
+
+    public static UserType makeUDT(String name, Map<String, AbstractType<?>> fields, boolean multicell)
+    {
+        return makeUDT("ks", name, fields, multicell);
+    }
+
+    public static UserType makeUDT(String ks, String name, Map<String, AbstractType<?>> fields, boolean multicell)
+    {
+        List<FieldIdentifier> fieldNames = new ArrayList<>(fields.size());
+        List<AbstractType<?>> fieldTypes = new ArrayList<>(fields.size());
+        for (Map.Entry<String, AbstractType<?>> entry : fields.entrySet())
+        {
+            fieldNames.add(FieldIdentifier.forUnquoted(entry.getKey()));
+            fieldTypes.add(entry.getValue());
+        }
+        return new UserType(ks, UTF8Type.instance.decompose(name), fieldNames, fieldTypes, multicell);
     }
 }

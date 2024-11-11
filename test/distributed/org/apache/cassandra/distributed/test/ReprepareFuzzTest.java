@@ -35,10 +35,10 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.PreparedStatementHelper;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.exceptions.InvalidQueryException;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.PreparedStatementHelper;
+import com.khulnasoft.driver.core.Session;
+import com.khulnasoft.driver.core.exceptions.InvalidQueryException;
 import net.bytebuddy.ByteBuddy;
 import net.bytebuddy.dynamic.DynamicType;
 import net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
@@ -99,7 +99,7 @@ public class ReprepareFuzzTest extends TestBaseImpl
             {
                 int seed = i;
                 threads.add(new Thread(() -> {
-                    com.datastax.driver.core.Cluster cluster = null;
+                    com.khulnasoft.driver.core.Cluster cluster = null;
                     Session session = null;
 
                     try
@@ -110,7 +110,7 @@ public class ReprepareFuzzTest extends TestBaseImpl
                         Map<Pair<Integer, Integer>, PreparedStatement> qualifiedStatements = new HashMap<>();
                         Map<Pair<Integer, Integer>, PreparedStatement> unqualifiedStatements = new HashMap<>();
 
-                        cluster = com.datastax.driver.core.Cluster.builder()
+                        cluster = com.khulnasoft.driver.core.Cluster.builder()
                                                                   .addContactPoint("127.0.0.1")
                                                                   .build();
                         session = cluster.connect();
@@ -257,7 +257,7 @@ public class ReprepareFuzzTest extends TestBaseImpl
                                 case RECONNECT:
                                     session.close();
                                     cluster.close();
-                                    cluster = com.datastax.driver.core.Cluster.builder()
+                                    cluster = com.khulnasoft.driver.core.Cluster.builder()
                                                                               .addContactPoint("127.0.0.1")
                                                                               .build();
                                     session = cluster.connect();

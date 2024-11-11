@@ -36,8 +36,7 @@ import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.CounterId;
 import org.apache.cassandra.utils.FBUtilities;
-
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUIDAsBytes;
+import org.apache.cassandra.utils.UUIDGen;
 
 public abstract class SimpleBuilders
 {
@@ -76,7 +75,7 @@ public abstract class SimpleBuilders
     {
         protected long timestamp = FBUtilities.timestampMicros();
         protected int ttl = 0;
-        protected long nowInSec = FBUtilities.nowInSeconds();
+        protected int nowInSec = FBUtilities.nowInSeconds();
 
         protected void copyParams(AbstractBuilder<?> other)
         {
@@ -97,7 +96,7 @@ public abstract class SimpleBuilders
             return (T)this;
         }
 
-        public T nowInSec(long nowInSec)
+        public T nowInSec(int nowInSec)
         {
             this.nowInSec = nowInSec;
             return (T)this;
@@ -192,7 +191,7 @@ public abstract class SimpleBuilders
 
         public PartitionUpdate.SimpleBuilder delete()
         {
-            this.partitionDeletion = DeletionTime.build(timestamp, nowInSec);
+            this.partitionDeletion = new DeletionTime(timestamp, nowInSec);
             return this;
         }
 
@@ -201,7 +200,7 @@ public abstract class SimpleBuilders
             if (rangeBuilders == null)
                 rangeBuilders = new ArrayList<>();
 
-            RTBuilder builder = new RTBuilder(metadata.comparator, DeletionTime.build(timestamp, nowInSec));
+            RTBuilder builder = new RTBuilder(metadata.comparator, new DeletionTime(timestamp, nowInSec));
             rangeBuilders.add(builder);
             return builder;
         }
@@ -223,7 +222,7 @@ public abstract class SimpleBuilders
 
             // Note that rowBuilders.size() could include the static column so could be 1 off the really need capacity
             // of the final PartitionUpdate, but as that's just a sizing hint, we'll live.
-            PartitionUpdate.Builder update = new PartitionUpdate.Builder(metadata, key, columns.build(), rowBuilders.size());
+            PartitionUpdate.Builder update = PartitionUpdate.builder(metadata, key, columns.build(), rowBuilders.size());
 
             update.addPartitionDeletion(partitionDeletion);
             if (rangeBuilders != null)
@@ -379,20 +378,20 @@ public abstract class SimpleBuilders
 
             if (value == null)
             {
-                builder.addComplexDeletion(column, DeletionTime.build(timestamp, nowInSec));
+                builder.addComplexDeletion(column, new DeletionTime(timestamp, nowInSec));
                 return this;
             }
 
             // Erase previous entry if any.
             if (overwriteForCollection)
-                builder.addComplexDeletion(column, DeletionTime.build(timestamp - 1, nowInSec));
+                builder.addComplexDeletion(column, new DeletionTime(timestamp - 1, nowInSec));
             switch (((CollectionType)column.type).kind)
             {
                 case LIST:
                     ListType lt = (ListType)column.type;
                     assert value instanceof List;
                     for (Object elt : (List)value)
-                        builder.addCell(cell(column, toByteBuffer(elt, lt.getElementsType()), CellPath.create(ByteBuffer.wrap(nextTimeUUIDAsBytes()))));
+                        builder.addCell(cell(column, toByteBuffer(elt, lt.getElementsType()), CellPath.create(ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes()))));
                     break;
                 case SET:
                     SetType st = (SetType)column.type;
@@ -417,13 +416,7 @@ public abstract class SimpleBuilders
         public Row.SimpleBuilder delete()
         {
             assert !initiated : "If called, delete() should be called before any other column value addition";
-            builder.addRowDeletion(Row.Deletion.regular(DeletionTime.build(timestamp, nowInSec)));
-            return this;
-        }
-
-        public Row.SimpleBuilder deletePrevious()
-        {
-            builder.addRowDeletion(Row.Deletion.regular(DeletionTime.build(timestamp - 1, nowInSec)));
+            builder.addRowDeletion(Row.Deletion.regular(new DeletionTime(timestamp, nowInSec)));
             return this;
         }
 

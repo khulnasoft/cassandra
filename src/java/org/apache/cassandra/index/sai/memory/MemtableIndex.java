@@ -18,104 +18,71 @@
 
 package org.apache.cassandra.index.sai.memory;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Iterator;
-import java.util.List;
-import java.util.concurrent.atomic.LongAdder;
-import java.util.function.Function;
+import javax.annotation.Nullable;
 
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.PartitionPosition;
-import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.memtable.Memtable;
 import org.apache.cassandra.dht.AbstractBounds;
+import org.apache.cassandra.index.sai.IndexContext;
 import org.apache.cassandra.index.sai.QueryContext;
-import org.apache.cassandra.index.sai.StorageAttachedIndex;
-import org.apache.cassandra.index.sai.disk.format.IndexDescriptor;
-import org.apache.cassandra.index.sai.utils.IndexIdentifier;
-import org.apache.cassandra.index.sai.disk.v1.segment.SegmentMetadata;
+import org.apache.cassandra.index.sai.disk.vector.VectorMemtableIndex;
 import org.apache.cassandra.index.sai.iterators.KeyRangeIterator;
 import org.apache.cassandra.index.sai.plan.Expression;
 import org.apache.cassandra.index.sai.utils.PrimaryKey;
-import org.apache.cassandra.index.sai.utils.PrimaryKeys;
+import org.apache.cassandra.index.sai.utils.MemtableOrdering;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
+import org.apache.cassandra.utils.concurrent.OpOrder;
 
-public class MemtableIndex implements MemtableOrdering
+public interface MemtableIndex extends MemtableOrdering
 {
-    private final MemoryIndex memoryIndex;
-    private final LongAdder writeCount = new LongAdder();
-    private final LongAdder estimatedMemoryUsed = new LongAdder();
-    private final AbstractType<?> type;
+    Memtable getMemtable();
 
-    public MemtableIndex(StorageAttachedIndex index)
+    long writeCount();
+
+    long estimatedOnHeapMemoryUsed();
+
+    long estimatedOffHeapMemoryUsed();
+
+    boolean isEmpty();
+
+    // Returns the minimum indexed term in the combined memory indexes.
+    // This can be null if the indexed memtable was empty. Users of the
+    // {@code MemtableIndex} requiring a non-null minimum term should
+    // use the {@link MemtableIndex#isEmpty} method.
+    // Note: Individual index shards can return null here if the index
+    // didn't receive any terms within the token range of the shard
+    @Nullable
+    ByteBuffer getMinTerm();
+
+    // Returns the maximum indexed term in the combined memory indexes.
+    // This can be null if the indexed memtable was empty. Users of the
+    // {@code MemtableIndex} requiring a non-null maximum term should
+    // use the {@link MemtableIndex#isEmpty} method.
+    // Note: Individual index shards can return null here if the index
+    // didn't receive any terms within the token range of the shard
+    @Nullable
+    ByteBuffer getMaxTerm();
+
+    void index(DecoratedKey key, Clustering clustering, ByteBuffer value, Memtable memtable, OpOrder.Group opGroup);
+
+    default void update(DecoratedKey key, Clustering clustering, ByteBuffer oldValue, ByteBuffer newValue, Memtable memtable, OpOrder.Group opGroup)
     {
-        this.memoryIndex = index.termType().isVector() ? new VectorMemoryIndex(index) : new TrieMemoryIndex(index);
-        this.type = index.termType().indexType();
+        throw new UnsupportedOperationException();
     }
 
-    public long writeCount()
-    {
-        return writeCount.sum();
-    }
+    KeyRangeIterator search(QueryContext queryContext, Expression expression, AbstractBounds<PartitionPosition> keyRange, int limit);
 
-    public long estimatedMemoryUsed()
-    {
-        return estimatedMemoryUsed.sum();
-    }
+    long estimateMatchingRowsCount(Expression expression, AbstractBounds<PartitionPosition> keyRange);
 
-    public boolean isEmpty()
-    {
-        return memoryIndex.isEmpty();
-    }
+    Iterator<Pair<ByteComparable, Iterator<PrimaryKey>>> iterator(DecoratedKey min, DecoratedKey max);
 
-    public ByteBuffer getMinTerm()
+    static MemtableIndex createIndex(IndexContext indexContext, Memtable mt)
     {
-        return memoryIndex.getMinTerm();
-    }
-
-    public ByteBuffer getMaxTerm()
-    {
-        return memoryIndex.getMaxTerm();
-    }
-
-    public long index(DecoratedKey key, Clustering<?> clustering, ByteBuffer value)
-    {
-        if (value == null || (value.remaining() == 0 && !type.allowsEmpty()))
-            return 0;
-
-        long ram = memoryIndex.add(key, clustering, value);
-        writeCount.increment();
-        estimatedMemoryUsed.add(ram);
-        return ram;
-    }
-
-    public long update(DecoratedKey key, Clustering<?> clustering, ByteBuffer oldValue, ByteBuffer newValue)
-    {
-        return memoryIndex.update(key, clustering, oldValue, newValue);
-    }
-
-    public KeyRangeIterator search(QueryContext queryContext, Expression expression, AbstractBounds<PartitionPosition> keyRange)
-    {
-        return memoryIndex.search(queryContext, expression, keyRange);
-    }
-
-    public Iterator<Pair<ByteComparable, PrimaryKeys>> iterator()
-    {
-        return memoryIndex.iterator();
-    }
-
-    public SegmentMetadata.ComponentMetadataMap writeDirect(IndexDescriptor indexDescriptor,
-                                                            IndexIdentifier indexIdentifier,
-                                                            Function<PrimaryKey, Integer> postingTransformer) throws IOException
-    {
-        return memoryIndex.writeDirect(indexDescriptor, indexIdentifier, postingTransformer);
-    }
-
-    @Override
-    public KeyRangeIterator limitToTopResults(List<PrimaryKey> primaryKeys, Expression expression, int limit)
-    {
-        return memoryIndex.limitToTopResults(primaryKeys, expression, limit);
+        return indexContext.isVector() ? new VectorMemtableIndex(indexContext, mt) : new TrieMemtableIndex(indexContext, mt);
     }
 }

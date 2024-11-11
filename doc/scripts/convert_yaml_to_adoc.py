@@ -21,7 +21,7 @@ the online documentation.
 Usage:
 
 YAML_INPUT=conf/cassandra.yaml
-YAML_OUTPUT=modules/cassandra/pages/managing/configuration/cass_yaml_file.adoc
+YAML_OUTPUT=modules/cassandra/pages/configuration/cass_yaml_file.adoc
 
     convert_yaml_to_adoc.py $YAML_INPUT $YAML_OUTPUT
 """
@@ -50,9 +50,7 @@ COMPLEX_OPTIONS = (
     'server_encryption_options',
     'client_encryption_options',
     'transparent_data_encryption_options',
-    'hinted_handoff_disabled_datacenters',
-    'startup_checks',
-    'password_validator'
+    'hinted_handoff_disabled_datacenters'
 )
 
 def convert(yaml_file, dest_file):

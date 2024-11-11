@@ -88,14 +88,6 @@ public abstract class ColumnSubselection implements Comparable<ColumnSubselectio
      */
     public abstract int compareInclusionOf(CellPath path);
 
-    @Override
-    public String toString()
-    {
-        return toString(false);
-    }
-
-    protected abstract String toString(boolean cql);
-
     private static class Slice extends ColumnSubselection
     {
         private final CellPath from;
@@ -130,13 +122,11 @@ public abstract class ColumnSubselection implements Comparable<ColumnSubselectio
         }
 
         @Override
-        protected String toString(boolean cql)
+        public String toString()
         {
             // This assert we're dealing with a collection since that's the only thing it's used for so far.
             AbstractType<?> type = ((CollectionType<?>)column().type).nameComparator();
-            return String.format("[%s:%s]",
-                                 from == CellPath.BOTTOM ? "" : (cql ? type.toCQLString(from.get(0)) : type.getString(from.get(0))),
-                                 to == CellPath.TOP ? "" : (cql ? type.toCQLString(to.get(0)) : type.getString(to.get(0))));
+            return String.format("[%s:%s]", from == CellPath.BOTTOM ? "" : type.getString(from.get(0)), to == CellPath.TOP ? "" : type.getString(to.get(0)));
         }
     }
 
@@ -166,11 +156,11 @@ public abstract class ColumnSubselection implements Comparable<ColumnSubselectio
         }
 
         @Override
-        protected String toString(boolean cql)
+        public String toString()
         {
             // This assert we're dealing with a collection since that's the only thing it's used for so far.
             AbstractType<?> type = ((CollectionType<?>)column().type).nameComparator();
-            return String.format("[%s]", cql ? type.toCQLString(element.get(0)) : type.getString(element.get(0)));
+            return String.format("[%s]", type.getString(element.get(0)));
         }
     }
 

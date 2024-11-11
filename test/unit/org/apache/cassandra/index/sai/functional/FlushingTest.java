@@ -22,23 +22,24 @@ package org.apache.cassandra.index.sai.functional;
 
 import org.junit.Test;
 
-import com.datastax.driver.core.ResultSet;
+import com.khulnasoft.driver.core.ResultSet;
 import org.apache.cassandra.db.marshal.Int32Type;
+import org.apache.cassandra.index.sai.IndexContext;
 import org.apache.cassandra.index.sai.SAITester;
-import org.apache.cassandra.index.sai.utils.IndexIdentifier;
-import org.apache.cassandra.index.sai.disk.v1.bbtree.NumericIndexWriter;
-import org.apache.cassandra.index.sai.utils.IndexTermType;
+import org.apache.cassandra.index.sai.disk.v1.kdtree.NumericIndexWriter;
 
 import static org.junit.Assert.assertEquals;
 
 public class FlushingTest extends SAITester
 {
     @Test
-    public void testFlushingLargeStaleMemtableIndex()
+    public void testFlushingLargeStaleMemtableIndex() throws Throwable
     {
         createTable(CREATE_TABLE_TEMPLATE);
         createIndex(String.format(CREATE_INDEX_TEMPLATE, "v1"));
 
+        // BDKWriter#valueCount is updated when leaf values are written at BKDWriter#writeLeakBlock on every
+        // BKDWriter#DEFAULT_MAX_POINTS_IN_LEAF_NODE (1024) number of points, see LUCENE-8765
         int overwrites = NumericIndexWriter.MAX_POINTS_IN_LEAF_NODE + 1;
         for (int j = 0; j < overwrites; j++)
         {
@@ -49,14 +50,15 @@ public class FlushingTest extends SAITester
 
         ResultSet rows = executeNet("SELECT id1 FROM %s WHERE v1>=0");
         assertEquals(1, rows.all().size());
+
+        assertIndexFilesInToc(indexFiles());
     }
 
     @Test
-    public void testFlushingOverwriteDelete()
+    public void testFlushingOverwriteDelete() throws Throwable
     {
         createTable(CREATE_TABLE_TEMPLATE);
-        IndexIdentifier indexIdentifier = createIndexIdentifier(createIndex(String.format(CREATE_INDEX_TEMPLATE, "v1")));
-        IndexTermType indexTermType = createIndexTermType(Int32Type.instance);
+        IndexContext numericIndexContext = createIndexContext(createIndex(String.format(CREATE_INDEX_TEMPLATE, "v1")), Int32Type.instance);
 
         int sstables = 3;
         for (int j = 0; j < sstables; j++)
@@ -66,16 +68,20 @@ public class FlushingTest extends SAITester
             flush();
         }
 
+        assertIndexFilesInToc(indexFiles());
+
         ResultSet rows = executeNet("SELECT id1 FROM %s WHERE v1 >= 0");
         assertEquals(0, rows.all().size());
-        verifyIndexFiles(indexTermType, indexIdentifier, sstables, 0, sstables);
-        verifySSTableIndexes(indexIdentifier, sstables, 0);
+        verifyIndexFiles(numericIndexContext, null, sstables, 0, 0, sstables, 0);
+        verifySSTableIndexes(numericIndexContext.getIndexName(), sstables, sstables);
 
         compact();
-        waitForAssert(() -> verifyIndexFiles(indexTermType, indexIdentifier, 1, 0, 1));
+        waitForAssert(() -> verifyIndexFiles(numericIndexContext, null, 1, 0, 0, 1, 0));
 
         rows = executeNet("SELECT id1 FROM %s WHERE v1 >= 0");
         assertEquals(0, rows.all().size());
-        verifySSTableIndexes(indexIdentifier, 1, 0);
+        verifySSTableIndexes(numericIndexContext.getIndexName(), 1, 1);
+
+        assertIndexFilesInToc(indexFiles());
     }
 }

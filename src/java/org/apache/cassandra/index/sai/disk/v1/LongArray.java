@@ -20,7 +20,6 @@ package org.apache.cassandra.index.sai.disk.v1;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.function.Supplier;
-import javax.annotation.concurrent.NotThreadSafe;
 
 /**
  * Abstraction over a long-indexed array of longs.
@@ -38,6 +37,14 @@ public interface LongArray extends Closeable
     long length();
 
     /**
+     * @param targetToken Token to look up.  Must not be smaller than previous value queried
+     *                    (the method is stateful)
+     * @return The row ID of the first token equal to or greater than the target,
+     *         or negative value if target token is greater than all tokens
+     */
+    long ceilingRowId(long targetToken);
+
+    /**
      * Using the given value returns the first index corresponding to the value.
      *
      * @param value Value to lookup, and it must not be smaller than previous value
@@ -48,10 +55,9 @@ public interface LongArray extends Closeable
     @Override
     default void close() throws IOException { }
 
-    @NotThreadSafe
     class DeferredLongArray implements LongArray
     {
-        private final Supplier<LongArray> supplier;
+        private Supplier<LongArray> supplier;
         private LongArray longArray;
         private boolean opened = false;
 
@@ -75,10 +81,17 @@ public interface LongArray extends Closeable
         }
 
         @Override
-        public long indexOf(long value)
+        public long ceilingRowId(long targetToken)
         {
             open();
-            return longArray.indexOf(value);
+            return longArray.ceilingRowId(targetToken);
+        }
+
+        @Override
+        public long indexOf(long targetToken)
+        {
+            open();
+            return longArray.indexOf(targetToken);
         }
 
         @Override

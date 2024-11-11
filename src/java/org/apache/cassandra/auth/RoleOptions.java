@@ -19,13 +19,13 @@ package org.apache.cassandra.auth;
 
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Optional;
+
+import com.google.common.base.Optional;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.utils.FBUtilities;
-import org.mindrot.jbcrypt.BCrypt;
 
 public class RoleOptions
 {
@@ -68,7 +68,7 @@ public class RoleOptions
      */
     public Optional<Boolean> getSuperuser()
     {
-        return Optional.ofNullable((Boolean) options.get(IRoleManager.Option.SUPERUSER));
+        return Optional.fromNullable((Boolean)options.get(IRoleManager.Option.SUPERUSER));
     }
 
     /**
@@ -77,7 +77,7 @@ public class RoleOptions
      */
     public Optional<Boolean> getLogin()
     {
-        return Optional.ofNullable((Boolean) options.get(IRoleManager.Option.LOGIN));
+        return Optional.fromNullable((Boolean)options.get(IRoleManager.Option.LOGIN));
     }
 
     /**
@@ -86,21 +86,7 @@ public class RoleOptions
      */
     public Optional<String> getPassword()
     {
-        return Optional.ofNullable((String)options.get(IRoleManager.Option.PASSWORD));
-    }
-
-    public boolean isGeneratedPassword()
-    {
-        return (Boolean) options.getOrDefault(IRoleManager.Option.GENERATED_PASSWORD, Boolean.FALSE);
-    }
-
-    /**
-     * Return the string value of the hashed password option.
-     * @return hashed password option value
-     */
-    public Optional<String> getHashedPassword()
-    {
-        return Optional.ofNullable((String) options.get(IRoleManager.Option.HASHED_PASSWORD));
+        return Optional.fromNullable((String)options.get(IRoleManager.Option.PASSWORD));
     }
 
     /**
@@ -113,7 +99,7 @@ public class RoleOptions
     @SuppressWarnings("unchecked")
     public Optional<Map<String, String>> getCustomOptions()
     {
-        return Optional.ofNullable((Map<String, String>) options.get(IRoleManager.Option.OPTIONS));
+        return Optional.fromNullable((Map<String, String>)options.get(IRoleManager.Option.OPTIONS));
     }
 
     /**
@@ -148,34 +134,6 @@ public class RoleOptions
                         throw new InvalidRequestException(String.format("Invalid value for property '%s'. " +
                                                                         "It must be a string",
                                                                         option.getKey()));
-                    if (options.containsKey(IRoleManager.Option.HASHED_PASSWORD))
-                        throw new InvalidRequestException(String.format("Properties '%s' and '%s' are mutually exclusive",
-                                                                        IRoleManager.Option.PASSWORD, IRoleManager.Option.HASHED_PASSWORD));
-                    break;
-                case HASHED_PASSWORD:
-                    if (!(option.getValue() instanceof String))
-                        throw new InvalidRequestException(String.format("Invalid value for property '%s'. " +
-                                                                        "It must be a string",
-                                                                        option.getKey()));
-                    if (options.containsKey(IRoleManager.Option.PASSWORD))
-                        throw new InvalidRequestException(String.format("Properties '%s' and '%s' are mutually exclusive",
-                                                                        IRoleManager.Option.PASSWORD, IRoleManager.Option.HASHED_PASSWORD));
-                    try
-                    {
-                        BCrypt.checkpw("dummy", (String) option.getValue());
-                    }
-                    catch (Exception e)
-                    {
-                        throw new InvalidRequestException("Invalid hashed password value. Please use jBcrypt.");
-                    }
-                    break;
-                case GENERATED_PASSWORD:
-                    if (options.containsKey(IRoleManager.Option.PASSWORD))
-                        throw new InvalidRequestException(String.format("Properties '%s' and '%s' are mutually exclusive",
-                                                                        IRoleManager.Option.PASSWORD, IRoleManager.Option.GENERATED_PASSWORD));
-                    if (options.containsKey(IRoleManager.Option.HASHED_PASSWORD))
-                        throw new InvalidRequestException(String.format("Properties '%s' and '%s' are mutually exclusive",
-                                                                        IRoleManager.Option.HASHED_PASSWORD, IRoleManager.Option.GENERATED_PASSWORD));
                     break;
                 case OPTIONS:
                     if (!(option.getValue() instanceof Map))

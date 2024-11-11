@@ -24,8 +24,9 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.db.compaction.Verifier;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.io.util.DataInputBuffer;
@@ -39,6 +40,7 @@ import static org.apache.cassandra.hints.HintsTestUtil.assertHintsEqual;
 import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThrows;
 
 public class HintMessageTest
 {
@@ -58,17 +60,17 @@ public class HintMessageTest
         UUID hostId = UUID.randomUUID();
         long now = FBUtilities.timestampMicros();
         TableMetadata table = Schema.instance.getTableMetadata(KEYSPACE, TABLE);
-        
-        Mutation mutation = 
+
+        Mutation mutation =
             new RowUpdateBuilder(table, now, bytes("key")).clustering("column").add("val", "val" + 1234).build();
-        
+
         Hint hint = Hint.create(mutation, now / 1000);
         HintMessage message = new HintMessage(hostId, hint);
 
         // serialize
         int serializedSize = (int) HintMessage.serializer.serializedSize(message, MessagingService.current_version);
         HintMessage deserializedMessage;
-        
+
         try (DataOutputBuffer dob = new DataOutputBuffer())
         {
             HintMessage.serializer.serialize(message, dob, MessagingService.current_version);
@@ -80,9 +82,9 @@ public class HintMessageTest
         }
 
         // compare before/after
-        assertEquals(hostId, deserializedMessage.hostId);
-        assertNotNull(deserializedMessage.hint);
-        assertHintsEqual(hint, deserializedMessage.hint);
+        assertEquals(hostId, deserializedMessage.hostId());
+        assertNotNull(deserializedMessage.hint());
+        assertHintsEqual(hint, deserializedMessage.hint());
     }
 
     @Test
@@ -91,13 +93,13 @@ public class HintMessageTest
         UUID hostId = UUID.randomUUID();
         long now = FBUtilities.timestampMicros();
         TableMetadata table = Schema.instance.getTableMetadata(KEYSPACE, TABLE);
-        
+
         Mutation mutation =
             new RowUpdateBuilder(table, now, bytes("key")).clustering("column").add("val", "val" + 1234) .build();
-        
+
         Hint hint = Hint.create(mutation, now / 1000);
         HintMessage.Encoded message;
-        
+
         try (DataOutputBuffer dob = new DataOutputBuffer())
         {
             Hint.serializer.serialize(hint, dob, MessagingService.current_version);
@@ -115,8 +117,35 @@ public class HintMessageTest
         HintMessage deserializedMessage = HintMessage.serializer.deserialize(dip, MessagingService.current_version);
 
         // compare before/after
-        assertEquals(hostId, deserializedMessage.hostId);
-        assertNotNull(deserializedMessage.hint);
-        assertHintsEqual(hint, deserializedMessage.hint);
+        assertEquals(hostId, deserializedMessage.hostId());
+        assertNotNull(deserializedMessage.hint());
+        assertHintsEqual(hint, deserializedMessage.hint());
+    }
+
+    @Test
+    public void testEncodedVersionMatching() throws IOException
+    {
+        int messageVersion = MessagingService.current_version;
+        int serializerVersion = MessagingService.VERSION_30;
+
+        UUID hostId = UUID.randomUUID();
+        long now = FBUtilities.timestampMicros();
+        TableMetadata table = Schema.instance.getTableMetadata(KEYSPACE, TABLE);
+
+        Mutation mutation =
+        new RowUpdateBuilder(table, now, bytes("key")).clustering("column").add("val", "val" + 1234).build();
+
+        Hint hint = Hint.create(mutation, now / 1000);
+        HintMessage.Encoded message;
+
+        try (DataOutputBuffer dob = new DataOutputBuffer())
+        {
+            Hint.serializer.serialize(hint, dob, messageVersion);
+            message = new HintMessage.Encoded(hostId, dob.buffer(), messageVersion);
+        }
+
+        assertThrows("Mismatched message and serializer version should cause an error",
+                     IllegalArgumentException.class,
+                     () -> HintMessage.serializer.serializedSize(message, serializerVersion));
     }
 }

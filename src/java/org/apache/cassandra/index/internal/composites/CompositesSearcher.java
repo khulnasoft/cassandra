@@ -24,6 +24,7 @@ import java.util.List;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.ClusteringIndexNamesFilter;
+import org.apache.cassandra.db.filter.ClusteringIndexSliceFilter;
 import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
@@ -33,6 +34,7 @@ import org.apache.cassandra.index.internal.CassandraIndex;
 import org.apache.cassandra.index.internal.CassandraIndexSearcher;
 import org.apache.cassandra.index.internal.IndexEntry;
 import org.apache.cassandra.utils.btree.BTreeSet;
+import org.apache.cassandra.utils.concurrent.OpOrder;
 
 
 public class CompositesSearcher extends CassandraIndexSearcher
@@ -118,7 +120,7 @@ public class CompositesSearcher extends CassandraIndexSearcher
                         dataCmd = SinglePartitionReadCommand.create(index.baseCfs.metadata(),
                                                                     command.nowInSec(),
                                                                     command.columnFilter(),
-                                                                    RowFilter.none(),
+                                                                    RowFilter.NONE,
                                                                     DataLimits.NONE,
                                                                     partitionKey,
                                                                     command.clusteringIndexFilter(partitionKey));
@@ -162,6 +164,7 @@ public class CompositesSearcher extends CassandraIndexSearcher
                                                                     null);
                     }
 
+                    @SuppressWarnings("resource") // We close right away if empty, and if it's assign to next it will be called either
                     // by the next caller of next, or through closing this iterator is this come before.
                     UnfilteredRowIterator dataIter =
                         filterStaleEntries(dataCmd.queryMemtableAndDisk(index.baseCfs, executionController),
@@ -195,21 +198,22 @@ public class CompositesSearcher extends CassandraIndexSearcher
         };
     }
 
-    private void deleteAllEntries(final List<IndexEntry> entries, final WriteContext ctx, final long nowInSec)
+    private void deleteAllEntries(final List<IndexEntry> entries, final WriteContext ctx, final int nowInSec)
     {
         entries.forEach(entry ->
             index.deleteStaleEntry(entry.indexValue,
                                    entry.indexClustering,
-                                   DeletionTime.build(entry.timestamp, nowInSec),
+                                   new DeletionTime(entry.timestamp, nowInSec),
                                    ctx));
     }
 
     // We assume all rows in dataIter belong to the same partition.
+    @SuppressWarnings("resource")
     private UnfilteredRowIterator filterStaleEntries(UnfilteredRowIterator dataIter,
                                                      final ByteBuffer indexValue,
                                                      final List<IndexEntry> entries,
                                                      final WriteContext ctx,
-                                                     final long nowInSec)
+                                                     final int nowInSec)
     {
         // collect stale index entries and delete them when we close this iterator
         final List<IndexEntry> staleEntries = new ArrayList<>();

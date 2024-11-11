@@ -24,7 +24,6 @@ import java.util.ArrayList;
 import java.util.Random;
 
 import org.junit.Assert;
-import org.junit.Assume;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
@@ -62,10 +61,6 @@ public class CommitLogChainedMarkersTest
     {
         // this method is blend of CommitLogSegmentBackpressureTest & CommitLogReaderTest methods
         DatabaseDescriptor.daemonInitialization();
-
-        Assume.assumeTrue("With direct IO used for the commitlog we cannot expect the data are on disk without flushing it",
-                          DatabaseDescriptor.getCommitLogWriteDiskAccessMode() != Config.DiskAccessMode.direct);
-
         DatabaseDescriptor.setCommitLogSegmentSize(5);
         DatabaseDescriptor.setCommitLogSync(Config.CommitLogSync.periodic);
         DatabaseDescriptor.setCommitLogSyncPeriod(10000 * 1000);

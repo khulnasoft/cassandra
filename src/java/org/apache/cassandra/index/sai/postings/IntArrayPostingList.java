@@ -17,7 +17,11 @@
  */
 package org.apache.cassandra.index.sai.postings;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.MoreObjects;
+
+import org.apache.cassandra.index.sai.disk.PostingList;
+import org.apache.cassandra.index.sai.disk.v1.postings.OrdinalPostingList;
 
 public class IntArrayPostingList implements OrdinalPostingList
 {
@@ -30,13 +34,13 @@ public class IntArrayPostingList implements OrdinalPostingList
     }
 
     @Override
-    public long getOrdinal()
+    public int getOrdinal()
     {
         return idx;
     }
 
     @Override
-    public long nextPosting()
+    public int nextPosting()
     {
         if (idx >= postings.length)
         {
@@ -46,13 +50,13 @@ public class IntArrayPostingList implements OrdinalPostingList
     }
 
     @Override
-    public long size()
+    public int size()
     {
         return postings.length;
     }
 
     @Override
-    public long advance(long targetRowID)
+    public int advance(int targetRowID)
     {
         for (int i = idx; i < postings.length; ++i)
         {
@@ -75,6 +79,12 @@ public class IntArrayPostingList implements OrdinalPostingList
                           .add("idx", idx)
                           .add("hashCode", Integer.toHexString(hashCode()))
                           .toString();
+    }
+
+    @VisibleForTesting
+    public void reset()
+    {
+        idx = 0;
     }
 
     public int getPostingAt(int i)

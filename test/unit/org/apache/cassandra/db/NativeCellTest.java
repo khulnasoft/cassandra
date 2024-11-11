@@ -20,7 +20,7 @@ package org.apache.cassandra.db;
 import java.nio.ByteBuffer;
 import java.util.Random;
 import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.CompletableFuture;
 
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -30,26 +30,25 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.SetType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.rows.*;
-import org.apache.cassandra.utils.concurrent.ImmediateFuture;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import org.apache.cassandra.utils.memory.HeapCloner;
 import org.apache.cassandra.utils.memory.NativeAllocator;
 import org.apache.cassandra.utils.memory.NativePool;
 
-public class NativeCellTest extends CQLTester
+public class NativeCellTest
 {
 
     private static final Logger logger = LoggerFactory.getLogger(NativeCellTest.class);
     private static final NativeAllocator nativeAllocator = new NativePool(Integer.MAX_VALUE,
                                                                           Integer.MAX_VALUE,
                                                                           1f,
-                                                                          () -> ImmediateFuture.success(true)).newAllocator(null);
+                                                                          () -> CompletableFuture.completedFuture(true)).newAllocator();
+    @SuppressWarnings("resource")
     private static final OpOrder.Group group = new OpOrder().start();
     private static Random rand;
 
@@ -117,17 +116,16 @@ public class NativeCellTest extends CQLTester
         return new ColumnMetadata("",
                                   "",
                                   ColumnIdentifier.getInterned(uuid.toString(), false),
-                                    isComplex ? new SetType<>(BytesType.instance, true) : BytesType.instance,
+                                    isComplex ? SetType.getInstance(BytesType.instance, true) : BytesType.instance,
                                   -1,
-                                  ColumnMetadata.Kind.REGULAR,
-                                  null);
+                                  ColumnMetadata.Kind.REGULAR);
     }
 
     private static Cell<?> rndcell(ColumnMetadata col)
     {
         long timestamp = rand.nextLong();
         int ttl = rand.nextInt();
-        long localDeletionTime = ThreadLocalRandom.current().nextLong(Cell.getVersionedMaxDeletiontionTime() + 1);
+        int localDeletionTime = rand.nextInt();
         byte[] value = new byte[rand.nextInt(sanesize(expdecay()))];
         rand.nextBytes(value);
         CellPath path = null;

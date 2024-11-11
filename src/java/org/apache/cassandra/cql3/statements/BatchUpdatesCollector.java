@@ -18,30 +18,19 @@
 package org.apache.cassandra.cql3.statements;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 import com.google.common.collect.HashMultiset;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 
-import org.apache.cassandra.db.ConsistencyLevel;
-import org.apache.cassandra.db.CounterMutation;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.IMutation;
-import org.apache.cassandra.db.Mutation;
-import org.apache.cassandra.db.RegularAndStaticColumns;
-import org.apache.cassandra.db.commitlog.CommitLogSegment;
-import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.virtual.VirtualMutation;
-import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.partitions.PartitionUpdate;
 
-import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
+import static org.apache.cassandra.utils.MonotonicClock.approxTime;
 
 /**
  * Utility class to collect updates.
@@ -98,7 +87,7 @@ final class BatchUpdatesCollector implements UpdatesCollector
         {
             RegularAndStaticColumns columns = updatedColumns.get(metadata.id);
             assert columns != null;
-            upd = new PartitionUpdate.Builder(metadata, dk, columns, perPartitionKeyCounts.get(metadata.id).count(dk.getKey()));
+            upd = PartitionUpdate.builder(metadata, dk, columns, perPartitionKeyCounts.get(metadata.id).count(dk.getKey()));
             mut.add(upd);
         }
         return upd;
@@ -131,13 +120,9 @@ final class BatchUpdatesCollector implements UpdatesCollector
 
     /**
      * Returns a collection containing all the mutations.
-     * 
-     * @param state state related to the client connection
-     * 
      * @return a collection containing all the mutations.
      */
-    @Override
-    public List<IMutation> toMutations(ClientState state)
+    public List<IMutation> toMutations()
     {
         List<IMutation> ms = new ArrayList<>();
         for (Map<ByteBuffer, IMutationBuilder> ksMap : mutationBuilders.values())
@@ -145,8 +130,7 @@ final class BatchUpdatesCollector implements UpdatesCollector
             for (IMutationBuilder builder : ksMap.values())
             {
                 IMutation mutation = builder.build();
-                mutation.validateIndexedColumns(state);
-                mutation.validateSize(MessagingService.current_version, CommitLogSegment.ENTRY_OVERHEAD_SIZE);
+                mutation.validateIndexedColumns();
                 ms.add(mutation);
             }
         }

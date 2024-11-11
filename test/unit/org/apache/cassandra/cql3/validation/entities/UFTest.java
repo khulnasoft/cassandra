@@ -23,14 +23,18 @@ import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 
+import com.google.common.reflect.TypeToken;
 import org.junit.Assert;
 import org.junit.Test;
 
-import com.datastax.driver.core.exceptions.InvalidQueryException;
+import com.khulnasoft.driver.core.TypeTokens;
+import com.khulnasoft.driver.core.UDTValue;
+import com.khulnasoft.driver.core.exceptions.InvalidQueryException;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.cql3.functions.FunctionName;
+import org.apache.cassandra.cql3.functions.JavaBasedUDFunction;
 import org.apache.cassandra.cql3.functions.UDFunction;
 import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
@@ -48,6 +52,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class UFTest extends CQLTester
 {
+    @Test
+    public void testJavaSourceName()
+    {
+        Assert.assertEquals("String", JavaBasedUDFunction.javaSourceName(TypeToken.of(String.class)));
+        Assert.assertEquals("java.util.Map<Integer, String>", JavaBasedUDFunction.javaSourceName(TypeTokens.mapOf(Integer.class, String.class)));
+        Assert.assertEquals("com.khulnasoft.driver.core.UDTValue", JavaBasedUDFunction.javaSourceName(TypeToken.of(UDTValue.class)));
+        Assert.assertEquals("java.util.Set<com.khulnasoft.driver.core.UDTValue>", JavaBasedUDFunction.javaSourceName(TypeTokens.setOf(UDTValue.class)));
+    }
+
     @Test
     public void testNonExistingOnes() throws Throwable
     {
@@ -425,7 +438,7 @@ public class UFTest extends CQLTester
         execute("DROP FUNCTION IF EXISTS " + fSin);
 
         // can't drop native functions
-        assertInvalidMessage("System keyspace 'system' is not user-modifiable", "DROP FUNCTION to_timestamp");
+        assertInvalidMessage("System keyspace 'system' is not user-modifiable", "DROP FUNCTION totimestamp");
         assertInvalidMessage("System keyspace 'system' is not user-modifiable", "DROP FUNCTION uuid");
 
         // sin() no longer exists
@@ -652,7 +665,7 @@ public class UFTest extends CQLTester
     @Test
     public void testFunctionInSystemKS() throws Throwable
     {
-        execute("CREATE OR REPLACE FUNCTION " + KEYSPACE + ".to_timestamp(val timeuuid) " +
+        execute("CREATE OR REPLACE FUNCTION " + KEYSPACE + ".totimestamp(val timeuuid) " +
                 "RETURNS NULL ON NULL INPUT " +
                 "RETURNS timestamp " +
                 "LANGUAGE JAVA\n" +
@@ -666,7 +679,7 @@ public class UFTest extends CQLTester
                              "LANGUAGE JAVA\n" +
                              "AS 'return null;';");
         assertInvalidMessage("System keyspace 'system' is not user-modifiable",
-                             "CREATE OR REPLACE FUNCTION system.to_timestamp(val timeuuid) " +
+                             "CREATE OR REPLACE FUNCTION system.totimestamp(val timeuuid) " +
                              "RETURNS NULL ON NULL INPUT " +
                              "RETURNS timestamp " +
                              "LANGUAGE JAVA\n" +
@@ -683,7 +696,7 @@ public class UFTest extends CQLTester
                              "LANGUAGE JAVA\n" +
                              "AS 'return null;';");
         assertInvalidMessage("System keyspace 'system' is not user-modifiable",
-                             "CREATE OR REPLACE FUNCTION to_timestamp(val timeuuid) " +
+                             "CREATE OR REPLACE FUNCTION totimestamp(val timeuuid) " +
                              "RETURNS NULL ON NULL INPUT " +
                              "RETURNS timestamp " +
                              "LANGUAGE JAVA\n" +
@@ -878,7 +891,7 @@ public class UFTest extends CQLTester
                               executeNet(version, "SELECT " + fName + "(dval) FROM %s WHERE key = 1"));
                 Assert.fail();
             }
-            catch (com.datastax.driver.core.exceptions.FunctionExecutionException fee)
+            catch (com.khulnasoft.driver.core.exceptions.FunctionExecutionException fee)
             {
                 // Java driver neither throws FunctionExecutionException nor does it set the exception code correctly
                 Assert.assertTrue(version.isGreaterOrEqualTo(ProtocolVersion.V4));
@@ -894,7 +907,7 @@ public class UFTest extends CQLTester
     public void testEmptyString() throws Throwable
     {
         createTable("CREATE TABLE %s (key int primary key, sval text, aval ascii, bval blob, empty_int int)");
-        execute("INSERT INTO %s (key, sval, aval, bval, empty_int) VALUES (?, ?, ?, ?, blob_as_int(0x))", 1, "", "", ByteBuffer.allocate(0));
+        execute("INSERT INTO %s (key, sval, aval, bval, empty_int) VALUES (?, ?, ?, ?, blobAsInt(0x))", 1, "", "", ByteBuffer.allocate(0));
 
         String fNameSRC = createFunction(KEYSPACE_PER_TEST, "text",
                                          "CREATE OR REPLACE FUNCTION %s(val text) " +
@@ -1010,8 +1023,49 @@ public class UFTest extends CQLTester
                                        "RETURNS int " +
                                        "LANGUAGE JAVA\n" +
                                        "AS 'return val;'");
-            }).hasRootCauseInstanceOf(InvalidRequestException.class)
-              .hasRootCauseMessage("Function name '%s' is invalid", funcName);
+            }).isInstanceOf(InvalidRequestException.class)
+              .hasMessageContaining("Function name '%s' is invalid", funcName);
+        }
+    }
+
+    @Test
+    public void testRejectInvalidLanguageOnCreation()
+    {
+        for (String funcName : Arrays.asList("my/fancy/func", "my_other[fancy]func"))
+        {
+            assertThatThrownBy(() -> createFunctionOverload(String.format("%s.\"%s\"", KEYSPACE_PER_TEST, funcName),
+                                                            "int",
+                                                            "CREATE OR REPLACE FUNCTION %s(val int) " +
+                                                            "RETURNS NULL ON NULL INPUT " +
+                                                            "RETURNS int " +
+                                                            "LANGUAGE javascript\n" +
+                                                            "AS 'return val;'"))
+            .isInstanceOf(InvalidRequestException.class)
+            .hasMessageContaining("Currently only Java UDFs are available in Cassandra. " +
+                                  "For more information - CASSANDRA-18252");
+
+            assertThatThrownBy(() -> createFunctionOverload(String.format("%s.\"%s\"", KEYSPACE_PER_TEST, funcName),
+                                                            "int",
+                                                            "CREATE OR REPLACE FUNCTION %s(val int) " +
+                                                            "RETURNS NULL ON NULL INPUT " +
+                                                            "RETURNS int " +
+                                                            "LANGUAGE JAVASCRIPT\n" +
+                                                            "AS 'return val;'"))
+            .isInstanceOf(InvalidRequestException.class)
+            .hasMessageContaining("Currently only Java UDFs are available in Cassandra. " +
+                                  "For more information - CASSANDRA-18252");
+
+            // test with weird made up word for language
+            assertThatThrownBy(() -> createFunctionOverload(String.format("%s.\"%s\"", KEYSPACE_PER_TEST, funcName),
+                                                            "int",
+                                                            "CREATE OR REPLACE FUNCTION %s(val int) " +
+                                                            "RETURNS NULL ON NULL INPUT " +
+                                                            "RETURNS int " +
+                                                            "LANGUAGE JAVASCRI\n" +
+                                                            "AS 'return val;'"))
+            .isInstanceOf(InvalidRequestException.class)
+            .hasMessageContaining("Currently only Java UDFs are available in Cassandra. " +
+                                  "For more information - CASSANDRA-18252");
         }
     }
 }

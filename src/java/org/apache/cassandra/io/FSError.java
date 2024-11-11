@@ -24,31 +24,24 @@ import org.apache.cassandra.io.util.File;
 
 public abstract class FSError extends IOError
 {
-    final String message;
-    public final String path;
+    public final File file;
 
-    public FSError(Throwable cause, File path)
+    public FSError(Throwable cause, File file)
     {
-        this(null, cause, path);
+        super(cause);
+        this.file = file;
     }
 
     public FSError(Throwable cause, Path path)
     {
-        this(null, cause, path);
+        super(cause);
+        this.file = new File(path);
     }
 
-    public FSError(String message, Throwable cause, File path)
+    @Override
+    public String getMessage()
     {
-        super(cause);
-        this.message = message;
-        this.path = path.toString();
-    }
-
-    public FSError(String message, Throwable cause, Path path)
-    {
-        super(cause);
-        this.message = message;
-        this.path = path.toString();
+        return super.getMessage() + " on file " + String.valueOf(file);
     }
 
     /**
@@ -65,11 +58,5 @@ public abstract class FSError extends IOError
         }
 
         return null;
-    }
-
-    @Override
-    public String toString()
-    {
-        return getClass().getSimpleName() + (message != null ? ' ' + message : "") + (path != null ? " in " + path : "");
     }
 }

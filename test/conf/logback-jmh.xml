@@ -97,5 +97,5 @@ appender reference in the root level section below.
   </root>
 
   <logger name="org.apache.cassandra" level="DEBUG"/>
-  <logger name="com.datastax.bdp.db" level="DEBUG"/>
+  <logger name="com.khulnasoft.bdp.db" level="DEBUG"/>
 </configuration>

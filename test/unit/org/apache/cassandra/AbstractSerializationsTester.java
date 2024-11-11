@@ -19,29 +19,28 @@
  */
 package org.apache.cassandra;
 
-import org.apache.cassandra.io.IVersionedSerializer;
-import org.apache.cassandra.io.util.*;
-import org.apache.cassandra.net.MessagingService;
-
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_VERSION;
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_SERIALIZATION_WRITES;
+import org.apache.cassandra.io.IVersionedSerializer;
+import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.io.util.DataOutputStreamPlus;
+import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.io.util.FileInputStreamPlus;
+import org.apache.cassandra.io.util.FileOutputStreamPlus;
+import org.apache.cassandra.net.MessagingService;
 
 public class AbstractSerializationsTester
 {
-    protected static final String CUR_VER = CASSANDRA_VERSION.getString("5.1");
+    protected static final String CUR_VER = System.getProperty("cassandra.version", "4.0");
     protected static final Map<String, Integer> VERSION_MAP = new HashMap<String, Integer> ()
     {{
         put("3.0", MessagingService.VERSION_30);
         put("4.0", MessagingService.VERSION_40);
-        put("5.0", MessagingService.VERSION_50);
-        put("5.1", MessagingService.VERSION_51);
     }};
 
-    protected static final boolean EXECUTE_WRITES = TEST_SERIALIZATION_WRITES.getBoolean();
+    protected static final boolean EXECUTE_WRITES = Boolean.getBoolean("cassandra.test-serialization-writes");
 
     protected static int getVersion()
     {
@@ -67,11 +66,13 @@ public class AbstractSerializationsTester
         return new FileInputStreamPlus(f);
     }
 
+    @SuppressWarnings("resource")
     protected static DataOutputStreamPlus getOutput(String name) throws IOException
     {
         return getOutput(CUR_VER, name);
     }
 
+    @SuppressWarnings("resource")
     protected static DataOutputStreamPlus getOutput(String version, String name) throws IOException
     {
         File f = new File("test/data/serialization/" + version + '/' + name);

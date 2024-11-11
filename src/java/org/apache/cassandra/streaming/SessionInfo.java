@@ -18,7 +18,6 @@
 package org.apache.cassandra.streaming;
 
 import java.io.Serializable;
-import java.net.InetSocketAddress;
 import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -27,6 +26,7 @@ import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 
+import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.utils.FBUtilities;
 
 /**
@@ -34,9 +34,9 @@ import org.apache.cassandra.utils.FBUtilities;
  */
 public final class SessionInfo implements Serializable
 {
-    public final InetSocketAddress peer;
+    public final InetAddressAndPort peer;
     public final int sessionIndex;
-    public final InetSocketAddress connecting;
+    public final InetAddressAndPort connecting;
     /** Immutable collection of receiving summaries */
     public final Collection<StreamSummary> receivingSummaries;
     /** Immutable collection of sending summaries*/
@@ -44,31 +44,24 @@ public final class SessionInfo implements Serializable
     /** Current session state */
     public final StreamSession.State state;
 
-    private final Map<String, ProgressInfo> receivingFiles = new ConcurrentHashMap<>();
-    private final Map<String, ProgressInfo> sendingFiles = new ConcurrentHashMap<>();
+    private final Map<String, ProgressInfo> receivingFiles;
+    private final Map<String, ProgressInfo> sendingFiles;
 
-    public final String failureReason;
-
-    public SessionInfo(InetSocketAddress peer,
+    public SessionInfo(InetAddressAndPort peer,
                        int sessionIndex,
-                       InetSocketAddress connecting,
+                       InetAddressAndPort connecting,
                        Collection<StreamSummary> receivingSummaries,
                        Collection<StreamSummary> sendingSummaries,
-                       StreamSession.State state,
-                       String failureReason)
+                       StreamSession.State state)
     {
         this.peer = peer;
         this.sessionIndex = sessionIndex;
         this.connecting = connecting;
         this.receivingSummaries = ImmutableSet.copyOf(receivingSummaries);
         this.sendingSummaries = ImmutableSet.copyOf(sendingSummaries);
+        this.receivingFiles = new ConcurrentHashMap<>();
+        this.sendingFiles = new ConcurrentHashMap<>();
         this.state = state;
-        this.failureReason =  failureReason;
-    }
-
-    public SessionInfo(SessionInfo other)
-    {
-        this(other.peer, other.sessionIndex, other.connecting, other.receivingSummaries, other.sendingSummaries, other.state, other.failureReason);
     }
 
     public boolean isFailed()
@@ -208,10 +201,5 @@ public final class SessionInfo implements Serializable
     public SessionSummary createSummary()
     {
         return new SessionSummary(FBUtilities.getBroadcastAddressAndPort(), peer, receivingSummaries, sendingSummaries);
-    }
-
-    public String getFailureReason()
-    {
-        return failureReason;
     }
 }

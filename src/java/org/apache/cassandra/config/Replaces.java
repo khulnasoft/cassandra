@@ -25,8 +25,8 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Repeatable annotation for providing old name, converter from old to new type and whether the
- * config parameters we annotate are deprecated and we need to warn the users. (CASSANDRA-17141, CASSANDRA-15234)
+ * Repeatable annotation for providing old name and whether the
+ * config parameters we annotate are deprecated and we need to warn the users. (CASSANDRA-17141)
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ ElementType.FIELD})
@@ -37,11 +37,6 @@ public @interface Replaces
      * @return old configuration parameter name
      */
     String oldName();
-
-    /**
-     * @return which converter we need depending on the old default unit that was used
-     */
-    Converters converter() default Converters.IDENTITY;
 
     /**
      * @return whether the parameter should be marked as deprecated or not and warning sent to the user

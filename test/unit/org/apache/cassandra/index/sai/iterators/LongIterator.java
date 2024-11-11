@@ -19,6 +19,7 @@ package org.apache.cassandra.index.sai.iterators;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.LongFunction;
 
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.index.sai.SAITester;
@@ -29,24 +30,18 @@ public class LongIterator extends KeyRangeIterator
     private final List<PrimaryKey> keys;
     private int currentIdx = 0;
 
-    public static LongIterator newEmptyIterator()
-    {
-        return new LongIterator();
-    }
-
-    private LongIterator()
-    {
-        super(null, null, 0);
-        keys = null;
-    }
-
     public LongIterator(long[] tokens)
+    {
+        this(tokens, t -> t);
+    }
+
+    public LongIterator(long[] tokens, LongFunction<Long> toOffset)
     {
         super(tokens.length == 0 ? null : fromToken(tokens[0]), tokens.length == 0 ? null : fromToken(tokens[tokens.length - 1]), tokens.length);
 
         this.keys = new ArrayList<>(tokens.length);
         for (long token : tokens)
-            this.keys.add(fromToken(token));
+            this.keys.add(fromTokenAndRowId(token, toOffset.apply(token)));
     }
 
     @Override
@@ -59,14 +54,10 @@ public class LongIterator extends KeyRangeIterator
     }
 
     @Override
-    protected void performSkipTo(PrimaryKey nextKey)
+    protected void performSkipTo(PrimaryKey nextToken)
     {
-        for ( ; currentIdx < keys.size(); currentIdx++)
-        {
-            PrimaryKey token = keys.get(currentIdx);
-            if (token.compareTo(nextKey) >= 0)
-                break;
-        }
+        while (currentIdx < keys.size() && keys.get(currentIdx).compareTo(nextToken) < 0)
+            currentIdx++;
     }
 
     @Override
@@ -75,7 +66,7 @@ public class LongIterator extends KeyRangeIterator
 
     public static PrimaryKey fromToken(long token)
     {
-        return SAITester.TEST_FACTORY.create(new Murmur3Partitioner.LongToken(token));
+        return SAITester.TEST_FACTORY.createTokenOnly(new Murmur3Partitioner.LongToken(token));
     }
 
 
@@ -90,10 +81,15 @@ public class LongIterator extends KeyRangeIterator
 
     public static List<Long> convert(final long... nums)
     {
-        return new ArrayList<>(nums.length)
+        return new ArrayList<Long>(nums.length)
         {{
             for (long n : nums)
                 add(n);
         }};
+    }
+
+    private PrimaryKey fromTokenAndRowId(long token, long rowId)
+    {
+        return SAITester.TEST_FACTORY.createTokenOnly(new Murmur3Partitioner.LongToken(token));
     }
 }

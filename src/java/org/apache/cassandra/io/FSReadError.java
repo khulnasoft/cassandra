@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.io;
 
-
 import java.nio.file.Path;
 
 import org.apache.cassandra.io.util.File;
@@ -29,9 +28,9 @@ public class FSReadError extends FSError
         super(cause, path);
     }
 
-    public FSReadError(Throwable cause, File path)
+    public FSReadError(Throwable cause, File file)
     {
-        super(cause, path);
+        super(cause, file);
     }
 
     public FSReadError(Throwable cause, String path)
@@ -39,23 +38,9 @@ public class FSReadError extends FSError
         this(cause, new File(path));
     }
 
-    public FSReadError(String message, Throwable cause, Path path)
+    @Override
+    public String toString()
     {
-        super(message, cause, path);
-    }
-
-    public FSReadError(String message, Throwable cause, File path)
-    {
-        super(message, cause, path);
-    }
-
-    public FSReadError(String message, Throwable cause, String path)
-    {
-        this(message, cause, new File(path));
-    }
-
-    public FSReadError(String message, Throwable cause)
-    {
-        this(message, cause, new File(""));
+        return "FSReadError in " + file;
     }
 }

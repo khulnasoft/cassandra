@@ -27,10 +27,11 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
 
+import com.google.common.util.concurrent.MoreExecutors;
+
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 
-import org.apache.cassandra.concurrent.ImmediateExecutor;
 import org.apache.cassandra.io.util.File;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,7 +51,7 @@ public class StopWordFactory
             "pl","pt","ro","ru","sv"));
 
     private static final LoadingCache<String, Set<String>> STOP_WORDS_CACHE = Caffeine.newBuilder()
-            .executor(ImmediateExecutor.INSTANCE)
+            .executor(MoreExecutors.directExecutor())
             .build(StopWordFactory::getStopWordsFromResource);
 
     public static Set<String> getStopWordsForLanguage(Locale locale)

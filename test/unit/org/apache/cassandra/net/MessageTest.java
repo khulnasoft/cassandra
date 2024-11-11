@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
@@ -28,7 +29,6 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.io.IVersionedSerializer;
@@ -37,21 +37,21 @@ import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.tcm.Epoch;
+import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.tracing.Tracing.TraceType;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.FreeRunningClock;
-import org.apache.cassandra.utils.TimeUUID;
 
 import static org.apache.cassandra.net.Message.serializer;
+import static org.apache.cassandra.net.MessagingService.VERSION_3014;
+import static org.apache.cassandra.net.MessagingService.VERSION_30;
 import static org.apache.cassandra.net.MessagingService.VERSION_40;
 import static org.apache.cassandra.net.NoPayload.noPayload;
 import static org.apache.cassandra.net.ParamType.RESPOND_TO;
 import static org.apache.cassandra.net.ParamType.TRACE_SESSION;
 import static org.apache.cassandra.net.ParamType.TRACE_TYPE;
-import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
+import static org.apache.cassandra.utils.MonotonicClock.approxTime;
 
 import static org.junit.Assert.*;
 
@@ -60,7 +60,6 @@ public class MessageTest
     @BeforeClass
     public static void setUpClass() throws Exception
     {
-        ServerTestUtils.prepareServer();
         DatabaseDescriptor.daemonInitialization();
         DatabaseDescriptor.setCrossNodeTimeout(true);
 
@@ -94,7 +93,6 @@ public class MessageTest
     {
         Message<Integer> msg =
             Message.builder(Verb._TEST_2, 37)
-                   .withEpoch(Epoch.EMPTY)
                    .withId(1)
                    .from(FBUtilities.getLocalAddressAndPort())
                    .withCreatedAt(approxTime.now())
@@ -102,9 +100,11 @@ public class MessageTest
                    .withFlag(MessageFlag.CALL_BACK_ON_FAILURE)
                    .withFlag(MessageFlag.TRACK_REPAIRED_DATA)
                    .withParam(TRACE_TYPE, TraceType.QUERY)
-                   .withParam(TRACE_SESSION, nextTimeUUID())
+                   .withParam(TRACE_SESSION, UUID.randomUUID())
                    .build();
 
+        testInferMessageSize(msg, VERSION_30);
+        testInferMessageSize(msg, VERSION_3014);
         testInferMessageSize(msg, VERSION_40);
     }
 
@@ -138,11 +138,10 @@ public class MessageTest
         long createAtNanos = approxTime.now();
         long expiresAtNanos = createAtNanos + TimeUnit.SECONDS.toNanos(1);
         TraceType traceType = TraceType.QUERY;
-        TimeUUID traceSession = nextTimeUUID();
+        UUID traceSession = UUID.randomUUID();
 
         Message<NoPayload> msg =
             Message.builder(Verb._TEST_1, noPayload)
-                   .withEpoch(Epoch.EMPTY)
                    .withId(1)
                    .from(from)
                    .withCreatedAt(createAtNanos)
@@ -161,7 +160,7 @@ public class MessageTest
         assertEquals(traceType, msg.traceType());
         assertEquals(traceSession, msg.traceSession());
         assertNull(msg.forwardTo());
-        assertEquals(from, msg.respondTo());
+        assertNull(msg.respondTo());
     }
 
     @Test
@@ -169,13 +168,12 @@ public class MessageTest
     {
         Message<NoPayload> msg =
             Message.builder(Verb._TEST_1, noPayload)
-                   .withEpoch(Epoch.EMPTY)
                    .withId(1)
                    .from(FBUtilities.getLocalAddressAndPort())
                    .withCreatedAt(approxTime.now())
                    .withExpiresAt(approxTime.now() + TimeUnit.SECONDS.toNanos(1))
                    .withFlag(MessageFlag.CALL_BACK_ON_FAILURE)
-                   .withParam(TRACE_SESSION, nextTimeUUID())
+                   .withParam(TRACE_SESSION, UUID.randomUUID())
                    .build();
         testCycle(msg);
     }
@@ -213,7 +211,7 @@ public class MessageTest
     @Test
     public void testBuilderNotAddTraceHeaderWithNoTraceSession()
     {
-        Message<NoPayload> msg = Message.builder(Verb._TEST_1, noPayload).withTracingParams().withEpoch(Epoch.EMPTY).build();
+        Message<NoPayload> msg = Message.builder(Verb._TEST_1, noPayload).withTracingParams().build();
         assertNull(msg.header.traceSession());
     }
 
@@ -225,7 +223,6 @@ public class MessageTest
 
         Message<NoPayload> msg =
             Message.builder(Verb._TEST_1, noPayload)
-                   .withEpoch(Epoch.EMPTY)
                    .withId(1)
                    .from(from)
                    .withCustomParam("custom1", "custom1value".getBytes(StandardCharsets.UTF_8))
@@ -250,12 +247,60 @@ public class MessageTest
         assertEquals("custom2value", new String(msg.header.customParams().get("custom2"), StandardCharsets.UTF_8));
     }
 
+    @Test
+    public void testResponseWithCustomParams()
+    {
+        long id = 1;
+        InetAddressAndPort from = FBUtilities.getLocalAddressAndPort();
+
+        Message<NoPayload> msg =
+                Message.builder(Verb.READ_REQ, noPayload)
+                        .withId(1)
+                        .from(from)
+                        .build();
+
+        Message reply = msg.responseWithBuilder(msg)
+                           .withCustomParam("custom1", "custom1value".getBytes(StandardCharsets.UTF_8))
+                           .withCustomParam("custom2", "custom2value".getBytes(StandardCharsets.UTF_8))
+                           .build();
+
+        assertEquals(id, reply.id());
+        assertEquals(from, reply.from());
+        assertEquals(2, reply.header.customParams().size());
+        assertEquals("custom1value", new String(reply.header.customParams().get("custom1"), StandardCharsets.UTF_8));
+        assertEquals("custom2value", new String(reply.header.customParams().get("custom2"), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    public void testEmptyResponseBuilderWithCustomParams()
+    {
+        long id = 1;
+        InetAddressAndPort from = FBUtilities.getLocalAddressAndPort();
+
+        Message<NoPayload> msg =
+        Message.builder(Verb.READ_REQ, noPayload)
+               .withId(1)
+               .from(from)
+               .build();
+
+        Message reply = msg.emptyResponseBuilder()
+                           .withCustomParam("custom1", "custom1value".getBytes(StandardCharsets.UTF_8))
+                           .withCustomParam("custom2", "custom2value".getBytes(StandardCharsets.UTF_8))
+                           .build();
+
+        assertEquals(id, reply.id());
+        assertEquals(from, reply.from());
+        assertEquals(2, reply.header.customParams().size());
+        assertEquals("custom1value", new String(reply.header.customParams().get("custom1"), StandardCharsets.UTF_8));
+        assertEquals("custom2value", new String(reply.header.customParams().get("custom2"), StandardCharsets.UTF_8));
+    }
+
     private void testAddTraceHeaderWithType(TraceType traceType)
     {
         try
         {
-            TimeUUID sessionId = Tracing.instance.newSession(traceType);
-            Message<NoPayload> msg = Message.builder(Verb._TEST_1, noPayload).withEpoch(Epoch.FIRST).withTracingParams().build();
+            UUID sessionId = Tracing.instance.newSession(ClientState.forInternalCalls(), traceType);
+            Message<NoPayload> msg = Message.builder(Verb._TEST_1, noPayload).withTracingParams().build();
             assertEquals(sessionId, msg.header.traceSession());
             assertEquals(traceType, msg.header.traceType());
         }
@@ -267,6 +312,8 @@ public class MessageTest
 
     private void testCycle(Message msg) throws IOException
     {
+        testCycle(msg, VERSION_30);
+        testCycle(msg, VERSION_3014);
         testCycle(msg, VERSION_40);
     }
 

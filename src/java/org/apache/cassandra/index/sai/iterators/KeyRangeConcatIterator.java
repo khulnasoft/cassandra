@@ -17,175 +17,152 @@
  */
 package org.apache.cassandra.index.sai.iterators;
 
+import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Iterator;
 import java.util.List;
-
-import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.index.sai.utils.PrimaryKey;
 import org.apache.cassandra.io.util.FileUtils;
 
 /**
- * {@link KeyRangeConcatIterator} takes a list of sorted range iterators and concatenates them, leaving duplicates in
+ * {@link KeyRangeConcatIterator} takes a list of sorted range iterator and concatenates them, leaving duplicates in
  * place, to produce a new stably sorted iterator. Duplicates are eliminated later in
  * {@link org.apache.cassandra.index.sai.plan.StorageAttachedIndexSearcher}
  * as results from multiple SSTable indexes and their respective segments are consumed.
- * <p>
+ *
  * ex. (1, 2, 3) + (3, 3, 4, 5) -> (1, 2, 3, 3, 3, 4, 5)
  * ex. (1, 2, 2, 3) + (3, 4, 4, 6, 6, 7) -> (1, 2, 2, 3, 3, 4, 4, 6, 6, 7)
+ *
  */
 public class KeyRangeConcatIterator extends KeyRangeIterator
 {
-    public static final String MUST_BE_SORTED_ERROR = "RangeIterator must be sorted, previous max: %s, next min: %s";
-    private final List<KeyRangeIterator> ranges;
+    private final Iterator<KeyRangeIterator> ranges;
+    private KeyRangeIterator currentRange;
+    private final List<KeyRangeIterator> toRelease;
 
-    private int current;
-
-    protected KeyRangeConcatIterator(KeyRangeIterator.Builder.Statistics statistics, List<KeyRangeIterator> ranges, Runnable onClose)
+    protected KeyRangeConcatIterator(KeyRangeIterator.Builder.Statistics statistics, List<KeyRangeIterator> ranges)
     {
-        super(statistics, onClose);
+        super(statistics);
 
         if (ranges.isEmpty())
             throw new IllegalArgumentException("Cannot concatenate empty list of ranges");
-
-        this.current = 0;
-        this.ranges = ranges;
+        this.ranges = ranges.iterator();
+        currentRange = this.ranges.next();
+        this.toRelease = ranges;
     }
 
     @Override
-    protected void performSkipTo(PrimaryKey nextKey)
+    protected void performSkipTo(PrimaryKey primaryKey)
     {
-        while (current < ranges.size())
+        while (true)
         {
-            KeyRangeIterator currentIterator = ranges.get(current);
-
-            if (currentIterator.hasNext() && currentIterator.peek().compareTo(nextKey) >= 0)
-                break;
-
-            if (currentIterator.getMaximum().compareTo(nextKey) >= 0)
+            if (currentRange.getMaximum().compareTo(primaryKey) >= 0)
             {
-                currentIterator.skipTo(nextKey);
-                break;
+                currentRange.skipTo(primaryKey);
+                return;
             }
-
-            current++;
+            if (!ranges.hasNext())
+            {
+                currentRange.skipTo(primaryKey);
+                return;
+            }
+            currentRange = ranges.next();
         }
     }
 
     @Override
     protected PrimaryKey computeNext()
     {
-        while (current < ranges.size())
+        while (!currentRange.hasNext())
         {
-            KeyRangeIterator currentIterator = ranges.get(current);
+            if (!ranges.hasNext())
+                return endOfData();
 
-            if (currentIterator.hasNext())
-                return currentIterator.next();
-
-            current++;
+            currentRange = ranges.next();
         }
-
-        return endOfData();
+        return currentRange.next();
     }
 
     @Override
-    public void close()
+    public void close() throws IOException
     {
-        super.close();
-
         // due to lazy key fetching, we cannot close iterator immediately
-        FileUtils.closeQuietly(ranges);
+        toRelease.forEach(FileUtils::closeQuietly);
+    }
+
+    public static Builder builder()
+    {
+        return builder(1);
     }
 
     public static Builder builder(int size)
     {
-        return builder(size, () -> {});
+        return new Builder(size);
     }
 
-    public static Builder builder(int size, Runnable onClose)
+    public static KeyRangeIterator build(List<KeyRangeIterator> tokens)
     {
-        return new Builder(size, onClose);
+        return new Builder(tokens.size()).add(tokens).build();
     }
 
-    @VisibleForTesting
     public static class Builder extends KeyRangeIterator.Builder
     {
         // We can use a list because the iterators are already in order
-        private final List<KeyRangeIterator> ranges;
-
-        Builder(int size, Runnable onClose)
+        private final List<KeyRangeIterator> rangeIterators;
+        public Builder(int size)
         {
-            super(new ConcatStatistics(), onClose);
-            this.ranges = new ArrayList<>(size);
-        }
-
-        @Override
-        public KeyRangeIterator.Builder add(KeyRangeIterator range)
-        {
-            if (range == null)
-                return this;
-
-            if (range.getMaxKeys() > 0)
-                ranges.add(range);
-            else
-                FileUtils.closeQuietly(range);
-            statistics.update(range);
-
-            return this;
+            super(IteratorType.CONCAT);
+            this.rangeIterators = new ArrayList<>(size);
         }
 
         @Override
         public int rangeCount()
         {
-            return ranges.size();
+            return rangeIterators.size();
         }
 
         @Override
-        public void cleanup()
+        public Collection<KeyRangeIterator> ranges()
         {
-            super.cleanup();
-            FileUtils.closeQuietly(ranges);
+            return rangeIterators;
         }
 
         @Override
+        public Builder add(KeyRangeIterator range)
+        {
+            if (range == null)
+                return this;
+
+            if (range.getMaxKeys() > 0)
+            {
+                rangeIterators.add(range);
+                statistics.update(range);
+            }
+            else
+                FileUtils.closeQuietly(range);
+
+            return this;
+        }
+
+        @Override
+        public KeyRangeIterator.Builder add(List<KeyRangeIterator> ranges)
+        {
+            if (ranges == null || ranges.isEmpty())
+                return this;
+
+            ranges.forEach(this::add);
+            return this;
+        }
+
         protected KeyRangeIterator buildIterator()
         {
             if (rangeCount() == 0)
-            {
-                onClose.run();
                 return empty();
-            }
             if (rangeCount() == 1)
-            {
-                KeyRangeIterator single = ranges.get(0);
-                single.setOnClose(onClose);
-                return single;
-            }
-
-            return new KeyRangeConcatIterator(statistics, ranges, onClose);
-        }
-    }
-
-    private static class ConcatStatistics extends KeyRangeIterator.Builder.Statistics
-    {
-        @Override
-        public void update(KeyRangeIterator range)
-        {
-            // range iterators should be sorted, but previous max must not be greater than next min.
-            if (range.getMaxKeys() > 0)
-            {
-                if (count == 0)
-                {
-                    min = range.getMinimum();
-                }
-                else if (count > 0 && max.compareTo(range.getMinimum()) > 0)
-                {
-                    throw new IllegalArgumentException(String.format(MUST_BE_SORTED_ERROR, max, range.getMinimum()));
-                }
-
-                max = range.getMaximum();
-                count += range.getMaxKeys();
-            }
+                return rangeIterators.get(0);
+            return new KeyRangeConcatIterator(statistics, rangeIterators);
         }
     }
 }

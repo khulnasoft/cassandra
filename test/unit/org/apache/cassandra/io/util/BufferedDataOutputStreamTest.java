@@ -20,14 +20,15 @@
  */
 package org.apache.cassandra.io.util;
 
-import com.google.common.primitives.UnsignedBytes;
-import com.google.common.primitives.UnsignedLong;
-import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.CassandraUInt;
-import org.apache.cassandra.utils.vint.VIntCoding;
-import org.junit.Test;
-
-import java.io.*;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInput;
+import java.io.DataInputStream;
+import java.io.DataOutput;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.UTFDataFormatException;
 import java.lang.reflect.Field;
 import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
@@ -36,7 +37,13 @@ import java.nio.channels.WritableByteChannel;
 import java.util.Arrays;
 import java.util.Random;
 
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
+import org.apache.cassandra.utils.vint.VIntCoding;
+import org.junit.Test;
+
+import com.google.common.primitives.UnsignedBytes;
+import com.google.common.primitives.UnsignedInteger;
+import com.google.common.primitives.UnsignedLong;
+
 import static org.apache.cassandra.utils.FBUtilities.preventIllegalAccessWarnings;
 import static org.junit.Assert.*;
 
@@ -104,12 +111,14 @@ public class BufferedDataOutputStreamTest
 
     BufferedDataOutputStreamPlus fakeStream = new BufferedDataOutputStreamPlus(adapter, 8);
 
+    @SuppressWarnings("resource")
     @Test(expected = NullPointerException.class)
     public void testNullChannel()
     {
         new BufferedDataOutputStreamPlus((WritableByteChannel)null, 8);
     }
 
+    @SuppressWarnings("resource")
     @Test(expected = IllegalArgumentException.class)
     public void testTooSmallBuffer()
     {
@@ -162,7 +171,7 @@ public class BufferedDataOutputStreamTest
 
     static Field baos_bytes;
     static {
-        long seed = nanoTime();
+        long seed = System.nanoTime();
         //seed = 210187780999648L;
         System.out.println("Seed " + seed);
         r = new Random(seed);
@@ -574,7 +583,7 @@ public class BufferedDataOutputStreamTest
         long testValues[] = new long[] { //-1 };
                 0, 1
                 , UnsignedLong.MAX_VALUE.longValue(), UnsignedLong.MAX_VALUE.longValue() - 1, UnsignedLong.MAX_VALUE.longValue() + 1
-                , CassandraUInt.MAX_VALUE_LONG, CassandraUInt.MAX_VALUE_LONG - 1, CassandraUInt.MAX_VALUE_LONG + 1
+                , UnsignedInteger.MAX_VALUE.longValue(), UnsignedInteger.MAX_VALUE.longValue() - 1, UnsignedInteger.MAX_VALUE.longValue() + 1
                 , UnsignedBytes.MAX_VALUE, UnsignedBytes.MAX_VALUE - 1, UnsignedBytes.MAX_VALUE + 1
                 , 65536, 65536 - 1, 65536 + 1 };
         testValues = enrich(testValues);
@@ -606,20 +615,4 @@ public class BufferedDataOutputStreamTest
         }
     }
 
-    @Test
-    public void testWriteBytes() throws Exception
-    {
-        setUp();
-        DataOutputStreamPlus dosp = new BufferedDataOutputStreamPlus(adapter, 8);
-        for (int i = 0; i < 1000; i++)
-        {
-            long val = r.nextLong();
-            int size = r.nextInt(9);
-            byte[] bytes = ByteBufferUtil.bytes(val).array();
-            canonical.write(bytes, 0, size);
-            dosp.writeMostSignificantBytes(val, size);
-        }
-        dosp.flush();
-        assertArrayEquals(canonical.toByteArray(), generated.toByteArray());
-    }
 }

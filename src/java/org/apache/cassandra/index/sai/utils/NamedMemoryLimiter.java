@@ -20,7 +20,6 @@ package org.apache.cassandra.index.sai.utils;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.annotation.concurrent.ThreadSafe;
 
-import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,17 +33,16 @@ public final class NamedMemoryLimiter
 {
     private static final Logger logger = LoggerFactory.getLogger(NamedMemoryLimiter.class);
     
+    private final long limitBytes;
     private final AtomicLong bytesUsed = new AtomicLong(0);
     private final String scope;
-
-    private long limitBytes;
 
     public NamedMemoryLimiter(long limitBytes, String scope)
     {
         this.limitBytes = limitBytes;
         this.scope = scope;
 
-        logger.info("[{}]: Memory limiter using limit of {}...", scope, FBUtilities.prettyPrintMemory(limitBytes));
+        logger.debug("[{}]: Memory limiter using limit of {}...", scope, FBUtilities.prettyPrintMemory(limitBytes));
     }
 
     /**
@@ -59,29 +57,23 @@ public final class NamedMemoryLimiter
     {
         if (logger.isTraceEnabled())
             logger.trace("[{}]: Incrementing tracked memory usage by {} bytes from current usage of {}...", scope, bytes, currentBytesUsed());
-        return bytesUsed.addAndGet(bytes);
+        return this.bytesUsed.addAndGet(bytes);
     }
 
     public long decrement(long bytes)
     {
         if (logger.isTraceEnabled())
             logger.trace("[{}]: Decrementing tracked memory usage by {} bytes from current usage of {}...", scope, bytes, currentBytesUsed());
-        return bytesUsed.addAndGet(-bytes);
+        return this.bytesUsed.addAndGet(-bytes);
     }
 
     public long currentBytesUsed()
     {
-        return bytesUsed.get();
+        return this.bytesUsed.get();
     }
     
     public long limitBytes()
     {
-        return limitBytes;
-    }
-
-    @VisibleForTesting
-    public void setLimitBytes(long bytes)
-    {
-        limitBytes = bytes;
+        return this.limitBytes;
     }
 }

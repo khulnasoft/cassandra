@@ -29,7 +29,6 @@ import java.util.Objects;
 
 import javax.net.ServerSocketFactory;
 
-
 /**
  * This class is used to keep track of RMI servers created during a cluster creation so we can
  * later close the sockets, which would otherwise be left with a thread running waiting for

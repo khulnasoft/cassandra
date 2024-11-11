@@ -23,24 +23,26 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.SimpleStatement;
-import com.datastax.driver.core.Statement;
+import com.khulnasoft.driver.core.Cluster;
+import com.khulnasoft.driver.core.ResultSet;
+import com.khulnasoft.driver.core.Row;
+import com.khulnasoft.driver.core.Session;
+import com.khulnasoft.driver.core.SimpleStatement;
+import com.khulnasoft.driver.core.Statement;
 import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.dht.Murmur3Partitioner.LongToken;
 import org.apache.cassandra.locator.AbstractEndpointSnitch;
 import org.apache.cassandra.locator.IEndpointSnitch;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.locator.ReplicaCollection;
 import org.apache.cassandra.service.EmbeddedCassandraService;
+import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.FBUtilities;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_CONFIG;
+import static junit.framework.Assert.assertFalse;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 
 
 public class PagingTest
@@ -58,7 +60,7 @@ public class PagingTest
     @BeforeClass
     public static void setup() throws Exception
     {
-        CASSANDRA_CONFIG.setString("cassandra-murmur.yaml");
+        System.setProperty("cassandra.config", "cassandra-murmur.yaml");
 
         cassandra = ServerTestUtils.startEmbeddedCassandraService();
 
@@ -128,8 +130,8 @@ public class PagingTest
             }
         };
         DatabaseDescriptor.setEndpointSnitch(snitch);
-//        StorageService.instance.getTokenMetadata().clearUnsafe();
-//        StorageService.instance.getTokenMetadata().updateNormalToken(new LongToken(5097162189738624638L), FBUtilities.getBroadcastAddressAndPort());
+        StorageService.instance.getTokenMetadata().clearUnsafe();
+        StorageService.instance.getTokenMetadata().updateNormalToken(new LongToken(5097162189738624638L), FBUtilities.getBroadcastAddressAndPort());
         session.execute(createTableStatement);
 
         for (int i = 0; i < 110; i++)

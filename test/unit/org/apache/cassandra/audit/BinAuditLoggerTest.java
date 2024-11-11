@@ -22,9 +22,9 @@ import java.nio.file.Path;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Session;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.ResultSet;
+import com.khulnasoft.driver.core.Session;
 import net.openhft.chronicle.queue.ChronicleQueue;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
 import net.openhft.chronicle.queue.ExcerptTailer;

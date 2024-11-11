@@ -23,8 +23,8 @@ import java.util.concurrent.TimeUnit;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.util.concurrent.AbstractFuture;
 
-import org.apache.cassandra.utils.concurrent.AsyncFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -38,13 +38,11 @@ import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.tracing.Tracing;
 
 import static org.apache.cassandra.net.Verb.SYNC_REQ;
-import static org.apache.cassandra.repair.messages.RepairMessage.notDone;
 
-public abstract class SyncTask extends AsyncFuture<SyncStat> implements Runnable
+public abstract class SyncTask extends AbstractFuture<SyncStat> implements Runnable
 {
     private static final Logger logger = LoggerFactory.getLogger(SyncTask.class);
 
-    protected final SharedContext ctx;
     protected final RepairJobDesc desc;
     @VisibleForTesting
     public final List<Range<Token>> rangesToSync;
@@ -54,15 +52,14 @@ public abstract class SyncTask extends AsyncFuture<SyncStat> implements Runnable
     protected volatile long startTime = Long.MIN_VALUE;
     protected final SyncStat stat;
 
-    protected SyncTask(SharedContext ctx, RepairJobDesc desc, InetAddressAndPort primaryEndpoint, InetAddressAndPort peer, List<Range<Token>> rangesToSync, PreviewKind previewKind)
+    protected SyncTask(RepairJobDesc desc, InetAddressAndPort primaryEndpoint, InetAddressAndPort peer, List<Range<Token>> rangesToSync, PreviewKind previewKind)
     {
         Preconditions.checkArgument(!peer.equals(primaryEndpoint), "Sending and receiving node are the same: %s", peer);
-        this.ctx = ctx;
         this.desc = desc;
         this.rangesToSync = rangesToSync;
         this.nodePair = new SyncNodePair(primaryEndpoint, peer);
         this.previewKind = previewKind;
-        this.stat = new SyncStat(nodePair, rangesToSync);
+        this.stat = new SyncStat(nodePair, rangesToSync.size());
     }
 
     protected abstract void startSync();
@@ -77,7 +74,11 @@ public abstract class SyncTask extends AsyncFuture<SyncStat> implements Runnable
      */
     public final void run()
     {
-        startTime = ctx.clock().currentTimeMillis();
+        if (logger.isTraceEnabled())
+            logger.trace("{} Starting sync {} <-> {}", previewKind.logPrefix(desc.sessionId), nodePair.coordinator, nodePair.peer);
+
+        startTime = System.currentTimeMillis();
+
 
         // choose a repair method based on the significance of the difference
         String format = String.format("%s Endpoints %s and %s %%s for %s", previewKind.logPrefix(desc.sessionId), nodePair.coordinator, nodePair.peer, desc.columnFamily);
@@ -85,7 +86,7 @@ public abstract class SyncTask extends AsyncFuture<SyncStat> implements Runnable
         {
             logger.info(String.format(format, "are consistent"));
             Tracing.traceRepair("Endpoint {} is consistent with {} for {}", nodePair.coordinator, nodePair.peer, desc.columnFamily);
-            trySuccess(stat);
+            set(stat);
             return;
         }
 
@@ -103,19 +104,16 @@ public abstract class SyncTask extends AsyncFuture<SyncStat> implements Runnable
     protected void finished()
     {
         if (startTime != Long.MIN_VALUE)
-            Keyspace.open(desc.keyspace).getColumnFamilyStore(desc.columnFamily).metric.repairSyncTime.update(ctx.clock().currentTimeMillis() - startTime, TimeUnit.MILLISECONDS);
+            Keyspace.open(desc.keyspace).getColumnFamilyStore(desc.columnFamily).metric.repairSyncTime.update(System.currentTimeMillis() - startTime, TimeUnit.MILLISECONDS);
     }
 
-    public void abort(Throwable reason)
-    {
-        tryFailure(reason);
-    }
+    public void abort() {}
 
     void sendRequest(SyncRequest request, InetAddressAndPort to)
     {
-        RepairMessage.sendMessageWithFailureCB(ctx, notDone(this), request,
+        RepairMessage.sendMessageWithFailureCB(request,
                                                SYNC_REQ,
                                                to,
-                                               this::tryFailure);
+                                               this::setException);
     }
 }

@@ -22,14 +22,13 @@ import java.util.Collection;
 import java.util.Iterator;
 import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
 import com.google.common.base.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import static org.apache.cassandra.utils.concurrent.BlockingQueues.newBlockingQueue;
-import static org.apache.cassandra.utils.concurrent.Semaphore.newSemaphore;
 
 /**
  * Weighted queue is a wrapper around any blocking queue that turns it into a blocking weighted queue. The queue
@@ -263,7 +262,7 @@ public class WeightedQueue<T> implements BlockingQueue<T>
 
     public WeightedQueue(int maxWeight)
     {
-        this(maxWeight, newBlockingQueue(), NATURAL_WEIGHER);
+        this(maxWeight, new LinkedBlockingQueue<T>(), NATURAL_WEIGHER);
     }
 
     public WeightedQueue(int maxWeight, BlockingQueue<T> queue, Weigher<T> weigher)
@@ -274,7 +273,7 @@ public class WeightedQueue<T> implements BlockingQueue<T>
         this.maxWeight = maxWeight;
         this.queue = queue;
         this.weigher = weigher;
-        availableWeight = newSemaphore(maxWeight);
+        availableWeight = new Semaphore(maxWeight);
     }
 
     boolean acquireWeight(T weighable, long timeout, TimeUnit unit) throws InterruptedException

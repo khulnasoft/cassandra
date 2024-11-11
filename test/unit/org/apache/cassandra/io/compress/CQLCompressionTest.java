@@ -39,8 +39,10 @@ public class CQLCompressionTest extends CQLTester
     private static Config.FlushCompression defaultFlush;
 
     @BeforeClass
-    public static void setUpCompressionClass()
+    public static void setUpClass()
     {
+        CQLTester.setUpClass();
+
         defaultFlush = DatabaseDescriptor.getFlushCompression();
     }
 
@@ -104,7 +106,7 @@ public class CQLCompressionTest extends CQLTester
     @Test
     public void lz4FlushTest() throws Throwable
     {
-        createTable("CREATE TABLE %s (k text PRIMARY KEY, v text) WITH compression = {'class': 'LZ4Compressor'};");
+        createTable("CREATE TABLE %s (k text PRIMARY KEY, v text) WITH compression = {'sstable_compression': 'LZ4Compressor'};");
         ColumnFamilyStore store = flushTwice();
 
         // Should flush as LZ4 "fast"
@@ -115,7 +117,7 @@ public class CQLCompressionTest extends CQLTester
         });
 
         // Should compact to LZ4 "fast"
-        forceCompactAll();
+        compact();
 
         sstables = store.getLiveSSTables();
         assertEquals(sstables.size(), 1);
@@ -129,7 +131,7 @@ public class CQLCompressionTest extends CQLTester
     public void lz4hcFlushTest() throws Throwable
     {
         createTable("CREATE TABLE %s (k text PRIMARY KEY, v text) WITH compression = " +
-                    "{'class': 'LZ4Compressor', 'lz4_compressor_type': 'high'};");
+                    "{'sstable_compression': 'LZ4Compressor', 'lz4_compressor_type': 'high'};");
         ColumnFamilyStore store = flushTwice();
 
         // Should flush as LZ4 "fast" mode
@@ -140,7 +142,7 @@ public class CQLCompressionTest extends CQLTester
         });
 
         // Should compact to LZ4 "high" mode
-        forceCompactAll();
+        compact();
 
         sstables = store.getLiveSSTables();
         assertEquals(sstables.size(), 1);
@@ -153,7 +155,7 @@ public class CQLCompressionTest extends CQLTester
     @Test
     public void zstdFlushTest() throws Throwable
     {
-        createTable("CREATE TABLE %s (k text PRIMARY KEY, v text) WITH compression = {'class': 'ZstdCompressor'};");
+        createTable("CREATE TABLE %s (k text PRIMARY KEY, v text) WITH compression = {'sstable_compression': 'ZstdCompressor'};");
         ColumnFamilyStore store = flushTwice();
 
         // Should flush as LZ4
@@ -163,7 +165,7 @@ public class CQLCompressionTest extends CQLTester
         });
 
         // Should compact to Zstd
-        forceCompactAll();
+        compact();
 
         sstables = store.getLiveSSTables();
         assertEquals(sstables.size(), 1);
@@ -175,7 +177,7 @@ public class CQLCompressionTest extends CQLTester
     @Test
     public void deflateFlushTest() throws Throwable
     {
-        createTable("CREATE TABLE %s (k text PRIMARY KEY, v text) WITH compression = {'class': 'DeflateCompressor'};");
+        createTable("CREATE TABLE %s (k text PRIMARY KEY, v text) WITH compression = {'sstable_compression': 'DeflateCompressor'};");
         ColumnFamilyStore store = flushTwice();
 
         // Should flush as LZ4
@@ -185,7 +187,7 @@ public class CQLCompressionTest extends CQLTester
         });
 
         // Should compact to Deflate
-        forceCompactAll();
+        compact();
 
         sstables = store.getLiveSSTables();
         assertEquals(sstables.size(), 1);
@@ -198,7 +200,7 @@ public class CQLCompressionTest extends CQLTester
     public void useNoCompressorOnFlushTest() throws Throwable
     {
         DatabaseDescriptor.setFlushCompression(Config.FlushCompression.none);
-        createTable("CREATE TABLE %s (k text PRIMARY KEY, v text) WITH compression = {'class': 'LZ4Compressor'};");
+        createTable("CREATE TABLE %s (k text PRIMARY KEY, v text) WITH compression = {'sstable_compression': 'LZ4Compressor'};");
         ColumnFamilyStore store = flushTwice();
 
         // Should flush as Noop compressor
@@ -208,7 +210,7 @@ public class CQLCompressionTest extends CQLTester
         });
 
         // Should compact to LZ4
-        forceCompactAll();
+        compact();
 
         sstables = store.getLiveSSTables();
         assertEquals(sstables.size(), 1);
@@ -222,7 +224,7 @@ public class CQLCompressionTest extends CQLTester
     {
         DatabaseDescriptor.setFlushCompression(Config.FlushCompression.table);
 
-        createTable("CREATE TABLE %s (k text PRIMARY KEY, v text) WITH compression = {'class': 'ZstdCompressor'};");
+        createTable("CREATE TABLE %s (k text PRIMARY KEY, v text) WITH compression = {'sstable_compression': 'ZstdCompressor'};");
         ColumnFamilyStore store = flushTwice();
 
         // Should flush as Zstd
@@ -235,7 +237,7 @@ public class CQLCompressionTest extends CQLTester
     @Test
     public void zstdTableFlushTest() throws Throwable
     {
-        createTable("CREATE TABLE %s (k text PRIMARY KEY, v text) WITH compression = {'class': 'ZstdCompressor'};");
+        createTable("CREATE TABLE %s (k text PRIMARY KEY, v text) WITH compression = {'sstable_compression': 'ZstdCompressor'};");
         ColumnFamilyStore store = flushTwice();
 
         // Should flush as LZ4
@@ -245,7 +247,7 @@ public class CQLCompressionTest extends CQLTester
         });
 
         // Should compact to Zstd
-        forceCompactAll();
+        compact();
 
         sstables = store.getLiveSSTables();
         assertEquals(sstables.size(), 1);
@@ -258,11 +260,16 @@ public class CQLCompressionTest extends CQLTester
     {
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
 
-        execute("INSERT INTO %s (k, v) values (?, ?)", "k1", "v1");
+        // Insert multiple entries to force overlap
+        execute("INSERT INTO %s (k, v) values (?, ?)", "k10", "v10");
+        execute("INSERT INTO %s (k, v) values (?, ?)", "k11", "v11");
+        execute("INSERT INTO %s (k, v) values (?, ?)", "k12", "v12");
         flush();
         assertEquals(1, cfs.getLiveSSTables().size());
 
-        execute("INSERT INTO %s (k, v) values (?, ?)", "k2", "v2");
+        execute("INSERT INTO %s (k, v) values (?, ?)", "k20", "v20");
+        execute("INSERT INTO %s (k, v) values (?, ?)", "k21", "v21");
+        execute("INSERT INTO %s (k, v) values (?, ?)", "k22", "v22");
         flush();
         assertEquals(2, cfs.getLiveSSTables().size());
 

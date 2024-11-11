@@ -52,9 +52,7 @@ import static com.google.common.collect.Iterables.filter;
 import static com.google.common.collect.Iterables.transform;
 import static java.util.Comparator.naturalOrder;
 import static java.util.Comparator.reverseOrder;
-import static org.apache.cassandra.config.CassandraRelevantProperties.BTREE_FAN_FACTOR;
 import static org.apache.cassandra.utils.btree.BTree.iterable;
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -191,7 +189,7 @@ public class LongBTreeTest
                             {
                                 Map<Integer, Integer> update = new LinkedHashMap<>();
                                 for (Integer i : selection.testKeys)
-                                    update.put(i, Integer.valueOf(i));
+                                    update.put(i, new Integer(i));
 
                                 CountingFunction function = new CountingFunction((x) -> x);
                                 Object[] original = selection.testAsSet.tree();
@@ -211,7 +209,7 @@ public class LongBTreeTest
                             {
                                 Map<Integer, Integer> update = new LinkedHashMap<>();
                                 for (Integer i : selection.testKeys)
-                                    update.put(i, Integer.valueOf(i));
+                                    update.put(i, new Integer(i));
 
                                 CountingFunction function = new CountingFunction((x) -> update.getOrDefault(x, x));
                                 Object[] original = selection.testAsSet.tree();
@@ -231,7 +229,7 @@ public class LongBTreeTest
                             {
                                 Map<Integer, Integer> update = new LinkedHashMap<>();
                                 for (Integer i : selection.testKeys)
-                                    update.put(i, Integer.valueOf(i));
+                                    update.put(i, new Integer(i));
 
                                 CountingFunction function = new CountingFunction(update::get);
                                 Object[] original = selection.testAsSet.tree();
@@ -250,7 +248,7 @@ public class LongBTreeTest
                             {
                                 Map<Integer, Integer> update = new LinkedHashMap<>();
                                 for (Integer i : selection.testKeys)
-                                    update.put(i, Integer.valueOf(i));
+                                    update.put(i, new Integer(i));
 
                                 CountingFunction function = new CountingFunction((x) -> update.containsKey(x) ? null : x);
                                 Object[] original = selection.testAsSet.tree();
@@ -653,7 +651,7 @@ public class LongBTreeTest
     // return a value with the search position
     private static List<Integer> randomKeys(Random random, Iterable<Integer> canonical, boolean mixInNotPresentItems)
     {
-        boolean useFake = mixInNotPresentItems && random.nextBoolean();
+        final boolean useFake = mixInNotPresentItems && random.nextBoolean();
         final float fakeRatio = random.nextFloat();
         List<Integer> results = new ArrayList<>();
         Long fakeLb = (long) Integer.MIN_VALUE, fakeUb = null;
@@ -671,12 +669,12 @@ public class LongBTreeTest
             }
             else
             {
-                // otherwise we emit a fake value in the range immediately proceeding the last real value, and not
+                // otherwise we emit a fake value in the range immediately preceeding the last real value, and not
                 // exceeding the real value that would have proceeded (ignoring any other suppressed real values since)
                 if (fakeUb == null)
                     fakeUb = v.longValue() - 1;
                 long mid = (fakeLb + fakeUb) / 2;
-                assert mid < fakeUb;
+                assert mid < v.longValue();
                 results.add((int) mid);
                 fakeLb = mid;
             }
@@ -730,9 +728,6 @@ public class LongBTreeTest
                 Object[] btree = builder.build();
                 assertEquals(i + 1, BTree.size(btree));
                 assertTrue(""+i, BTree.<Integer>isWellFormed(btree, naturalOrder()));
-                assertTrue(""+i, BTree.<Integer>isWellFormed(btree, naturalOrder()));
-                builder.close();
-                assertTrue(builder.validateEmpty());
             }
         }
     }
@@ -1139,7 +1134,7 @@ public class LongBTreeTest
         for (String arg : args)
         {
             if (arg.startsWith("fan="))
-                BTREE_FAN_FACTOR.setString(arg.substring(4));
+                System.setProperty("cassandra.btree.fanfactor", arg.substring(4));
             else if (arg.startsWith("min="))
                 minTreeSize = Integer.parseInt(arg.substring(4));
             else if (arg.startsWith("max="))
@@ -1184,7 +1179,7 @@ public class LongBTreeTest
     {
         args = Arrays.copyOf(args, args.length + 1);
         System.arraycopy(args, 0, args, 1, args.length - 1);
-        args[0] = currentTimeMillis();
+        args[0] = System.currentTimeMillis();
         System.out.printf("%tT: " + formatstr + "\n", args);
     }
 }

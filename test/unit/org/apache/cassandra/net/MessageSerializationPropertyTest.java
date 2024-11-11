@@ -27,7 +27,6 @@ import org.junit.Test;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ReadCommand;
 import org.apache.cassandra.db.ReadQuery;
-import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
 import org.apache.cassandra.io.IVersionedAsymmetricSerializer;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataOutputBuffer;
@@ -41,9 +40,6 @@ import org.apache.cassandra.utils.FixedMonotonicClock;
 import org.assertj.core.api.Assertions;
 import org.mockito.Mockito;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.CLOCK_MONOTONIC_APPROX;
-import static org.apache.cassandra.config.CassandraRelevantProperties.CLOCK_MONOTONIC_PRECISE;
-import static org.apache.cassandra.config.CassandraRelevantProperties.ORG_APACHE_CASSANDRA_DISABLE_MBEAN_REGISTRATION;
 import static org.apache.cassandra.net.Message.serializer;
 import static org.apache.cassandra.utils.CassandraGenerators.MESSAGE_GEN;
 import static org.apache.cassandra.utils.FailingConsumer.orFail;
@@ -54,13 +50,12 @@ public class MessageSerializationPropertyTest implements Serializable
     @BeforeClass
     public static void beforeClass()
     {
-        ORG_APACHE_CASSANDRA_DISABLE_MBEAN_REGISTRATION.setBoolean(true);
+        System.setProperty("org.apache.cassandra.disable_mbean_registration", "true");
         // message serialization uses the MonotonicClock class for precise and approx timestamps, so mock it out
-        CLOCK_MONOTONIC_PRECISE.setString(FixedMonotonicClock.class.getName());
-        CLOCK_MONOTONIC_APPROX.setString(FixedMonotonicClock.class.getName());
+        System.setProperty("cassandra.monotonic_clock.precise", FixedMonotonicClock.class.getName());
+        System.setProperty("cassandra.monotonic_clock.approx", FixedMonotonicClock.class.getName());
 
         DatabaseDescriptor.daemonInitialization();
-        ClusterMetadataTestHelper.setInstanceForTest();
     }
 
     /**
@@ -72,7 +67,7 @@ public class MessageSerializationPropertyTest implements Serializable
         try (DataOutputBuffer out = new DataOutputBuffer(1024))
         {
             qt().withShrinkCycles(0).forAll(MESSAGE_GEN).checkAssert(orFail(message -> {
-                for (MessagingService.Version version : MessagingService.Version.supportedVersions())
+                for (MessagingService.Version version : MessagingService.Version.values())
                 {
                     out.clear();
                     serializer.serialize(message, out, version.value);
@@ -101,7 +96,7 @@ public class MessageSerializationPropertyTest implements Serializable
         {
             qt().withShrinkCycles(0).forAll(MESSAGE_GEN).checkAssert(orFail(message -> {
                 withTable(schema, message, orFail(ignore -> {
-                    for (MessagingService.Version version : MessagingService.Version.supportedVersions())
+                    for (MessagingService.Version version : MessagingService.Version.values())
                     {
                         first.clear();
                         second.clear();
@@ -110,7 +105,7 @@ public class MessageSerializationPropertyTest implements Serializable
                         FixedMonotonicClock.setNowInNanos(message.createdAtNanos());
 
                         serializer.serialize(message, first, version.value);
-                        Message<Object> read = serializer.deserialize(new DataInputBuffer(first.buffer(), true), FBUtilities.getBroadcastAddressAndPort(), version.value);
+                        Message<Object> read = serializer.deserialize(new DataInputBuffer(first.buffer(), true), message.from(), version.value);
                         serializer.serialize(read, second, version.value);
                         // using hex as byte buffer equality kept failing, and was harder to debug difference
                         // using hex means the specific section of the string that is different will be shown

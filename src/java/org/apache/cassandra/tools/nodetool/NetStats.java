@@ -26,7 +26,6 @@ import java.util.Set;
 import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.MessagingServiceMBean;
 import org.apache.cassandra.streaming.ProgressInfo;
 import org.apache.cassandra.streaming.SessionInfo;
@@ -55,11 +54,11 @@ public class NetStats extends NodeToolCmd
             out.printf("%s %s%n", status.streamOperation.getDescription(), status.planId.toString());
             for (SessionInfo info : status.sessions)
             {
-                out.printf("    %s", InetAddressAndPort.toString(info.peer, printPort));
+                out.printf("    %s", info.peer.toString(printPort));
                 // print private IP when it is used
                 if (!info.peer.equals(info.connecting))
                 {
-                    out.printf(" (using %s)", InetAddressAndPort.toString(info.connecting, printPort));
+                    out.printf(" (using %s)", info.connecting.toString(printPort));
                 }
                 out.printf("%n");
                 if (!info.receivingSummaries.isEmpty())

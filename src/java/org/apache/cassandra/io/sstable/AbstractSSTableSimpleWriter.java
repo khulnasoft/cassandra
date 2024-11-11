@@ -17,24 +17,17 @@
  */
 package org.apache.cassandra.io.sstable;
 
-
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Collection;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.RegularAndStaticColumns;
-import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.EncodingStats;
-import org.apache.cassandra.index.Index;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.schema.TableMetadataRef;
@@ -48,22 +41,20 @@ abstract class AbstractSSTableSimpleWriter implements Closeable
     protected final File directory;
     protected final TableMetadataRef metadata;
     protected final RegularAndStaticColumns columns;
-    protected SSTableFormat<?, ?> format = DatabaseDescriptor.getSelectedSSTableFormat();
+    protected SSTableFormat.Type formatType = SSTableFormat.Type.current();
     protected static final AtomicReference<SSTableId> id = new AtomicReference<>(SSTableIdFactory.instance.defaultBuilder().generator(Stream.empty()).get());
     protected boolean makeRangeAware = false;
-    protected final Collection<Index.Group> indexGroups;
 
     protected AbstractSSTableSimpleWriter(File directory, TableMetadataRef metadata, RegularAndStaticColumns columns)
     {
         this.metadata = metadata;
         this.directory = directory;
         this.columns = columns;
-        indexGroups = new ArrayList<>();
     }
 
-    protected void setSSTableFormatType(SSTableFormat<?, ?> type)
+    protected void setSSTableFormatType(SSTableFormat.Type type)
     {
-        this.format = type;
+        this.formatType = type;
     }
 
     protected void setRangeAwareWriting(boolean makeRangeAware)
@@ -71,30 +62,24 @@ abstract class AbstractSSTableSimpleWriter implements Closeable
         this.makeRangeAware = makeRangeAware;
     }
 
-    protected void addIndexGroup(Index.Group indexGroup)
-    {
-        this.indexGroups.add(indexGroup);
-    }
-
-    protected SSTableTxnWriter createWriter(SSTable.Owner owner) throws IOException
+    protected SSTableTxnWriter createWriter() throws IOException
     {
         SerializationHeader header = new SerializationHeader(true, metadata.get(), columns, EncodingStats.NO_STATS);
 
         if (makeRangeAware)
-            return SSTableTxnWriter.createRangeAware(metadata, 0, ActiveRepairService.UNREPAIRED_SSTABLE, ActiveRepairService.NO_PENDING_REPAIR, false, format, header);
+            return SSTableTxnWriter.createRangeAware(metadata, 0, ActiveRepairService.UNREPAIRED_SSTABLE, ActiveRepairService.NO_PENDING_REPAIR, false, formatType, header);
 
         return SSTableTxnWriter.create(metadata,
-                                       createDescriptor(directory, metadata.keyspace, metadata.name, format),
+                                       createDescriptor(directory, metadata.keyspace, metadata.name, formatType),
                                        0,
                                        ActiveRepairService.UNREPAIRED_SSTABLE,
                                        ActiveRepairService.NO_PENDING_REPAIR,
                                        false,
                                        header,
-                                       indexGroups,
-                                       owner);
+                                       Collections.emptySet());
     }
 
-    private static Descriptor createDescriptor(File directory, final String keyspace, final String columnFamily, final SSTableFormat<?, ?> fmt) throws IOException
+    private static Descriptor createDescriptor(File directory, final String keyspace, final String columnFamily, final SSTableFormat.Type fmt) throws IOException
     {
         SSTableId nextGen = getNextId(directory, columnFamily);
         return new Descriptor(directory, keyspace, columnFamily, nextGen, fmt);
@@ -104,18 +89,15 @@ abstract class AbstractSSTableSimpleWriter implements Closeable
     {
         while (true)
         {
-            try (Stream<Path> existingPaths = Files.list(directory.toPath()))
-            {
-                Stream<SSTableId> existingIds = existingPaths.map(File::new)
-                                                             .map(SSTable::tryDescriptorFromFile)
-                                                             .filter(d -> d != null && d.cfname.equals(columnFamily))
-                                                             .map(d -> d.id);
+            Stream<File> existingPaths = Arrays.stream(directory.tryList());
+            Stream<SSTableId> existingIds = existingPaths.map(SSTable::tryDescriptorFromFilename)
+                                                         .filter(d -> d != null && d.cfname.equals(columnFamily))
+                                                         .map(d -> d.id);
 
-                SSTableId lastId = id.get();
-                SSTableId newId = SSTableIdFactory.instance.defaultBuilder().generator(Stream.concat(existingIds, Stream.of(lastId))).get();
-                if (id.compareAndSet(lastId, newId))
-                    return newId;
-            }
+            SSTableId lastId = id.get();
+            SSTableId newId = SSTableIdFactory.instance.defaultBuilder().generator(Stream.concat(existingIds, Stream.of(lastId))).get();
+            if (id.compareAndSet(lastId, newId))
+                return newId;
         }
     }
 

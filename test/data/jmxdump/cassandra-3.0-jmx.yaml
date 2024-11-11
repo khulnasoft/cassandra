@@ -23633,6 +23633,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=cql_test_keyspace,scope=table_0
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=cql_test_keyspace,scope=table_00,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=cql_test_keyspace,scope=table_00,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -24301,6 +24321,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=IndexInfo,name=Vie
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=IndexInfo,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -24985,6 +25025,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=available_ranges,n
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=available_ranges,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system,scope=available_ranges,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -25653,6 +25713,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=batches,name=ViewR
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=batches,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -26337,6 +26417,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=batchlog,name=View
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=batchlog,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system,scope=batchlog,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -27005,6 +27105,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=built_views,name=V
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=built_views,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -27689,6 +27809,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=compaction_history
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=compaction_history,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system,scope=compaction_history,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -28357,6 +28497,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=hints,name=ViewRea
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=hints,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -29041,6 +29201,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=local,name=ViewRea
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=local,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system,scope=local,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -29709,6 +29889,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=paxos,name=ViewRea
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=paxos,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -30393,6 +30593,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=peer_events,name=V
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=peer_events,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system,scope=peer_events,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -31069,6 +31289,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=peers,name=ViewRea
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=peers,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system,scope=peers,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -31737,6 +31977,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=range_xfers,name=V
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=range_xfers,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -33114,6 +33374,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=size_estimates,nam
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=size_estimates,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system,scope=size_estimates,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -33782,6 +34062,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=sstable_activity,n
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=sstable_activity,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -34466,6 +34766,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system,scope=views_builds_in_pr
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system,scope=views_builds_in_progress,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system,scope=views_builds_in_progress,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -35134,6 +35454,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_auth,scope=resource_role
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+? org.apache.cassandra.metrics:type=Table,keyspace=system_auth,scope=resource_role_permissons_index,name=WaitingOnFreeMemtableSpace
+: attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -35818,6 +36158,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_auth,scope=role_members,
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_auth,scope=role_members,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system_auth,scope=role_members,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -36486,6 +36846,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_auth,scope=role_permissi
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_auth,scope=role_permissions,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -37170,6 +37550,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_auth,scope=roles,name=Vi
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_auth,scope=roles,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system_auth,scope=roles,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -37838,6 +38238,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_distributed,scope=parent
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+? org.apache.cassandra.metrics:type=Table,keyspace=system_distributed,scope=parent_repair_history,name=WaitingOnFreeMemtableSpace
+: attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -38522,6 +38942,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_distributed,scope=repair
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_distributed,scope=repair_history,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system_distributed,scope=repair_history,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -39190,6 +39630,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=aggregates,
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=aggregates,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -39874,6 +40334,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=columns,nam
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=columns,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=columns,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -40542,6 +41022,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=dropped_col
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=dropped_columns,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -41226,6 +41726,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=functions,n
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=functions,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=functions,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -41894,6 +42414,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=indexes,nam
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=indexes,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -42578,6 +43118,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=keyspaces,n
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=keyspaces,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=keyspaces,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -43246,6 +43806,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=tables,name
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=tables,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -43930,6 +44510,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=triggers,na
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=triggers,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=triggers,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -44598,6 +45198,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=types,name=
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=types,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName
@@ -45282,6 +45902,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=views,name=
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=views,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system_schema,scope=views,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -45958,6 +46598,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_traces,scope=events,name
   - name: values
     parameters: []
     returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_traces,scope=events,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
 org.apache.cassandra.metrics:type=Table,keyspace=system_traces,scope=events,name=WriteLatency:
   attributes:
   - {access: read-only, name: 50thPercentile, type: double}
@@ -46626,6 +47286,26 @@ org.apache.cassandra.metrics:type=Table,keyspace=system_traces,scope=sessions,na
   - {access: read-only, name: Min, type: double}
   - {access: read-only, name: OneMinuteRate, type: double}
   - {access: read-only, name: RateUnit, type: java.lang.String}
+  - {access: read-only, name: StdDev, type: double}
+  operations:
+  - name: objectName
+    parameters: []
+    returnType: javax.management.ObjectName
+  - name: values
+    parameters: []
+    returnType: long[]
+org.apache.cassandra.metrics:type=Table,keyspace=system_traces,scope=sessions,name=WaitingOnFreeMemtableSpace:
+  attributes:
+  - {access: read-only, name: 50thPercentile, type: double}
+  - {access: read-only, name: 75thPercentile, type: double}
+  - {access: read-only, name: 95thPercentile, type: double}
+  - {access: read-only, name: 98thPercentile, type: double}
+  - {access: read-only, name: 999thPercentile, type: double}
+  - {access: read-only, name: 99thPercentile, type: double}
+  - {access: read-only, name: Count, type: long}
+  - {access: read-only, name: Max, type: long}
+  - {access: read-only, name: Mean, type: double}
+  - {access: read-only, name: Min, type: long}
   - {access: read-only, name: StdDev, type: double}
   operations:
   - name: objectName

@@ -17,17 +17,26 @@
  */
 package org.apache.cassandra.cql3.statements.schema;
 
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 
+import org.apache.cassandra.cql3.CQL3Type;
+import org.apache.cassandra.cql3.ColumnIdentifier;
+import org.apache.cassandra.cql3.functions.types.utils.Bytes;
 import org.apache.cassandra.cql3.statements.PropertyDefinitions;
 import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.schema.CachingParams;
 import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.schema.CompressionParams;
+import org.apache.cassandra.schema.DroppedColumn;
 import org.apache.cassandra.schema.MemtableParams;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableParams;
@@ -36,13 +45,23 @@ import org.apache.cassandra.service.reads.SpeculativeRetryPolicy;
 import org.apache.cassandra.service.reads.repair.ReadRepairStrategy;
 
 import static java.lang.String.format;
-import static org.apache.cassandra.schema.TableParams.Option.*;
 
 public final class TableAttributes extends PropertyDefinitions
 {
     public static final String ID = "id";
-    private static final Set<String> validKeywords;
-    private static final Set<String> obsoleteKeywords;
+    public static final Set<String> validKeywords;
+    private static final Set<String> obsoleteKeywords = ImmutableSet.of(
+        "nodesync",
+        "dse_vertex_label_property",
+        "dse_edge_label_property"
+    );
+
+    private static final Set<String> UNSUPPORTED_DSE_COMPACTION_STRATEGIES = ImmutableSet.of(
+        "org.apache.cassandra.db.compaction.TieredCompactionStrategy",
+        "TieredCompactionStrategy",
+        "org.apache.cassandra.db.compaction.MemoryOnlyStrategy",
+        "MemoryOnlyStrategy"
+    );
 
     static
     {
@@ -51,13 +70,26 @@ public final class TableAttributes extends PropertyDefinitions
             validBuilder.add(option.toString());
         validBuilder.add(ID);
         validKeywords = validBuilder.build();
-        obsoleteKeywords = ImmutableSet.of();
     }
+
+    private final Map<ColumnIdentifier, DroppedColumn.Raw> droppedColumnRecords = new HashMap<>();
 
     public void validate()
     {
         validate(validKeywords, obsoleteKeywords);
         build(TableParams.builder()).validate();
+    }
+
+    public void addDroppedColumnRecord(ColumnIdentifier name, CQL3Type.Raw type, boolean isStatic, long timestamp)
+    {
+        DroppedColumn.Raw newRecord = new DroppedColumn.Raw(name, type, isStatic, timestamp);
+        if (droppedColumnRecords.put(name, newRecord) != null)
+            throw new InvalidRequestException(String.format("Cannot have multiple dropped column record for column %s", name));
+    }
+
+    public Collection<DroppedColumn.Raw> droppedColumnRecords()
+    {
+        return droppedColumnRecords.values();
     }
 
     TableParams asNewTableParams()
@@ -74,7 +106,7 @@ public final class TableAttributes extends PropertyDefinitions
 
     public TableId getId() throws ConfigurationException
     {
-        String id = getString(ID);
+        String id = getSimple(ID);
         try
         {
             return id != null ? TableId.fromString(id) : null;
@@ -85,9 +117,22 @@ public final class TableAttributes extends PropertyDefinitions
         }
     }
 
-    public static Set<String> validKeywords()
+    /**
+     * Returs `true` if this attributes instance has a COMPACTION option with a recognized unsupported compaction
+     * strategy class (coming from DSE). `false` otherwise.
+     */
+    boolean hasUnsupportedDseCompaction()
     {
-        return ImmutableSet.copyOf(validKeywords);
+        if (hasOption(Option.COMPACTION))
+        {
+            Map<String, String> compactionOptions = getMap(Option.COMPACTION);
+            String strategy = compactionOptions.get(CompactionParams.Option.CLASS.toString());
+            return UNSUPPORTED_DSE_COMPACTION_STRATEGIES.contains(strategy);
+        }
+        else
+        {
+            return false;
+        }
     }
 
     public static Set<String> allKeywords()
@@ -97,71 +142,123 @@ public final class TableAttributes extends PropertyDefinitions
 
     private TableParams build(TableParams.Builder builder)
     {
-        if (hasOption(ALLOW_AUTO_SNAPSHOT))
-            builder.allowAutoSnapshot(getBoolean(ALLOW_AUTO_SNAPSHOT.toString(), true));
+        if (hasOption(Option.BLOOM_FILTER_FP_CHANCE))
+            builder.bloomFilterFpChance(getDouble(Option.BLOOM_FILTER_FP_CHANCE));
 
-        if (hasOption(BLOOM_FILTER_FP_CHANCE))
-            builder.bloomFilterFpChance(getDouble(BLOOM_FILTER_FP_CHANCE));
+        if (hasOption(Option.CACHING))
+            builder.caching(CachingParams.fromMap(getMap(Option.CACHING)));
 
-        if (hasOption(CACHING))
-            builder.caching(CachingParams.fromMap(getMap(CACHING)));
+        if (hasOption(Option.COMMENT))
+            builder.comment(getString(Option.COMMENT));
 
-        if (hasOption(COMMENT))
-            builder.comment(getString(COMMENT));
+        if (hasOption(Option.COMPACTION))
+        {
+            if (hasUnsupportedDseCompaction())
+                builder.compaction(CompactionParams.DEFAULT);
+            else
+                builder.compaction(CompactionParams.fromMap(getMap(Option.COMPACTION)));
+        }
 
-        if (hasOption(COMPACTION))
-            builder.compaction(CompactionParams.fromMap(getMap(COMPACTION)));
-
-        if (hasOption(COMPRESSION))
-            builder.compression(CompressionParams.fromMap(getMap(COMPRESSION)));
+        if (hasOption(Option.COMPRESSION))
+        {
+            //crc_check_chance was "promoted" from a compression property to a top-level-property after #9839
+            //so we temporarily accept it to be defined as a compression option, to maintain backwards compatibility
+            Map<String, String> compressionOpts = getMap(Option.COMPRESSION);
+            if (compressionOpts.containsKey(Option.CRC_CHECK_CHANCE.toString().toLowerCase()))
+            {
+                Double crcCheckChance = getDeprecatedCrcCheckChance(compressionOpts);
+                builder.crcCheckChance(crcCheckChance);
+            }
+            builder.compression(CompressionParams.fromMap(getMap(Option.COMPRESSION)));
+        }
 
         if (hasOption(Option.MEMTABLE))
-            builder.memtable(MemtableParams.getWithFallback(getString(Option.MEMTABLE)));
+            builder.memtable(MemtableParams.fromMap(getMap(Option.MEMTABLE)));
 
-        if (hasOption(DEFAULT_TIME_TO_LIVE))
-            builder.defaultTimeToLive(getInt(DEFAULT_TIME_TO_LIVE));
+        if (hasOption(Option.DEFAULT_TIME_TO_LIVE))
+            builder.defaultTimeToLive(getInt(Option.DEFAULT_TIME_TO_LIVE));
 
-        if (hasOption(GC_GRACE_SECONDS))
-            builder.gcGraceSeconds(getInt(GC_GRACE_SECONDS));
-        
-        if (hasOption(INCREMENTAL_BACKUPS))
-            builder.incrementalBackups(getBoolean(INCREMENTAL_BACKUPS.toString(), true));
+        // extensions in CQL are strings, but are stored as a frozen map<string,bytes>
+        if (hasOption(Option.EXTENSIONS))
+            builder.extensions(getMap(Option.EXTENSIONS)
+                               .entrySet()
+                               .stream()
+                               .collect(Collectors.toMap(Map.Entry::getKey, entry -> Bytes.fromHexString(entry.getValue()))));
 
-        if (hasOption(MAX_INDEX_INTERVAL))
-            builder.maxIndexInterval(getInt(MAX_INDEX_INTERVAL));
+        if (hasOption(Option.GC_GRACE_SECONDS))
+            builder.gcGraceSeconds(getInt(Option.GC_GRACE_SECONDS));
 
-        if (hasOption(MEMTABLE_FLUSH_PERIOD_IN_MS))
-            builder.memtableFlushPeriodInMs(getInt(MEMTABLE_FLUSH_PERIOD_IN_MS));
+        if (hasOption(Option.MAX_INDEX_INTERVAL))
+            builder.maxIndexInterval(getInt(Option.MAX_INDEX_INTERVAL));
 
-        if (hasOption(MIN_INDEX_INTERVAL))
-            builder.minIndexInterval(getInt(MIN_INDEX_INTERVAL));
+        if (hasOption(Option.MEMTABLE_FLUSH_PERIOD_IN_MS))
+            builder.memtableFlushPeriodInMs(getInt(Option.MEMTABLE_FLUSH_PERIOD_IN_MS));
 
-        if (hasOption(SPECULATIVE_RETRY))
-            builder.speculativeRetry(SpeculativeRetryPolicy.fromString(getString(SPECULATIVE_RETRY)));
+        if (hasOption(Option.MIN_INDEX_INTERVAL))
+            builder.minIndexInterval(getInt(Option.MIN_INDEX_INTERVAL));
 
-        if (hasOption(ADDITIONAL_WRITE_POLICY))
-            builder.additionalWritePolicy(SpeculativeRetryPolicy.fromString(getString(ADDITIONAL_WRITE_POLICY)));
+        if (hasOption(Option.SPECULATIVE_RETRY))
+            builder.speculativeRetry(SpeculativeRetryPolicy.fromString(getString(Option.SPECULATIVE_RETRY)));
 
-        if (hasOption(CRC_CHECK_CHANCE))
-            builder.crcCheckChance(getDouble(CRC_CHECK_CHANCE));
+        if (hasOption(Option.ADDITIONAL_WRITE_POLICY))
+            builder.additionalWritePolicy(SpeculativeRetryPolicy.fromString(getString(Option.ADDITIONAL_WRITE_POLICY)));
 
-        if (hasOption(CDC))
-            builder.cdc(getBoolean(CDC));
+        if (hasOption(Option.CRC_CHECK_CHANCE))
+            builder.crcCheckChance(getDouble(Option.CRC_CHECK_CHANCE));
 
-        if (hasOption(READ_REPAIR))
-            builder.readRepair(ReadRepairStrategy.fromString(getString(READ_REPAIR)));
+        if (hasOption(Option.CDC))
+            builder.cdc(getBoolean(Option.CDC.toString(), false));
+
+        if (hasOption(Option.READ_REPAIR))
+            builder.readRepair(ReadRepairStrategy.fromString(getString(Option.READ_REPAIR)));
 
         return builder.build();
     }
 
-    public boolean hasOption(Option option)
+    private Double getDeprecatedCrcCheckChance(Map<String, String> compressionOpts)
     {
-        return hasProperty(option.toString());
+        String value = compressionOpts.get(Option.CRC_CHECK_CHANCE.toString().toLowerCase());
+        try
+        {
+            return Double.valueOf(value);
+        }
+        catch (NumberFormatException e)
+        {
+            throw new SyntaxException(String.format("Invalid double value %s for crc_check_chance.'", value));
+        }
+    }
+
+    private double getDouble(Option option)
+    {
+        String value = getString(option);
+
+        try
+        {
+            return Double.parseDouble(value);
+        }
+        catch (NumberFormatException e)
+        {
+            throw new SyntaxException(format("Invalid double value %s for '%s'", value, option));
+        }
+    }
+
+    private int getInt(Option option)
+    {
+        String value = getString(option);
+
+        try
+        {
+            return Integer.parseInt(value);
+        }
+        catch (NumberFormatException e)
+        {
+            throw new SyntaxException(String.format("Invalid integer value %s for '%s'", value, option));
+        }
     }
 
     private String getString(Option option)
     {
-        String value = getString(option.toString());
+        String value = getSimple(option.toString());
         if (value == null)
             throw new IllegalStateException(format("Option '%s' is absent", option));
         return value;
@@ -175,18 +272,8 @@ public final class TableAttributes extends PropertyDefinitions
         return value;
     }
 
-    private boolean getBoolean(Option option)
+    public boolean hasOption(Option option)
     {
-        return parseBoolean(option.toString(), getString(option));
-    }
-
-    private int getInt(Option option)
-    {
-        return parseInt(option.toString(), getString(option));
-    }
-
-    private double getDouble(Option option)
-    {
-        return parseDouble(option.toString(), getString(option));
+        return hasProperty(option.toString());
     }
 }

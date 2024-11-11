@@ -57,7 +57,7 @@ public class IndexDroppingTest extends TestBaseImpl
     @BeforeClass
     public static void init() throws IOException
     {
-        CLUSTER = Cluster.build(1).withConfig(conf -> conf.with(NETWORK).set("materialized_views_enabled", "true")).start();
+        CLUSTER = Cluster.build(1).withConfig(conf -> conf.with(NETWORK).set("enable_materialized_views", "true")).start();
         CLUSTER.get(1).runOnInstance((IIsolatedExecutor.SerializableRunnable) () -> CompactionManager.instance.disableAutoCompaction());
     }
 

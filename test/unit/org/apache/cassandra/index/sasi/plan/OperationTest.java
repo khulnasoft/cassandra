@@ -25,7 +25,6 @@ import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Sets;
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.cql3.Operator;
@@ -39,12 +38,9 @@ import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.schema.KeyspaceParams;
-import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
 import org.junit.*;
-
-import static org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_CONFIG;
 
 public class OperationTest extends SchemaLoader
 {
@@ -60,8 +56,8 @@ public class OperationTest extends SchemaLoader
     @BeforeClass
     public static void loadSchema() throws ConfigurationException
     {
-        CASSANDRA_CONFIG.setString("cassandra-murmur.yaml");
-        ServerTestUtils.prepareServer();
+        System.setProperty("cassandra.config", "cassandra-murmur.yaml");
+        SchemaLoader.loadSchema();
         SchemaLoader.createKeyspace(KS_NAME,
                                     KeyspaceParams.simpleTransient(1),
                                     SchemaLoader.sasiCFMD(KS_NAME, CF_NAME),
@@ -408,7 +404,7 @@ public class OperationTest extends SchemaLoader
         long now = System.currentTimeMillis();
 
         row = OperationTest.buildRow(
-                Row.Deletion.regular(DeletionTime.build(now - 10, (int) (now / 1000))),
+                Row.Deletion.regular(new DeletionTime(now - 10, (int) (now / 1000))),
                           buildCell(age, Int32Type.instance.decompose(6), System.currentTimeMillis()));
 
         Assert.assertFalse(op.satisfiedBy(row, staticRow, false));
@@ -655,15 +651,6 @@ public class OperationTest extends SchemaLoader
         {
             throw new UnsupportedOperationException();
         }
-
-        @Override
-        protected String toString(boolean cql)
-        {
-            return String.format("%s %s %s",
-                                 cql ? column.name.toCQLString() : column.name.toString(),
-                                 operator,
-                                 ByteBufferUtil.bytesToHex(value));
-        }
     }
 
     private static Unfiltered buildRow(Cell<?>... cells)
@@ -699,7 +686,7 @@ public class OperationTest extends SchemaLoader
         return BufferCell.live(column, timestamp, value);
     }
 
-    private static Cell<?> deletedCell(ColumnMetadata column, long timestamp, long nowInSeconds)
+    private static Cell<?> deletedCell(ColumnMetadata column, long timestamp, int nowInSeconds)
     {
         return BufferCell.tombstone(column, timestamp, nowInSeconds);
     }

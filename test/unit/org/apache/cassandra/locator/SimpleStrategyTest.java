@@ -23,38 +23,41 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutionException;
+import java.util.UUID;
 
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Multimap;
-import org.junit.*;
+import com.google.common.collect.Sets;
+import org.junit.Before;
+import org.junit.BeforeClass;
+import org.junit.Rule;
+import org.junit.Test;
 import org.junit.rules.ExpectedException;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.dht.*;
+import org.apache.cassandra.dht.IPartitioner;
+import org.apache.cassandra.dht.Murmur3Partitioner;
+import org.apache.cassandra.dht.OrderPreservingPartitioner;
 import org.apache.cassandra.dht.OrderPreservingPartitioner.StringToken;
 import org.apache.cassandra.dht.RandomPartitioner.BigIntegerToken;
-import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.schema.ReplicationParams;
-import org.apache.cassandra.schema.SchemaConstants;
-import org.apache.cassandra.tcm.transformations.Register;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.KeyspaceParams;
+import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.service.ClientWarn;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.tcm.membership.Location;
-import org.apache.cassandra.tcm.membership.NodeVersion;
+import org.apache.cassandra.service.PendingRangeCalculatorService;
+import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.service.StorageServiceAccessor;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.ORG_APACHE_CASSANDRA_DISABLE_MBEAN_REGISTRATION;
-import static org.apache.cassandra.ServerTestUtils.recreateCMS;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -64,22 +67,10 @@ public class SimpleStrategyTest
     public static final String KEYSPACE1 = "SimpleStrategyTest";
     public static final String MULTIDC = "MultiDCSimpleStrategyTest";
 
-    static
-    {
-        ORG_APACHE_CASSANDRA_DISABLE_MBEAN_REGISTRATION.setBoolean(true);
-    }
-
     @BeforeClass
     public static void defineSchema()
     {
-        DatabaseDescriptor.daemonInitialization();
-    }
-
-    public static void withPartitioner(IPartitioner partitioner)
-    {
-        DatabaseDescriptor.setPartitionerUnsafe(partitioner);
-        ServerTestUtils.prepareServerNoRegister();
-        recreateCMS();
+        SchemaLoader.prepareServer();
         SchemaLoader.createKeyspace(KEYSPACE1, KeyspaceParams.simple(1));
         SchemaLoader.createKeyspace(MULTIDC, KeyspaceParams.simple(3));
         DatabaseDescriptor.setTransientReplicationEnabledUnsafe(true);
@@ -100,9 +91,8 @@ public class SimpleStrategyTest
     @Test
     public void testBigIntegerEndpoints() throws UnknownHostException
     {
-        withPartitioner(RandomPartitioner.instance);
-        List<Token> endpointTokens = new ArrayList<>();
-        List<Token> keyTokens = new ArrayList<>();
+        List<Token> endpointTokens = new ArrayList<Token>();
+        List<Token> keyTokens = new ArrayList<Token>();
         for (int i = 0; i < 5; i++) {
             endpointTokens.add(new BigIntegerToken(String.valueOf(10 * i)));
             keyTokens.add(new BigIntegerToken(String.valueOf(10 * i + 5)));
@@ -114,7 +104,7 @@ public class SimpleStrategyTest
     public void testStringEndpoints() throws UnknownHostException
     {
         IPartitioner partitioner = OrderPreservingPartitioner.instance;
-        withPartitioner(partitioner);
+
         List<Token> endpointTokens = new ArrayList<Token>();
         List<Token> keyTokens = new ArrayList<Token>();
         for (int i = 0; i < 5; i++) {
@@ -127,9 +117,12 @@ public class SimpleStrategyTest
     @Test
     public void testMultiDCSimpleStrategyEndpoints() throws UnknownHostException
     {
-        withPartitioner(Murmur3Partitioner.instance);
         IEndpointSnitch snitch = new PropertyFileSnitch();
         DatabaseDescriptor.setEndpointSnitch(snitch);
+
+        TokenMetadata metadata = new TokenMetadata();
+
+        AbstractReplicationStrategy strategy = getStrategy(MULTIDC, metadata, snitch);
 
         // Topology taken directly from the topology_test.test_size_estimates_multidc dtest that regressed
         Multimap<InetAddressAndPort, Token> dc1 = HashMultimap.create();
@@ -137,19 +130,18 @@ public class SimpleStrategyTest
         dc1.put(InetAddressAndPort.getByName("127.0.0.1"), new Murmur3Partitioner.LongToken(-2688160409776496397L));
         dc1.put(InetAddressAndPort.getByName("127.0.0.2"), new Murmur3Partitioner.LongToken(-2506475074448728501L));
         dc1.put(InetAddressAndPort.getByName("127.0.0.2"), new Murmur3Partitioner.LongToken(8473270337963525440L));
-        dc1.asMap().forEach((e, t) -> ClusterMetadataTestHelper.addEndpoint(e, t, "dc1", "rack1"));
+        metadata.updateNormalTokens(dc1);
 
         Multimap<InetAddressAndPort, Token> dc2 = HashMultimap.create();
         dc2.put(InetAddressAndPort.getByName("127.0.0.4"), new Murmur3Partitioner.LongToken(-3736333188524231709L));
         dc2.put(InetAddressAndPort.getByName("127.0.0.4"), new Murmur3Partitioner.LongToken(8673615181726552074L));
-        dc2.asMap().forEach((e, t) -> ClusterMetadataTestHelper.addEndpoint(e, t, "dc2", "rack1"));
+        metadata.updateNormalTokens(dc2);
 
         Map<InetAddressAndPort, Integer> primaryCount = new HashMap<>();
         Map<InetAddressAndPort, Integer> replicaCount = new HashMap<>();
-        ClusterMetadata metadata = ClusterMetadata.current();
-        for (Token t : metadata.tokenMap.tokens())
+        for (Token t : metadata.sortedTokens())
         {
-            EndpointsForToken replicas = ClusterMetadataTestHelper.getNaturalReplicasForToken(MULTIDC, t).get();
+            EndpointsForToken replicas = strategy.getNaturalReplicasForToken(t);
             primaryCount.compute(replicas.get(0).endpoint(), (k, v) -> (v == null) ? 1 : v + 1);
             for (Replica replica : replicas)
                 replicaCount.compute(replica.endpoint(), (k, v) -> (v == null) ? 1 : v + 1);
@@ -167,23 +159,23 @@ public class SimpleStrategyTest
     // make sure that the Strategy picks the right endpoints for the keys.
     private void verifyGetNaturalEndpoints(Token[] endpointTokens, Token[] keyTokens) throws UnknownHostException
     {
-        List<InetAddressAndPort> hosts = new ArrayList<>();
-        for (int i = 0; i < endpointTokens.length; i++)
-        {
-            InetAddressAndPort ep = InetAddressAndPort.getByName("127.0.0." + (i + 1));
-            ClusterMetadataTestHelper.addEndpoint(ep, endpointTokens[i]);
-            hosts.add(ep);
-        }
-
+        TokenMetadata tmd;
         AbstractReplicationStrategy strategy;
-        for (String keyspaceName : Schema.instance.getNonLocalStrategyKeyspaces()
-                                                  .without(SchemaConstants.METADATA_KEYSPACE_NAME)
-                                                  .names())
+        for (String keyspaceName : Schema.instance.getNonLocalStrategyKeyspaces().names())
         {
-            strategy = getStrategy(keyspaceName);
+            tmd = new TokenMetadata();
+            strategy = getStrategy(keyspaceName, tmd, new SimpleSnitch());
+            List<InetAddressAndPort> hosts = new ArrayList<>();
+            for (int i = 0; i < endpointTokens.length; i++)
+            {
+                InetAddressAndPort ep = InetAddressAndPort.getByName("127.0.0." + String.valueOf(i + 1));
+                tmd.updateNormalToken(endpointTokens[i], ep);
+                hosts.add(ep);
+            }
+
             for (int i = 0; i < keyTokens.length; i++)
             {
-                EndpointsForToken replicas = ClusterMetadataTestHelper.getNaturalReplicasForToken(keyspaceName, keyTokens[i]).get();
+                EndpointsForToken replicas = strategy.getNaturalReplicasForToken(keyTokens[i]);
                 assertEquals(strategy.getReplicationFactor().allReplicas, replicas.size());
                 List<InetAddressAndPort> correctEndpoints = new ArrayList<>();
                 for (int j = 0; j < replicas.size(); j++)
@@ -194,11 +186,21 @@ public class SimpleStrategyTest
     }
 
     @Test
-    public void testGetEndpointsDuringBootstrap() throws UnknownHostException, ExecutionException, InterruptedException
+    public void testSimpleStrategyKeyspacesArePartitioned()
     {
-        withPartitioner(RandomPartitioner.instance);
+        //local strategy keyspaces should not be returned here since they are not partitioned
+        Keyspaces partitionedKeyspaces = Schema.instance.getPartitionedKeyspaces();
+        assertEquals(2, partitionedKeyspaces.size());
+        assertEquals(Sets.newHashSet(KEYSPACE1, MULTIDC), Sets.newHashSet(partitionedKeyspaces.names()));
+    }
+
+    @Test
+    public void testGetEndpointsDuringBootstrap() throws UnknownHostException
+    {
         // the token difference will be RING_SIZE * 2.
         final int RING_SIZE = 10;
+        TokenMetadata tmd = new TokenMetadata();
+        TokenMetadata oldTmd = StorageServiceAccessor.setTokenMetadata(tmd);
 
         Token[] endpointTokens = new Token[RING_SIZE];
         Token[] keyTokens = new Token[RING_SIZE];
@@ -213,43 +215,33 @@ public class SimpleStrategyTest
         for (int i = 0; i < endpointTokens.length; i++)
         {
             InetAddressAndPort ep = InetAddressAndPort.getByName("127.0.0." + String.valueOf(i + 1));
-            ClusterMetadataTestHelper.addEndpoint(ep, endpointTokens[i]);
+            tmd.updateNormalToken(endpointTokens[i], ep);
             hosts.add(ep);
         }
 
         // bootstrap at the end of the ring
         Token bsToken = new BigIntegerToken(String.valueOf(210));
         InetAddressAndPort bootstrapEndpoint = InetAddressAndPort.getByName("127.0.0.11");
-        Location l = new Location("dc1", "rack1");
-        ClusterMetadataTestHelper.commit(new Register(ClusterMetadataTestHelper.addr(bootstrapEndpoint), l, NodeVersion.CURRENT));
-        ClusterMetadataTestHelper.lazyJoin(bootstrapEndpoint, bsToken)
-                                 .prepareJoin()
-                                 .startJoin();
+        tmd.addBootstrapToken(bsToken, bootstrapEndpoint);
 
         AbstractReplicationStrategy strategy = null;
-        ClusterMetadata metadata = ClusterMetadata.current();
         for (String keyspaceName : Schema.instance.getNonLocalStrategyKeyspaces().names())
         {
-            ReplicationParams replication = Schema.instance.getKeyspaceMetadata(keyspaceName).params.replication;
-            if (replication.isMeta())
-                continue;
+            strategy = getStrategy(keyspaceName, tmd, new SimpleSnitch());
 
-            strategy = getStrategy(keyspaceName);
+            PendingRangeCalculatorService.instance.calculatePendingRanges(strategy, keyspaceName);
 
             int replicationFactor = strategy.getReplicationFactor().allReplicas;
 
             for (int i = 0; i < keyTokens.length; i++)
             {
-                EndpointsForToken replicas = getWriteEndpoints(metadata, replication, keyTokens[i]);
+                EndpointsForToken replicas = tmd.getWriteEndpoints(keyTokens[i], keyspaceName, strategy.getNaturalReplicasForToken(keyTokens[i]));
                 assertTrue(replicas.size() >= replicationFactor);
 
                 for (int j = 0; j < replicationFactor; j++)
                 {
-                    InetAddressAndPort host = hosts.get((i + j + 1) % hosts.size());
                     //Check that the old nodes are definitely included
-                    assertTrue(String.format("%s should contain %s but it did not. RF=%d \n%s",
-                                             replicas, host, replicationFactor, metadata),
-                               replicas.endpoints().contains(host));
+                   assertTrue(replicas.endpoints().contains(hosts.get((i + j + 1) % hosts.size())));
                 }
 
                 // bootstrapEndpoint should be in the endpoints for i in MAX-RF to MAX, but not in any earlier ep.
@@ -259,6 +251,8 @@ public class SimpleStrategyTest
                     assertTrue(replicas.endpoints().contains(bootstrapEndpoint));
             }
         }
+
+        StorageServiceAccessor.setTokenMetadata(oldTmd);
     }
 
     private static Token tk(long t)
@@ -274,7 +268,6 @@ public class SimpleStrategyTest
     @Test
     public void transientReplica() throws Exception
     {
-        withPartitioner(Murmur3Partitioner.instance);
         IEndpointSnitch snitch = new SimpleSnitch();
         DatabaseDescriptor.setEndpointSnitch(snitch);
 
@@ -288,19 +281,20 @@ public class SimpleStrategyTest
         tokens.put(endpoints.get(1), tk(200));
         tokens.put(endpoints.get(2), tk(300));
         tokens.put(endpoints.get(3), tk(400));
-        tokens.forEach(ClusterMetadataTestHelper::addEndpoint);
+        TokenMetadata metadata = new TokenMetadata();
+        metadata.updateNormalTokens(tokens);
 
         Map<String, String> configOptions = new HashMap<String, String>();
-        configOptions.put(ReplicationParams.CLASS, SimpleStrategy.class.getName());
         configOptions.put("replication_factor", "3/1");
-        SchemaLoader.createKeyspace("ks", KeyspaceParams.create(false, configOptions));
-        Range<Token> range1 = range(Murmur3Partitioner.MINIMUM.token, 100);
 
+        SimpleStrategy strategy = new SimpleStrategy("ks", metadata, snitch, configOptions);
+
+        Range<Token> range1 = range(400, 100);
         Util.assertRCEquals(EndpointsForToken.of(range1.right,
                                                  Replica.fullReplica(endpoints.get(0), range1),
                                                  Replica.fullReplica(endpoints.get(1), range1),
                                                  Replica.transientReplica(endpoints.get(2), range1)),
-                            ClusterMetadataTestHelper.getNaturalReplicasForToken("ks", tk(99)).get());
+                            strategy.getNaturalReplicasForToken(tk(99)));
 
 
         Range<Token> range2 = range(100, 200);
@@ -308,7 +302,7 @@ public class SimpleStrategyTest
                                                  Replica.fullReplica(endpoints.get(1), range2),
                                                  Replica.fullReplica(endpoints.get(2), range2),
                                                  Replica.transientReplica(endpoints.get(3), range2)),
-                            ClusterMetadataTestHelper.getNaturalReplicasForToken("ks", tk(101)).get());
+                            strategy.getNaturalReplicasForToken(tk(101)));
     }
 
     @Rule
@@ -317,7 +311,6 @@ public class SimpleStrategyTest
     @Test
     public void testSimpleStrategyThrowsConfigurationException() throws ConfigurationException, UnknownHostException
     {
-        withPartitioner(Murmur3Partitioner.instance);
         expectedEx.expect(ConfigurationException.class);
         expectedEx.expectMessage("SimpleStrategy requires a replication_factor strategy option.");
 
@@ -333,52 +326,51 @@ public class SimpleStrategyTest
         tokens.put(endpoints.get(1), tk(200));
         tokens.put(endpoints.get(2), tk(300));
 
+        TokenMetadata metadata = new TokenMetadata();
+        metadata.updateNormalTokens(tokens);
+
         Map<String, String> configOptions = new HashMap<>();
 
         @SuppressWarnings("unused")
-        SimpleStrategy strategy = new SimpleStrategy("ks", configOptions);
+        SimpleStrategy strategy = new SimpleStrategy("ks", metadata, snitch, configOptions);
     }
     
     @Test
     public void shouldReturnNoEndpointsForEmptyRing()
     {
-        withPartitioner(Murmur3Partitioner.instance);
-
+        TokenMetadata metadata = new TokenMetadata();
+        
         HashMap<String, String> configOptions = new HashMap<>();
         configOptions.put("replication_factor", "1");
         
-        SimpleStrategy strategy = new SimpleStrategy("ks", configOptions);
+        SimpleStrategy strategy = new SimpleStrategy("ks", metadata, new SimpleSnitch(), configOptions);
 
-        EndpointsForRange replicas = strategy.calculateNaturalReplicas(null, new ClusterMetadata(Murmur3Partitioner.instance));
+        EndpointsForRange replicas = strategy.calculateNaturalReplicas(null, metadata);
         assertTrue(replicas.endpoints().isEmpty());
     }
 
     @Test
     public void shouldWarnOnHigherReplicationFactorThanNodes()
     {
-        withPartitioner(Murmur3Partitioner.instance);
         HashMap<String, String> configOptions = new HashMap<>();
         configOptions.put("replication_factor", "2");
 
-        SimpleStrategy strategy = new SimpleStrategy("ks", configOptions);
-        ClusterMetadataTestHelper.addEndpoint(1);
+        SimpleStrategy strategy = new SimpleStrategy("ks", new TokenMetadata(), new SimpleSnitch(), configOptions);
+        StorageService.instance.getTokenMetadata().updateHostId(UUID.randomUUID(), FBUtilities.getBroadcastAddressAndPort());
+        
         ClientWarn.instance.captureWarnings();
-        strategy.maybeWarnOnOptions(null);
+        strategy.maybeWarnOnOptions();
         assertTrue(ClientWarn.instance.getWarnings().stream().anyMatch(s -> s.contains("Your replication factor")));
     }
 
-    private AbstractReplicationStrategy getStrategy(String keyspaceName)
+    private AbstractReplicationStrategy getStrategy(String keyspaceName, TokenMetadata tmd, IEndpointSnitch snitch)
     {
         KeyspaceMetadata ksmd = Schema.instance.getKeyspaceMetadata(keyspaceName);
-        return AbstractReplicationStrategy.createReplicationStrategy(keyspaceName,
-                                                                     ksmd.params.replication.klass,
-                                                                     ksmd.params.replication.options);
-    }
-
-    public static EndpointsForToken getWriteEndpoints(ClusterMetadata metadata,
-                                                      ReplicationParams replicationParams,
-                                                      Token token)
-    {
-        return metadata.placements.get(replicationParams).writes.forToken(token).get();
+        return AbstractReplicationStrategy.createReplicationStrategy(
+                                                                    keyspaceName,
+                                                                    ksmd.params.replication.klass,
+                                                                    tmd,
+                                                                    snitch,
+                                                                    ksmd.params.replication.options);
     }
 }

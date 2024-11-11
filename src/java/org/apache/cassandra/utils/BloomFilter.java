@@ -17,22 +17,59 @@
  */
 package org.apache.cassandra.utils;
 
-import java.io.IOException;
-
 import com.google.common.annotations.VisibleForTesting;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import io.netty.util.concurrent.FastThreadLocal;
 import net.nicoulaj.compilecommand.annotations.Inline;
-import org.apache.cassandra.io.util.DataOutputStreamPlus;
+import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.utils.concurrent.Ref;
 import org.apache.cassandra.utils.concurrent.WrappedSharedCloseable;
 import org.apache.cassandra.utils.obs.IBitSet;
+import org.apache.cassandra.utils.obs.MemoryLimiter;
+
+import static org.apache.cassandra.metrics.RestorableMeter.AVAILABLE_WINDOWS;
 
 public class BloomFilter extends WrappedSharedCloseable implements IFilter
 {
+    private final static Logger logger = LoggerFactory.getLogger(BloomFilter.class);
+
+    /**
+     * The maximum memory to be used by all loaded bloom filters. If the limit is exceeded, pass-through filter will be
+     * used until some filters get unloaded.
+     */
+    public final static String MAX_MEMORY_MB_PROP = Config.PROPERTY_PREFIX + "bf.max_memory_mb";
+
+    /**
+     * A minimal relative change of the fase-positive chance so that it is considered as a reason to recreate the bloom
+     * filter. If the change is smaller than this, it will be ignored.
+     */
+    public final static String FP_CHANCE_TOLERANCE_PROP = Config.PROPERTY_PREFIX + "bf.fp_chance_tolerance";
+
+    /**
+     * If the false-positive chance has changed since the last compaction (for example by alter table statement), and
+     * the node is restarted - the bloom filter can get rebuilt if this property jest set to true.
+     */
+    public final static String RECREATE_ON_FP_CHANCE_CHANGE = Config.PROPERTY_PREFIX + "bf.recreate_on_fp_chance_change";
+
+    private static final long maxMemory = Long.getLong(MAX_MEMORY_MB_PROP, 0) << 20;
+
+    @VisibleForTesting
+    public static double fpChanceTolerance = Double.parseDouble(System.getProperty(FP_CHANCE_TOLERANCE_PROP, "0.000001"));
+
+    @VisibleForTesting
+    public static boolean recreateOnFPChanceChange = Boolean.getBoolean(RECREATE_ON_FP_CHANCE_CHANGE);
+
+    public static final MemoryLimiter memoryLimiter = new MemoryLimiter(maxMemory != 0 ? maxMemory : Long.MAX_VALUE,
+                                                                        "Allocating %s for Bloom filter would reach max of %s (current %s)");
+
+    public final static BloomFilterSerializer serializer = new BloomFilterSerializer(memoryLimiter);
+
     private final static FastThreadLocal<long[]> reusableIndexes = new FastThreadLocal<long[]>()
     {
-        @Override
         protected long[] initialValue()
         {
             return new long[21];
@@ -56,15 +93,44 @@ public class BloomFilter extends WrappedSharedCloseable implements IFilter
         this.bitset = copy.bitset;
     }
 
-    public long serializedSize(boolean old)
+    /**
+     * @return true if sstable's bloom filter should be deserialized on read instead of when opening sstable. This
+     *         doesn't affect flushed sstable because there is bloom filter deserialization
+     */
+    public static boolean lazyLoading()
     {
-        return BloomFilterSerializer.forVersion(old).serializedSize(this);
+        return CassandraRelevantProperties.BLOOM_FILTER_LAZY_LOADING.getBoolean();
     }
 
-    @Override
-    public void serialize(DataOutputStreamPlus out, boolean old) throws IOException
+    /**
+     * @return sstable hits per second to determine if a sstable is hot. 0 means BF should be loaded immediately on read.
+     *
+     * Note that when WINDOW <= 0, this is used as absolute primary index access count.
+     */
+    public static long lazyLoadingThreshold()
     {
-        BloomFilterSerializer.forVersion(old).serialize(this, out);
+        return CassandraRelevantProperties.BLOOM_FILTER_LAZY_LOADING_THRESHOLD.getInt();
+    }
+
+    /**
+     * @return Window of time by minute, available: 1 (default), 5, 15, 120.
+     *
+     * Note that if <= 0 then we use threshold as the absolute count
+     */
+    public static int lazyLoadingWindow()
+    {
+        int window = CassandraRelevantProperties.BLOOM_FILTER_LAZY_LOADING_WINDOW.getInt();
+        if (window >= 1 && !AVAILABLE_WINDOWS.contains(window))
+            throw new IllegalArgumentException(String.format("Found invalid %s=%s, available windows: %s",
+                                                             CassandraRelevantProperties.BLOOM_FILTER_LAZY_LOADING_WINDOW.getKey(),
+                                                             window,
+                                                             AVAILABLE_WINDOWS));
+        return window;
+    }
+
+    public long serializedSize()
+    {
+        return serializer.serializedSize(this);
     }
 
     // Murmur is faster than an SHA-based approach and provides as-good collision
@@ -111,7 +177,6 @@ public class BloomFilter extends WrappedSharedCloseable implements IFilter
         }
     }
 
-    @Override
     public void add(FilterKey key)
     {
         long[] indexes = indexes(key);
@@ -121,7 +186,6 @@ public class BloomFilter extends WrappedSharedCloseable implements IFilter
         }
     }
 
-    @Override
     public final boolean isPresent(FilterKey key)
     {
         long[] indexes = indexes(key);
@@ -135,14 +199,12 @@ public class BloomFilter extends WrappedSharedCloseable implements IFilter
         return true;
     }
 
-    @Override
     public void clear()
     {
         bitset.clear();
     }
 
-    @Override
-    public BloomFilter sharedCopy()
+    public IFilter sharedCopy()
     {
         return new BloomFilter(this);
     }
@@ -153,22 +215,31 @@ public class BloomFilter extends WrappedSharedCloseable implements IFilter
         return bitset.offHeapSize();
     }
 
-    @Override
-    public boolean isInformative()
-    {
-        return bitset.offHeapSize() > 0;
-    }
-
-    @Override
     public String toString()
     {
         return "BloomFilter[hashCount=" + hashCount + ";capacity=" + bitset.capacity() + ']';
     }
 
-    @Override
     public void addTo(Ref.IdentityCollection identities)
     {
         super.addTo(identities);
         bitset.addTo(identities);
     }
+
+    public static boolean shouldUseBloomFilter(double fpChance)
+    {
+        if (Math.abs(1 - fpChance) <= BloomFilter.fpChanceTolerance) {
+            if (logger.isTraceEnabled())
+                logger.trace("Returning pass-through bloom filter, FP chance is equal to 1: {}", fpChance);
+            return false;
+        }
+
+        return true;
+    }
+
+    public static boolean isFPChanceDiffNeglectable(double fpChance1, double fpChance2)
+    {
+        return Math.abs(fpChance1 - fpChance2) <= fpChanceTolerance;
+    }
+
 }

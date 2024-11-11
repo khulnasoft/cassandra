@@ -20,6 +20,7 @@ package org.apache.cassandra.cql3.statements.schema;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Set;
+import java.util.function.UnaryOperator;
 
 import com.google.common.base.Objects;
 import com.google.common.collect.ImmutableSet;
@@ -35,9 +36,9 @@ import org.apache.cassandra.cql3.functions.FunctionName;
 import org.apache.cassandra.cql3.functions.ScalarFunction;
 import org.apache.cassandra.cql3.functions.UDAggregate;
 import org.apache.cassandra.cql3.functions.UDFunction;
+import org.apache.cassandra.cql3.functions.UDHelper;
 import org.apache.cassandra.cql3.functions.UserFunction;
-import org.apache.cassandra.cql3.terms.Constants;
-import org.apache.cassandra.cql3.terms.Term;
+import org.apache.cassandra.cql3.statements.RawKeyspaceAwareStatement;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.schema.UserFunctions.FunctionsDiff;
 import org.apache.cassandra.schema.KeyspaceMetadata;
@@ -46,10 +47,10 @@ import org.apache.cassandra.schema.Keyspaces.KeyspacesDiff;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.transport.Event.SchemaChange;
 import org.apache.cassandra.transport.Event.SchemaChange.Change;
 import org.apache.cassandra.transport.Event.SchemaChange.Target;
+import org.apache.cassandra.transport.ProtocolVersion;
 
 import static java.lang.String.format;
 import static java.lang.String.join;
@@ -71,7 +72,8 @@ public final class CreateAggregateStatement extends AlterSchemaStatement
     private final boolean orReplace;
     private final boolean ifNotExists;
 
-    public CreateAggregateStatement(String keyspaceName,
+    public CreateAggregateStatement(String queryString,
+                                    String keyspaceName,
                                     String aggregateName,
                                     List<CQL3Type.Raw> rawArgumentTypes,
                                     CQL3Type.Raw rawStateType,
@@ -81,7 +83,7 @@ public final class CreateAggregateStatement extends AlterSchemaStatement
                                     boolean orReplace,
                                     boolean ifNotExists)
     {
-        super(keyspaceName);
+        super(queryString, keyspaceName);
         this.aggregateName = aggregateName;
         this.rawArgumentTypes = rawArgumentTypes;
         this.rawStateType = rawStateType;
@@ -92,8 +94,7 @@ public final class CreateAggregateStatement extends AlterSchemaStatement
         this.ifNotExists = ifNotExists;
     }
 
-    @Override
-    public Keyspaces apply(ClusterMetadata metadata)
+    public Keyspaces apply(Keyspaces schema)
     {
         if (ifNotExists && orReplace)
             throw ire("Cannot use both 'OR REPLACE' and 'IF NOT EXISTS' directives");
@@ -109,7 +110,6 @@ public final class CreateAggregateStatement extends AlterSchemaStatement
         if (!rawStateType.isImplicitlyFrozen() && rawStateType.isFrozen())
             throw ire("State type '%s' cannot be frozen; remove frozen<> modifier from '%s'", rawStateType, rawStateType);
 
-        Keyspaces schema = metadata.schema.getKeyspaces();
         KeyspaceMetadata keyspace = schema.getNullable(keyspaceName);
         if (null == keyspace)
             throw ire("Keyspace '%s' doesn't exist", keyspaceName);
@@ -120,9 +120,9 @@ public final class CreateAggregateStatement extends AlterSchemaStatement
 
         List<AbstractType<?>> argumentTypes =
             rawArgumentTypes.stream()
-                            .map(t -> t.prepare(keyspaceName, keyspace.types).getType().udfType())
+                            .map(t -> t.prepare(keyspaceName, keyspace.types).getType())
                             .collect(toList());
-        AbstractType<?> stateType = rawStateType.prepare(keyspaceName, keyspace.types).getType().udfType();
+        AbstractType<?> stateType = rawStateType.prepare(keyspaceName, keyspace.types).getType();
         List<AbstractType<?>> stateFunctionArguments = Lists.newArrayList(concat(singleton(stateType), argumentTypes));
 
         UserFunction stateFunction =
@@ -166,8 +166,7 @@ public final class CreateAggregateStatement extends AlterSchemaStatement
         ByteBuffer initialValue = null;
         if (null != rawInitialValue)
         {
-            String term = rawInitialValue.toString();
-            initialValue = Term.asBytes(keyspaceName, term, stateType);
+            initialValue = Terms.asBytes(keyspaceName, rawInitialValue.toString(), stateType);
 
             if (null != initialValue)
             {
@@ -182,11 +181,11 @@ public final class CreateAggregateStatement extends AlterSchemaStatement
             }
 
             // Converts initcond to a CQL literal and parse it back to avoid another CASSANDRA-11064
-            String initialValueString = stateType.asCQL3Type().toCQLLiteral(initialValue);
-            if (!Objects.equal(initialValue, stateType.asCQL3Type().fromCQLLiteral(initialValueString)))
+            String initialValueString = stateType.asCQL3Type().toCQLLiteral(initialValue, ProtocolVersion.CURRENT);
+            if (!Objects.equal(initialValue, stateType.asCQL3Type().fromCQLLiteral(keyspaceName, initialValueString)))
                 throw new AssertionError(String.format("CQL literal '%s' (from type %s) parsed with a different value", initialValueString, stateType.asCQL3Type()));
 
-            if (Constants.NULL_LITERAL != rawInitialValue && isNullOrEmpty(stateType, initialValue))
+            if (Constants.NULL_LITERAL != rawInitialValue && UDHelper.isNullOrEmpty(stateType, initialValue))
                 throw ire("INITCOND must not be empty for all types except TEXT, ASCII, BLOB");
         }
 
@@ -231,12 +230,6 @@ public final class CreateAggregateStatement extends AlterSchemaStatement
         }
 
         return schema.withAddedOrUpdated(keyspace.withSwapped(keyspace.userFunctions.withAddedOrUpdated(aggregate)));
-    }
-
-    private static boolean isNullOrEmpty(AbstractType<?> type, ByteBuffer bb)
-    {
-        return bb == null ||
-               (bb.remaining() == 0 && type.isEmptyValueMeaningless());
     }
 
     SchemaChange schemaChangeEvent(KeyspacesDiff diff)
@@ -305,7 +298,7 @@ public final class CreateAggregateStatement extends AlterSchemaStatement
         return format("%s(%s)", finalFunctionName, rawStateType);
     }
 
-    public static final class Raw extends CQLStatement.Raw
+    public static final class Raw extends RawKeyspaceAwareStatement<CreateAggregateStatement>
     {
         private final FunctionName aggregateName;
         private final List<CQL3Type.Raw> rawArgumentTypes;
@@ -335,11 +328,18 @@ public final class CreateAggregateStatement extends AlterSchemaStatement
             this.ifNotExists = ifNotExists;
         }
 
-        public CreateAggregateStatement prepare(ClientState state)
+        @Override
+        public CreateAggregateStatement prepare(ClientState state, UnaryOperator<String> keyspaceMapper)
         {
-            String keyspaceName = aggregateName.hasKeyspace() ? aggregateName.keyspace : state.getKeyspace();
+            String keyspaceName = keyspaceMapper.apply(aggregateName.hasKeyspace() ? aggregateName.keyspace : state.getKeyspace());
+            if (keyspaceMapper != Constants.IDENTITY_STRING_MAPPER)
+            {
+                rawArgumentTypes.forEach(t -> t.forEachUserType(name -> name.updateKeyspaceIfDefined(keyspaceMapper)));
+                rawStateType.forEachUserType(name -> name.updateKeyspaceIfDefined(keyspaceMapper));
+            }
 
-            return new CreateAggregateStatement(keyspaceName,
+            return new CreateAggregateStatement(rawCQLStatement,
+                                                keyspaceName,
                                                 aggregateName.name,
                                                 rawArgumentTypes,
                                                 rawStateType,

@@ -26,14 +26,13 @@ import org.junit.Test;
 
 import com.google.common.base.Joiner;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.BTREE_BRANCH_SHIFT;
-
 public class RowsMergingTest extends CQLTester
 {
     @BeforeClass
-    public static void setSystemProps()
+    public static void setUpClass()
     {
-        BTREE_BRANCH_SHIFT.setInt(2);
+        System.setProperty("cassandra.btree.branchshift", "2");
+        CQLTester.setUpClass();
     }
 
     @Test
@@ -215,8 +214,8 @@ public class RowsMergingTest extends CQLTester
                 catch (Throwable e)
                 {
                     throw new AssertionError("Executing the following queries did not lead to the expected result: \n"
-                                + Joiner.on("; \n").join(queries)
-                                + "\n when executing: \n" + query, e);
+                                + Joiner.on("; \n").join(queries) 
+                                + "\n when executing: \n" + query, e); 
                 }
             }
 
@@ -225,7 +224,7 @@ public class RowsMergingTest extends CQLTester
                 if (expectedRow != null)
                 {
                     expectedRow[0] = pk;
-                    assertRows(execute("SELECT * FROM %s WHERE pk = ?" , pk),
+                    assertRows(execute("SELECT * FROM %s WHERE pk = ?" , pk), 
                                expectedRow);
                 }
                 else
@@ -235,7 +234,7 @@ public class RowsMergingTest extends CQLTester
             }
             catch (Throwable e)
             {
-                throw new AssertionError("Executing the following queries did not lead to the expected result: \n" + Joiner.on("; \n").join(queries), e);
+                throw new AssertionError("Executing the following queries did not lead to the expected result: \n" + Joiner.on("; \n").join(queries), e); 
             }
             pk++;
         }

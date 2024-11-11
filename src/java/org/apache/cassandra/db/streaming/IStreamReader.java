@@ -18,6 +18,8 @@
 
 package org.apache.cassandra.db.streaming;
 
+import java.io.IOException;
+
 import org.apache.cassandra.io.sstable.SSTableMultiWriter;
 import org.apache.cassandra.io.util.DataInputPlus;
 
@@ -26,5 +28,5 @@ import org.apache.cassandra.io.util.DataInputPlus;
  */
 public interface IStreamReader
 {
-    SSTableMultiWriter read(DataInputPlus inputPlus) throws Throwable;
+    public SSTableMultiWriter read(DataInputPlus inputPlus) throws IOException;
 }

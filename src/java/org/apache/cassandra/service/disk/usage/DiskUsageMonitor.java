@@ -15,36 +15,30 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.service.disk.usage;
 
-import java.io.IOException;
+
 import java.math.BigDecimal;
-import java.math.BigInteger;
-import java.math.RoundingMode;
-import java.nio.file.FileStore;
-import java.nio.file.Files;
-import java.util.Collection;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.HashMultimap;
-import com.google.common.collect.Multimap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.ScheduledExecutors;
-import org.apache.cassandra.config.CassandraRelevantProperties;
-import org.apache.cassandra.config.DataStorageSpec;
+import org.apache.cassandra.config.Config;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
-import org.apache.cassandra.db.guardrails.Guardrails;
-import org.apache.cassandra.db.guardrails.GuardrailsConfig;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.memtable.Memtable;
+import org.apache.cassandra.guardrails.Guardrails;
+import org.apache.cassandra.guardrails.GuardrailsConfig;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.schema.Schema;
 
 /**
  * Schedule periodic task to monitor local disk usage and notify {@link DiskUsageBroadcaster} if local state changed.
@@ -53,23 +47,24 @@ public class DiskUsageMonitor
 {
     private static final Logger logger = LoggerFactory.getLogger(DiskUsageMonitor.class);
 
+    private static final int MONITOR_INTERVAL = Integer.parseInt(System.getProperty(Config.PROPERTY_PREFIX + "disk_usage.monitor_interval_ms", Integer.valueOf(30 * 1000).toString()));
+
     public static DiskUsageMonitor instance = new DiskUsageMonitor();
 
-    private final Supplier<GuardrailsConfig> guardrailsConfigSupplier = () -> Guardrails.CONFIG_PROVIDER.getOrCreate(null);
-    private final Supplier<Multimap<FileStore, Directories.DataDirectory>> dataDirectoriesSupplier;
+    private final GuardrailsConfig config;
+    private final LongSupplier warnValueSupplier;
+    private final LongSupplier failValueSupplier;
+    private final Supplier<Directories.DataDirectories> dataDirectoriesSupplier;
 
     private volatile DiskUsageState localState = DiskUsageState.NOT_AVAILABLE;
 
     @VisibleForTesting
     public DiskUsageMonitor()
     {
-        this.dataDirectoriesSupplier = DiskUsageMonitor::dataDirectoriesGroupedByFileStore;
-    }
-
-    @VisibleForTesting
-    public DiskUsageMonitor(Supplier<Multimap<FileStore, Directories.DataDirectory>> dataDirectoriesSupplier)
-    {
-        this.dataDirectoriesSupplier = dataDirectoriesSupplier;
+        this.config = DatabaseDescriptor.getGuardrailsConfig();
+        this.warnValueSupplier = () -> config.disk_usage_percentage_warn_threshold;
+        this.failValueSupplier = () -> config.disk_usage_percentage_failure_threshold;
+        this.dataDirectoriesSupplier = () -> Directories.dataDirectories;
     }
 
     /**
@@ -80,11 +75,11 @@ public class DiskUsageMonitor
         // start the scheduler regardless guardrail is enabled, so we can enable it later without a restart
         ScheduledExecutors.scheduledTasks.scheduleAtFixedRate(() -> {
 
-            if (!Guardrails.localDataDiskUsage.enabled(null))
+            if (!Guardrails.localDiskUsage.enabled(null))
                 return;
 
             updateLocalState(getDiskUsage(), notifier);
-        }, 0, CassandraRelevantProperties.DISK_USAGE_MONITOR_INTERVAL_MS.getLong(), TimeUnit.MILLISECONDS);
+        }, 0, MONITOR_INTERVAL, TimeUnit.MILLISECONDS);
     }
 
     @VisibleForTesting
@@ -95,7 +90,7 @@ public class DiskUsageMonitor
 
         DiskUsageState state = getState(percentageCeiling);
 
-        Guardrails.localDataDiskUsage.guard(percentageCeiling, state.toString(), false, null);
+        Guardrails.localDiskUsage.guard(percentageCeiling, state.toString(), false, null);
 
         // if state remains unchanged, no need to notify peers
         if (state == localState)
@@ -115,44 +110,28 @@ public class DiskUsageMonitor
     }
 
     /**
-     * @return The current disk usage (including all memtable sizes) ratio. This is the ratio between the space taken by
-     * all the data directories and the addition of that same space and the free available space on disk. The space
-     * taken by the data directories is the addition of the actual space on disk plus the size of the memtables.
-     * Memtables are included in that calculation because they are expected to be eventually flushed to disk.
+     * @return disk usage (including all memtable sizes) ratio
      */
-    @VisibleForTesting
-    public double getDiskUsage()
+    private double getDiskUsage()
     {
-        // using BigInteger to handle large file system
-        BigInteger used = BigInteger.ZERO; // space used by data directories
-        BigInteger usable = BigInteger.ZERO; // free space on disks
+        // using BigDecimal to handle large file system
+        BigDecimal used = BigDecimal.ZERO;
+        BigDecimal total = BigDecimal.ZERO;
 
-        for (Map.Entry<FileStore, Collection<Directories.DataDirectory>> e : dataDirectoriesSupplier.get().asMap().entrySet())
+        for (Directories.DataDirectory dir : dataDirectoriesSupplier.get())
         {
-            usable = usable.add(BigInteger.valueOf(usableSpace(e.getKey())));
-
-            for (Directories.DataDirectory dir : e.getValue())
-                used = used.add(BigInteger.valueOf(dir.getRawSize()));
+            used = used.add(BigDecimal.valueOf(dir.getSpaceUsed()));
+            total = total.add(BigDecimal.valueOf(dir.getTotalSpace()));
         }
 
-        // The total disk size for data directories is the space that is actually used by those directories plus the
-        // free space on disk that might be used for storing those directories in the future.
-        BigInteger total = used.add(usable);
-
-        // That total space can be limited by the config property data_disk_usage_max_disk_size.
-        DataStorageSpec.LongBytesBound diskUsageMaxSize = guardrailsConfigSupplier.get().getDataDiskUsageMaxDiskSize();
-        if (diskUsageMaxSize != null)
-            total = total.min(BigInteger.valueOf(diskUsageMaxSize.toBytes()));
-
-        // Add memtables size to the amount of used space because those memtables will be flushed to data directories.
-        used = used.add(BigInteger.valueOf(getAllMemtableSize()));
+        used = used.add(BigDecimal.valueOf(getAllMemtableSize()));
 
         if (logger.isTraceEnabled())
             logger.trace("Disk Usage Guardrail: current disk usage = {}, total disk usage = {}.",
                          FileUtils.stringifyFileSize(used.doubleValue()),
                          FileUtils.stringifyFileSize(total.doubleValue()));
 
-        return new BigDecimal(used).divide(new BigDecimal(total), 5, RoundingMode.UP).doubleValue();
+        return used.divide(total, 5, BigDecimal.ROUND_UP).doubleValue();
     }
 
     @VisibleForTesting
@@ -160,11 +139,16 @@ public class DiskUsageMonitor
     {
         long size = 0;
 
-        for (ColumnFamilyStore cfs : ColumnFamilyStore.all())
+        for (String keyspaceName : Schema.instance.getKeyspaces())
         {
-            for (Memtable memtable : cfs.getTracker().getView().getAllMemtables())
+            Keyspace keyspace = Keyspace.open(keyspaceName);
+
+            for (ColumnFamilyStore cfs : keyspace.getColumnFamilyStores())
             {
-                size += memtable.getLiveDataSize();
+                for (Memtable memtable : cfs.getTracker().getView().getAllMemtables())
+                {
+                    size += memtable.getLiveDataSize();
+                }
             }
         }
 
@@ -174,73 +158,21 @@ public class DiskUsageMonitor
     @VisibleForTesting
     public DiskUsageState getState(long usagePercentage)
     {
-        if (!Guardrails.localDataDiskUsage.enabled())
+        long warnValue = warnValueSupplier.getAsLong();
+        long failValue = failValueSupplier.getAsLong();
+
+        boolean warnDisabled = GuardrailsConfig.diskUsageGuardrailDisabled(warnValue);
+        boolean failDisabled = GuardrailsConfig.diskUsageGuardrailDisabled(failValue);
+
+        if (failDisabled && warnDisabled)
             return DiskUsageState.NOT_AVAILABLE;
 
-        if (Guardrails.localDataDiskUsage.failsOn(usagePercentage, null))
+        if (!failDisabled && usagePercentage > failValue)
             return DiskUsageState.FULL;
 
-        if (Guardrails.localDataDiskUsage.warnsOn(usagePercentage, null))
+        if (!warnDisabled && usagePercentage > warnValue)
             return DiskUsageState.STUFFED;
 
         return DiskUsageState.SPACIOUS;
     }
-
-    private static Multimap<FileStore, Directories.DataDirectory> dataDirectoriesGroupedByFileStore()
-    {
-        Multimap<FileStore, Directories.DataDirectory> directories = HashMultimap.create();
-        try
-        {
-            for (Directories.DataDirectory dir : Directories.dataDirectories.getAllDirectories())
-            {
-                FileStore store = Files.getFileStore(dir.location.toPath());
-                directories.put(store, dir);
-            }
-        }
-        catch (IOException e)
-        {
-            throw new RuntimeException("Cannot get data directories grouped by file store", e);
-        }
-        return directories;
-    }
-
-    public static long totalDiskSpace()
-    {
-        BigInteger size = dataDirectoriesGroupedByFileStore().keys()
-                                                             .stream()
-                                                             .map(DiskUsageMonitor::totalSpace)
-                                                             .map(BigInteger::valueOf)
-                                                             .reduce(BigInteger.ZERO, BigInteger::add);
-
-        return size.compareTo(BigInteger.valueOf(Long.MAX_VALUE)) >= 0
-               ? Long.MAX_VALUE
-               : size.longValue();
-    }
-
-    public static long totalSpace(FileStore store)
-    {
-        try
-        {
-            long size = store.getTotalSpace();
-            return size < 0 ? Long.MAX_VALUE : size;
-        }
-        catch (IOException e)
-        {
-            throw new RuntimeException("Cannot get total space of file store", e);
-        }
-    }
-
-    public static long usableSpace(FileStore store)
-    {
-        try
-        {
-            long size = store.getUsableSpace();
-            return size < 0 ? Long.MAX_VALUE : size;
-        }
-        catch (IOException e)
-        {
-            throw new RuntimeException("Cannot get usable size of file store", e);
-        }
-    }
 }
-

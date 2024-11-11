@@ -34,7 +34,7 @@ public class PartitionSerializationExceptionTest
     @Test
     public void testMessageWithSimplePartitionKey()
     {
-        TableMetadata metadata = TableMetadata.builder("ks", "tbl").addPartitionKeyColumn("pk", UTF8Type.instance).offline().build();
+        TableMetadata metadata = TableMetadata.builder("ks", "tbl").addPartitionKeyColumn("pk", UTF8Type.instance).build();
 
         DecoratedKey key = mock(DecoratedKey.class);
         when(key.getKey()).thenReturn(UTF8Type.instance.decompose("foo"));
@@ -53,8 +53,7 @@ public class PartitionSerializationExceptionTest
     {
         TableMetadata metadata = TableMetadata.builder("ks", "tbl")
                                               .addPartitionKeyColumn("pk1", UTF8Type.instance)
-                                              .addPartitionKeyColumn("pk2", UTF8Type.instance)
-                                              .offline().build();
+                                              .addPartitionKeyColumn("pk2", UTF8Type.instance).build();
 
         DecoratedKey key = mock(DecoratedKey.class);
         CompositeType keyType = CompositeType.getInstance(UTF8Type.instance, UTF8Type.instance);

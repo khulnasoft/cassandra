@@ -17,33 +17,43 @@
  */
 package org.apache.cassandra.schema;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Queue;
+import java.util.Set;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
-
 import javax.annotation.Nullable;
 
-import com.google.common.collect.*;
+import com.google.common.collect.HashMultimap;
+import com.google.common.collect.ImmutableCollection;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSortedMap;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Multimap;
 
-import org.apache.cassandra.cql3.FieldIdentifier;
 import org.apache.cassandra.cql3.CQL3Type;
+import org.apache.cassandra.cql3.FieldIdentifier;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.tcm.serialization.Version;
-
-import static java.lang.String.format;
-import static java.util.stream.Collectors.toList;
 
 import static com.google.common.collect.Iterables.any;
 import static com.google.common.collect.Iterables.transform;
-
-import static org.apache.cassandra.db.TypeSizes.sizeof;
+import static java.lang.String.format;
+import static java.util.stream.Collectors.toList;
 import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
 
 /**
@@ -51,8 +61,6 @@ import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
  */
 public final class Types implements Iterable<UserType>
 {
-    public static final Serializer serializer = new Serializer();
-
     private static final Types NONE = new Types(ImmutableMap.of());
 
     private final Map<ByteBuffer, UserType> types;
@@ -114,6 +122,32 @@ public final class Types implements Iterable<UserType>
     public Iterable<UserType> referencingUserType(ByteBuffer name)
     {
         return Iterables.filter(types.values(), t -> t.referencesUserType(name) && !t.name.equals(name));
+    }
+
+    /**
+     * Returns the types ordered by dependencies.
+     *
+     * @return the types ordered by dependencies.
+     */
+    private Set<UserType> getTypesOrderedByDependencies()
+    {
+        Set<UserType> orderedTypesByDependencies = new LinkedHashSet<>();
+        for (UserType type : this)
+        {
+            recordNestedTypes(type, orderedTypesByDependencies);
+        }
+        return orderedTypesByDependencies;
+    }
+
+    private void recordNestedTypes(AbstractType<?> userType, Set<UserType> userTypes)
+    {
+        for (AbstractType<?> subType : userType.subTypes())
+        {
+            recordNestedTypes(subType, userTypes);
+        }
+
+        if (userType.isUDT())
+            userTypes.add((UserType) userType);
     }
 
     public boolean isEmpty()
@@ -261,6 +295,33 @@ public final class Types implements Iterable<UserType>
             types.add(((UserType) type).name);
     }
 
+    /**
+     * Changes the keyspace of all the types.
+     *
+     * @param newKeyspace the name of the new keyspace
+     * @return the new types
+     */
+    public Types withNewKeyspace(String newKeyspace)
+    {
+        Map<ByteBuffer, UserType> updatedTypes = new HashMap<>();
+
+        for (UserType originalType : getTypesOrderedByDependencies())
+        {
+            UserType type = new UserType(newKeyspace,
+                                         originalType.name,
+                                         originalType.fieldNames(),
+                                         originalType.fieldTypes()
+                                                     .stream()
+                                                     .map(t -> t.withUpdatedUserTypes(updatedTypes.values()))
+                                                     .collect(Collectors.toList()),
+                                         true);
+
+            updatedTypes.put(type.name, type);
+        }
+
+        return new Types(ImmutableSortedMap.copyOf(updatedTypes));
+    }
+
     public static final class Builder
     {
         final ImmutableSortedMap.Builder<ByteBuffer, UserType> types = ImmutableSortedMap.naturalOrder();
@@ -398,7 +459,7 @@ public final class Types implements Iterable<UserType>
 
                 List<AbstractType<?>> preparedFieldTypes =
                     fieldTypes.stream()
-                              .map(t -> t.prepareInternal(keyspace, types).getType())
+                              .map(t -> t.prepare(keyspace, types).getType())
                               .collect(toList());
 
                 return new UserType(keyspace, bytes(name), preparedFieldNames, preparedFieldTypes, true);
@@ -449,65 +510,6 @@ public final class Types implements Iterable<UserType>
             });
 
             return new TypesDiff(created, dropped, altered.build());
-        }
-    }
-
-    // Not quite a MetadataSerializer as it needs the keyspace name during deserialization.
-    public static class Serializer
-    {
-        public void serialize(Types t, DataOutputPlus out, Version version) throws IOException
-        {
-            out.writeInt(t.types.size());
-            for (UserType type : t.types.values())
-            {
-                out.writeUTF(type.getNameAsString());
-                List<String> fieldNames = type.fieldNames().stream().map(FieldIdentifier::toString).collect(toList());
-                List<String> fieldTypes = type.fieldTypes().stream().map(AbstractType::asCQL3Type).map(CQL3Type::toString).collect(toList());
-                out.writeInt(fieldNames.size());
-                for (String s : fieldNames)
-                    out.writeUTF(s);
-                out.writeInt(fieldTypes.size());
-                for (String s : fieldTypes)
-                    out.writeUTF(s);
-            }
-        }
-
-        public Types deserialize(String keyspace, DataInputPlus in, Version version) throws IOException
-        {
-            int count = in.readInt();
-            Types.RawBuilder builder = Types.rawBuilder(keyspace);
-            for (int i = 0; i < count; i++)
-            {
-                String name = in.readUTF();
-                int fieldNamesSize = in.readInt();
-                List<String> fieldNames = new ArrayList<>(fieldNamesSize);
-                for (int x = 0; x < fieldNamesSize; x++)
-                    fieldNames.add(in.readUTF());
-                int fieldTypeSize = in.readInt();
-                List<String> fieldTypes = new ArrayList<>(fieldTypeSize);
-                for (int x = 0; x < fieldTypeSize; x++)
-                    fieldTypes.add(in.readUTF());
-                builder.add(name, fieldNames, fieldTypes);
-            }
-            return builder.build();
-        }
-
-        public long serializedSize(Types t, Version version)
-        {
-            long size = sizeof(t.types.size());
-            for (UserType type : t.types.values())
-            {
-                size += sizeof(type.getNameAsString());
-                List<String> fieldNames = type.fieldNames().stream().map(FieldIdentifier::toString).collect(toList());
-                List<String> fieldTypes = type.fieldTypes().stream().map(AbstractType::asCQL3Type).map(CQL3Type::toString).collect(toList());
-                size += sizeof(fieldNames.size());
-                for (String s : fieldNames)
-                    size += sizeof(s);
-                size += sizeof(fieldTypes.size());
-                for (String s : fieldTypes)
-                    size += sizeof(s);
-            }
-            return size;
         }
     }
 }

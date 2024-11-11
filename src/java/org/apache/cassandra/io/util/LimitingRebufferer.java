@@ -27,7 +27,7 @@ import com.google.common.util.concurrent.RateLimiter;
 
 /**
  * Rebufferer wrapper that applies rate limiting.
- * <p>
+ *
  * Instantiated once per RandomAccessReader, thread-unsafe.
  * The instances reuse themselves as the BufferHolder to avoid having to return a new object for each rebuffer call.
  * Only one BufferHolder can be active at a time. Calling {@link #rebuffer(long)} before the previously obtained
@@ -67,6 +67,7 @@ public class LimitingRebufferer extends WrappingRebufferer
     @Override
     public String toString()
     {
-        return "LimitingRebufferer[" + limiter + "]:" + wrapped;
+        return "LimitingRebufferer[" + limiter + "]:" + this.source;
     }
+
 }

@@ -29,6 +29,7 @@ import org.apache.cassandra.repair.messages.SyncRequest;
 import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.streaming.SessionSummary;
 import org.apache.cassandra.tracing.Tracing;
+import org.apache.cassandra.utils.FBUtilities;
 
 /**
  * AsymmetricRemoteSyncTask sends {@link SyncRequest} to target node to repair(stream)
@@ -38,14 +39,14 @@ import org.apache.cassandra.tracing.Tracing;
  */
 public class AsymmetricRemoteSyncTask extends SyncTask implements CompletableRemoteSyncTask
 {
-    public AsymmetricRemoteSyncTask(SharedContext ctx, RepairJobDesc desc, InetAddressAndPort to, InetAddressAndPort from, List<Range<Token>> differences, PreviewKind previewKind)
+    public AsymmetricRemoteSyncTask(RepairJobDesc desc, InetAddressAndPort to, InetAddressAndPort from, List<Range<Token>> differences, PreviewKind previewKind)
     {
-        super(ctx, desc, to, from, differences, previewKind);
+        super(desc, to, from, differences, previewKind);
     }
 
     public void startSync()
     {
-        InetAddressAndPort local = ctx.broadcastAddressAndPort();
+        InetAddressAndPort local = FBUtilities.getBroadcastAddressAndPort();
         SyncRequest request = new SyncRequest(desc, local, nodePair.coordinator, nodePair.peer, rangesToSync, previewKind, true);
         String message = String.format("Forwarding streaming repair of %d ranges to %s (to be streamed with %s)", request.ranges.size(), request.src, request.dst);
         Tracing.traceRepair(message);
@@ -56,11 +57,11 @@ public class AsymmetricRemoteSyncTask extends SyncTask implements CompletableRem
     {
         if (success)
         {
-            trySuccess(stat.withSummaries(summaries));
+            set(stat.withSummaries(summaries));
         }
         else
         {
-            tryFailure(RepairException.warn(desc, previewKind, String.format("Sync failed between %s and %s", nodePair.coordinator, nodePair.peer)));
+            setException(new RepairException(desc, previewKind, String.format("Sync failed between %s and %s", nodePair.coordinator, nodePair.peer)));
         }
     }
 

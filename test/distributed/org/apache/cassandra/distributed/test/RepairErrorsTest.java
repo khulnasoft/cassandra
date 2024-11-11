@@ -19,38 +19,32 @@
 package org.apache.cassandra.distributed.test;
 
 import java.io.IOException;
-import java.util.Collection;
 import java.util.concurrent.Callable;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import net.bytebuddy.ByteBuddy;
 import net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
 import net.bytebuddy.implementation.MethodDelegation;
 import net.bytebuddy.implementation.bind.annotation.SuperCall;
-import org.assertj.core.api.Assertions;
 import org.junit.Test;
 
+import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.SystemKeyspace;
-import org.apache.cassandra.db.compaction.CompactionInterruptedException;
-import org.apache.cassandra.db.compaction.CompactionIterator;
-import org.apache.cassandra.db.compaction.CompactionManager;
-import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.db.streaming.CassandraIncomingFile;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.distributed.api.NodeToolResult;
-import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.locator.RangesAtEndpoint;
-import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.service.ActiveRepairService;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.streaming.StreamSession;
 
 import static net.bytebuddy.matcher.ElementMatchers.named;
+import static net.bytebuddy.matcher.ElementMatchers.takesArguments;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -60,50 +54,15 @@ import static org.apache.cassandra.distributed.api.Feature.NETWORK;
 public class RepairErrorsTest extends TestBaseImpl
 {
     @Test
-    public void testRemoteValidationFailure() throws IOException
-    {
-        Cluster.Builder builder = Cluster.build(2)
-                                         .withConfig(config -> config.with(GOSSIP).with(NETWORK))
-                                         .withInstanceInitializer(ByteBuddyHelper::install);
-        try (Cluster cluster = builder.createWithoutStarting())
-        {
-            cluster.setUncaughtExceptionsFilter((i, throwable) -> {
-                if (i == 2)
-                    return throwable.getMessage() != null && throwable.getMessage().contains("IGNORE");
-                return false;
-            });
-
-            cluster.startup();
-            init(cluster);
-
-            cluster.schemaChange("create table "+KEYSPACE+".tbl (id int primary key, x int)");
-            for (int i = 0; i < 10; i++)
-                cluster.coordinator(1).execute("insert into "+KEYSPACE+".tbl (id, x) VALUES (?,?)", ConsistencyLevel.ALL, i, i);
-            cluster.forEach(i -> i.flush(KEYSPACE));
-            long mark = cluster.get(1).logs().mark();
-            cluster.forEach(i -> i.nodetoolResult("repair", "--full").asserts().failure());
-            Assertions.assertThat(cluster.get(1).logs().grep(mark, "^ERROR").getResult()).isEmpty();
-        }
-    }
-
-    @Test
     public void testRemoteSyncFailure() throws Exception
     {
-        try (Cluster cluster = Cluster.build(3)
+        try (Cluster cluster = init(Cluster.build(3)
                                            .withConfig(config -> config.with(GOSSIP)
                                                                        .with(NETWORK)
                                                                        .set("disk_failure_policy", "stop")
                                                                        .set("disk_access_mode", "mmap_index_only"))
-                                           .withInstanceInitializer(ByteBuddyHelper::installStreamPlanExecutionFailure)
-                                           .createWithoutStarting())
+                                           .withInstanceInitializer(ByteBuddyHelper::installStreamPlanExecutionFailure).start()))
         {
-            // This test relies on the fact that 2->3 streaming is going to fail, but if we're using vnodes,
-            // 2 will effectively become 3 because of the token allocator. To avoid this, we simply start the nodes sequentially
-            // and guarantee their tokens order.
-            for (int i = 1; i <= 3; i++)
-                cluster.get(i).startup();
-
-            init(cluster);
             cluster.schemaChange("create table " + KEYSPACE + ".tbl (id int primary key, x int)");
             
             // On repair, this data layout will require two (local) syncs from node 1 and one remote sync from node 2:
@@ -137,10 +96,6 @@ public class RepairErrorsTest extends TestBaseImpl
             result.asserts().success();
 
             assertNoActiveRepairSessions(cluster.get(1));
-
-            cluster.forEach(i -> Assertions.assertThat(i.logs().grep("SomeRepairFailedException").getResult())
-                                           .describedAs("node%d logged hidden exception org.apache.cassandra.repair.SomeRepairFailedException", i.config().num())
-                                           .isEmpty());
         }
     }
 
@@ -187,58 +142,16 @@ public class RepairErrorsTest extends TestBaseImpl
         }
     }
 
-    @Test
-    public void testNoSuchRepairSessionAnticompaction() throws IOException
-    {
-        try (Cluster cluster = init(Cluster.build(2)
-                                           .withConfig(config -> config.with(GOSSIP).with(NETWORK))
-                                           .withInstanceInitializer(ByteBuddyHelper::installACNoSuchRepairSession)
-                                           .start()))
-        {
-            cluster.schemaChange("create table "+KEYSPACE+".tbl (id int primary key, x int)");
-            for (int i = 0; i < 10; i++)
-                cluster.coordinator(1).execute("insert into "+KEYSPACE+".tbl (id, x) VALUES (?,?)", ConsistencyLevel.ALL, i, i);
-            cluster.forEach(i -> i.flush(KEYSPACE));
-            long mark = cluster.get(1).logs().mark();
-            cluster.forEach(i -> i.nodetoolResult("repair", KEYSPACE).asserts().failure());
-            assertTrue(cluster.get(1).logs().grep(mark, "^ERROR").getResult().isEmpty());
-        }
-    }
-
     @SuppressWarnings("Convert2MethodRef")
     private void assertNoActiveRepairSessions(IInvokableInstance instance)
     {
         // Make sure we've cleaned up local sessions:
-        Integer sessions = instance.callOnInstance(() -> ActiveRepairService.instance().sessionCount());
+        Integer sessions = instance.callOnInstance(() -> ActiveRepairService.instance.sessionCount());
         assertEquals(0, sessions.intValue());
     }
 
     public static class ByteBuddyHelper
     {
-        public static void install(ClassLoader cl, int nodeNumber)
-        {
-            if (nodeNumber == 2)
-            {
-                new ByteBuddy().redefine(CompactionIterator.class)
-                               .method(named("next"))
-                               .intercept(MethodDelegation.to(ByteBuddyHelper.class))
-                               .make()
-                               .load(cl, ClassLoadingStrategy.Default.INJECTION);
-            }
-        }
-
-        public static void installACNoSuchRepairSession(ClassLoader cl, int nodeNumber)
-        {
-            if (nodeNumber == 2)
-            {
-                new ByteBuddy().redefine(CompactionManager.class)
-                               .method(named("validateSSTableBoundsForAnticompaction"))
-                               .intercept(MethodDelegation.to(ByteBuddyHelper.class))
-                               .make()
-                               .load(cl, ClassLoadingStrategy.Default.INJECTION);
-            }
-        }
-        
         public static void installStreamPlanExecutionFailure(ClassLoader cl, int nodeNumber)
         {
             if (nodeNumber == 2)
@@ -257,20 +170,13 @@ public class RepairErrorsTest extends TestBaseImpl
                         .intercept(MethodDelegation.to(ByteBuddyHelper.class))
                         .make()
                         .load(cl, ClassLoadingStrategy.Default.INJECTION);
+
+                new ByteBuddy().rebase(DebuggableThreadPoolExecutor.class)
+                        .method(named("extractThrowable").and(takesArguments(Future.class)))
+                        .intercept(MethodDelegation.to(ByteBuddyHelper.class))
+                        .make()
+                        .load(cl, ClassLoadingStrategy.Default.INJECTION);
             }
-        }
-
-        public static UnfilteredRowIterator next()
-        {
-            throw new RuntimeException("IGNORE");
-        }
-
-        @SuppressWarnings("unused")
-        public static void validateSSTableBoundsForAnticompaction(TimeUUID sessionID,
-                                                                  Collection<SSTableReader> sstables,
-                                                                  RangesAtEndpoint ranges)
-        {
-            throw new CompactionInterruptedException(String.valueOf(sessionID));
         }
 
         @SuppressWarnings("unused")
@@ -286,7 +192,7 @@ public class RepairErrorsTest extends TestBaseImpl
             {
                 try
                 {
-                    TimeUnit.SECONDS.sleep(10);
+                    TimeUnit.SECONDS.sleep(60);
                 }
                 catch (InterruptedException e)
                 {
@@ -295,6 +201,16 @@ public class RepairErrorsTest extends TestBaseImpl
                 }
             }
 
+            return zuper.call();
+        }
+
+        @SuppressWarnings({"unused", "ResultOfMethodCallIgnored"})
+        public static Throwable extractThrowable(Future<?> future, @SuperCall Callable<Throwable> zuper) throws Exception
+        {
+            if (Thread.currentThread().getName().contains("RepairJobTask"))
+                // Clear the interrupt flag so the FSReadError is propagated correctly in DebuggableThreadPoolExecutor:
+                Thread.interrupted();
+            
             return zuper.call();
         }
     }
@@ -306,19 +222,19 @@ public class RepairErrorsTest extends TestBaseImpl
             if (nodeNumber == 3)
             {
                 new ByteBuddy().rebase(CassandraIncomingFile.class)
-                               .method(named("read"))
-                               .intercept(MethodDelegation.to(ByteBuddyHelperStreamFailure.class))
-                               .make()
-                               .load(cl, ClassLoadingStrategy.Default.INJECTION);
+                        .method(named("read"))
+                        .intercept(MethodDelegation.to(ByteBuddyHelperStreamFailure.class))
+                        .make()
+                        .load(cl, ClassLoadingStrategy.Default.INJECTION);
             }
 
             if (nodeNumber == 1)
             {
                 new ByteBuddy().rebase(SystemKeyspace.class)
-                               .method(named("getPreferredIP"))
-                               .intercept(MethodDelegation.to(ByteBuddyHelperStreamFailure.class))
-                               .make()
-                               .load(cl, ClassLoadingStrategy.Default.INJECTION);
+                        .method(named("getPreferredIP"))
+                        .intercept(MethodDelegation.to(ByteBuddyHelperStreamFailure.class))
+                        .make()
+                        .load(cl, ClassLoadingStrategy.Default.INJECTION);
             }
         }
 
@@ -331,7 +247,7 @@ public class RepairErrorsTest extends TestBaseImpl
         @SuppressWarnings("unused")
         public static InetAddressAndPort getPreferredIP(InetAddressAndPort ep, @SuperCall Callable<InetAddressAndPort> zuper) throws Exception
         {
-            if (Thread.currentThread().getName().contains("NettyStreaming-Outbound") && ep.getAddress().toString().contains("127.0.0.2"))
+            if (Thread.currentThread().getName().contains("NettyStreaming-Outbound") && ep.address.toString().contains("127.0.0.2"))
             {
                 try
                 {

@@ -18,23 +18,18 @@
 package org.apache.cassandra.net;
 
 import java.io.IOException;
-import java.util.EnumSet;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import java.util.function.Predicate;
 
+import org.apache.cassandra.index.sai.utils.AbortedOperationException;
 import org.slf4j.LoggerFactory;
 
 import net.openhft.chronicle.core.util.ThrowingConsumer;
 import org.apache.cassandra.db.filter.TombstoneOverwhelmingException;
-import org.apache.cassandra.exceptions.CoordinatorBehindException;
-import org.apache.cassandra.exceptions.InvalidRoutingException;
 import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.index.IndexNotAvailableException;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.tcm.Epoch;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.tcm.NotCMSException;
 import org.apache.cassandra.utils.NoSpamLogger;
 
 /**
@@ -78,29 +73,10 @@ public class InboundSink implements InboundMessageHandlers.MessageConsumer
 
     private final MessagingService messaging;
 
-    private final static EnumSet<Verb> allowedDuringStartup = EnumSet.of(Verb.GOSSIP_DIGEST_ACK, Verb.GOSSIP_DIGEST_SYN);
-
     InboundSink(MessagingService messaging)
     {
         this.messaging = messaging;
-        this.sink = message -> {
-            IVerbHandler handler = message.header.verb.handler();
-            if (handler == null)
-            {
-                String err = String.format("Handler for verb %s is null", message.header.verb);
-                noSpamLogger.info(err);
-                throw new IllegalStateException(err);
-            }
-
-            ClusterMetadata metadata = ClusterMetadata.currentNullable();
-            if (metadata != null && metadata.epoch.is(Epoch.UPGRADE_STARTUP) && !allowedDuringStartup.contains(message.header.verb))
-            {
-                noSpamLogger.info("Ignoring message from {} with verb="+message.header.verb, message.from());
-                return;
-            }
-
-            handler.doVerb(message);
-        };
+        this.sink = message -> message.header.verb.handler().doVerb((Message<Object>) message);
     }
 
     public void fail(Message.Header header, Throwable failure)
@@ -125,9 +101,11 @@ public class InboundSink implements InboundMessageHandlers.MessageConsumer
         {
             fail(message.header, t);
 
-            if (t instanceof NotCMSException || t instanceof CoordinatorBehindException)
-                noSpamLogger.warn(t.getMessage());
-            else if (t instanceof TombstoneOverwhelmingException || t instanceof IndexNotAvailableException || t instanceof InvalidRoutingException)
+            // The site throwing AbortedOperationException is responsible for logging it.
+            if (t instanceof AbortedOperationException)
+                return;
+
+            if (t instanceof TombstoneOverwhelmingException || t instanceof IndexNotAvailableException)
                 noSpamLogger.error(t.getMessage());
             else if (t instanceof RuntimeException)
                 throw (RuntimeException) t;
@@ -151,8 +129,7 @@ public class InboundSink implements InboundMessageHandlers.MessageConsumer
         sinkUpdater.updateAndGet(this, InboundSink::clear);
     }
 
-    /** @deprecated See CASSANDRA-15066 */
-    @Deprecated(since = "4.0") // TODO: this is not the correct way to do things
+    @Deprecated // TODO: this is not the correct way to do things
     public boolean allow(Message<?> message)
     {
         return allows(sink, message);

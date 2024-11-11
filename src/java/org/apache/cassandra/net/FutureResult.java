@@ -17,13 +17,14 @@
  */
 package org.apache.cassandra.net;
 
-import io.netty.util.concurrent.Future; //checkstyle: permit this import
+import io.netty.util.concurrent.Future;
 
 /**
  * An abstraction for yielding a result performed by an asynchronous task,
- * for whom we may wish to offer cancellation, but no other access to the underlying task
+ * for whom we may wish to offer cancellation,
+ * but no other access to the underlying task
  */
-public class FutureResult<V> extends FutureDelegate<V>
+class FutureResult<V> extends FutureDelegate<V>
 {
     private final Future<?> tryCancel;
 
@@ -31,7 +32,7 @@ public class FutureResult<V> extends FutureDelegate<V>
      * @param result the Future that will be completed by {@link #cancel}
      * @param cancel the Future that is performing the work, and to whom any cancellation attempts will be proxied
      */
-    public FutureResult(Future<V> result, Future<?> cancel)
+    FutureResult(Future<V> result, Future<?> cancel)
     {
         super(result);
         this.tryCancel = cancel;

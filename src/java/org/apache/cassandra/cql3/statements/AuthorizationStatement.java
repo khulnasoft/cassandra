@@ -26,7 +26,6 @@ import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.exceptions.RequestValidationException;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
-import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import org.apache.commons.lang3.builder.ToStringStyle;
@@ -38,8 +37,7 @@ public abstract class AuthorizationStatement extends CQLStatement.Raw implements
         return this;
     }
 
-    @Override
-    public ResultMessage execute(QueryState state, QueryOptions options, Dispatcher.RequestTime requestTime)
+    public ResultMessage execute(QueryState state, QueryOptions options, long queryStartNanoTime)
     throws RequestValidationException, RequestExecutionException
     {
         return execute(state.getClientState());

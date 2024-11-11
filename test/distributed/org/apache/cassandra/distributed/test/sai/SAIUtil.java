@@ -30,11 +30,10 @@ import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.Feature;
 import org.apache.cassandra.distributed.api.IInstance;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
+import org.apache.cassandra.distributed.api.Row;
 import org.apache.cassandra.distributed.api.SimpleQueryResult;
 import org.apache.cassandra.index.Index;
-import org.apache.cassandra.index.IndexStatusManager;
 import org.apache.cassandra.index.SecondaryIndexManager;
-import org.apache.cassandra.index.sai.virtual.ColumnIndexesSystemView;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.assertj.core.util.Streams;
 
@@ -97,7 +96,7 @@ public class SAIUtil
             {
                 for (InetAddressAndPort node : nodes)
                 {
-                    Index.Status status = IndexStatusManager.instance.getIndexStatus(node, keyspace, index);
+                    Index.Status status = SecondaryIndexManager.getIndexStatus(node, keyspace, index);
                     assert status == Index.Status.BUILD_SUCCEEDED
                         : "Index " + index + " not queryable on node " + node + " (status = " + status + ')';
                 }
@@ -116,10 +115,9 @@ public class SAIUtil
     public static List<String> getIndexes(Cluster cluster, String keyspace)
     {
         waitForSchemaAgreement(cluster);
-        String query = String.format("SELECT index_name FROM system_views.%s WHERE keyspace_name = '%s' ALLOW FILTERING",
-                                     ColumnIndexesSystemView.NAME, keyspace);
+        String query = String.format("SELECT index_name FROM system_views.indexes WHERE keyspace_name = '%s' ALLOW FILTERING", keyspace);
         SimpleQueryResult result = cluster.get(1).executeInternalWithResult(query);
-        return Streams.stream(result)
+        return Streams.stream((Iterable<Row>) result)
                       .map(row -> (String) row.get("index_name"))
                       .collect(Collectors.toList());
     }

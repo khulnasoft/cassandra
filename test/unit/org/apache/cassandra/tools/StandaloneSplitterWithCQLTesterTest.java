@@ -20,26 +20,24 @@ package org.apache.cassandra.tools;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import org.junit.After;
 import org.junit.Before;
-
-import org.apache.cassandra.db.lifecycle.Tracker;
-import org.apache.cassandra.io.util.File;
-
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.tools.ToolRunner.ToolResult;
 import org.assertj.core.api.Assertions;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_UTIL_ALLOW_TOOL_REINIT_FOR_TEST;
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
+import static org.assertj.core.api.AssertionsForClassTypes.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -47,30 +45,15 @@ public class StandaloneSplitterWithCQLTesterTest extends CQLTester
 {
     private static String sstableFileName;
     private static File sstablesDir;
+    private static File sstablesBackupDir;
     private static List<File> origSstables;
 
     @Before
     public void before() throws Throwable
     {
         setupTestSstables();
-        // Stop server as this is exercising an offline tool
         tearDownClass();
         SSTableReader.resetTidying();
-    }
-
-    @After
-    public void unsafeRemoveSSTables() throws Throwable
-    {
-        // Before resetting the CMS in CQLTester::afterClass, manually remove the original SSTables from the
-        // CFS. If we don't do this, restoring the schema to a pre-test state causes the CFS to be dropped
-        // which attempts to remove the SSTables in the tracker. Because we've unsafely modified these with
-        // a tool that should only be used offline, this causes an error in test tear down. In a real node,
-        // running the tool while offline, or even just restarting the node after the tool has been unsafely
-        // run like this, would avoid/fix this issue.
-        Tracker tracker = getCurrentColumnFamilyStore(KEYSPACE).getTracker();
-        Set<SSTableReader> toRemove = new HashSet<>();
-        tracker.getView().allKnownSSTables().forEach(toRemove::add);
-        tracker.removeUnsafe(toRemove);
     }
 
     @Test
@@ -89,7 +72,7 @@ public class StandaloneSplitterWithCQLTesterTest extends CQLTester
         List<File> splitFiles = Arrays.asList(sstablesDir.tryList());
         splitFiles.stream().forEach(f -> {
             if (f.name().endsWith("Data.db") && !origSstables.contains(f))
-                assertTrue(f.name() + " is way bigger than 1MiB: [" + f.length() + "] bytes",
+                assertTrue(f.name() + " is way bigger than 1MB: [" + f.length() + "] bytes",
                            f.length() <= 1024 * 1024 * 1.2); //give a 20% margin on size check
         });
         assertTrue(origSstables.size() < splitFiles.size());
@@ -112,7 +95,7 @@ public class StandaloneSplitterWithCQLTesterTest extends CQLTester
         List<File> splitFiles = Arrays.asList(sstablesDir.tryList());
         splitFiles.stream().forEach(f -> {
             if (f.name().endsWith("Data.db") && !origSstables.contains(f))
-                assertTrue(f.name() + " is way bigger than 1MiB: [" + f.length() + "] bytes",
+                assertTrue(f.name() + " is way bigger than 1MB: [" + f.length() + "] bytes",
                            f.length() <= 1024 * 1024 * 1.2); //give a 20% margin on size check
         });
         assertTrue(origSstables.size() < splitFiles.size());
@@ -124,7 +107,7 @@ public class StandaloneSplitterWithCQLTesterTest extends CQLTester
     public void testNoSnapshotOption() throws Throwable
     {
         ToolResult tool  = ToolRunner.invokeClass(StandaloneSplitter.class, "-s", "1", "--no-snapshot", sstableFileName);
-        assertTrue(origSstables.size() < Arrays.asList(sstablesDir.tryList()).size());
+        assertThat(origSstables.size()).isLessThan(sstablesDir.tryList().length);
         assertTrue(tool.getStdout(), tool.getStdout().isEmpty());
         assertTrue(tool.getCleanedStderr(), tool.getCleanedStderr().isEmpty());
         assertEquals(0, tool.getExitCode());
@@ -138,13 +121,36 @@ public class StandaloneSplitterWithCQLTesterTest extends CQLTester
             executeFormattedQuery(formatQuery("INSERT INTO %s (id, val) VALUES (?, ?)"), "mockData" + i, "mockData" + i);
 
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
-        org.apache.cassandra.Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         Set<SSTableReader> sstables = cfs.getLiveSSTables();
         sstableFileName = sstables.iterator().next().getFilename();
-        assertTrue("Generated sstable must be at least 1MiB", (new File(sstableFileName)).length() > 1024*1024);
+        assertTrue("Generated sstable must be at least 1MB", (new File(sstableFileName)).length() > 1024*1024);
         sstablesDir = new File(sstableFileName).parent();
+        sstablesBackupDir = new File(sstablesDir.absolutePath() + "/testbackup");
+        sstablesBackupDir.tryCreateDirectory();
         origSstables = Arrays.asList(sstablesDir.tryList());
-        TEST_UTIL_ALLOW_TOOL_REINIT_FOR_TEST.setBoolean(true);
+
+        // Back up orig sstables
+        origSstables.stream().forEach(f -> {
+            if (f.isFile())
+                FileUtils.copyWithConfirm(f, new File(sstablesBackupDir.absolutePath() + "/" + f.name()));
+        });
+
+        System.setProperty(Util.ALLOW_TOOL_REINIT_FOR_TEST, "true"); // Necessary for testing
+    }
+
+    private void restoreOrigSstables()
+    {
+        Arrays.stream(Objects.requireNonNull(sstablesDir.tryList())).forEach(f -> {
+            if (f.isFile())
+                f.delete();
+        });
+        Arrays.stream(Objects.requireNonNull(sstablesBackupDir.tryList())).forEach(f -> {
+            if (f.isFile())
+                FileUtils.copyWithConfirm(f, new File(sstablesDir.absolutePath() + '/' + f.name()));
+        });
+
+        SSTableReader.resetTidying();
     }
 }

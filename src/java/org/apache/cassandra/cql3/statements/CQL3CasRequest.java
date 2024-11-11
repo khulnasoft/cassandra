@@ -17,9 +17,11 @@
  */
 package org.apache.cassandra.cql3.statements;
 
+import java.nio.ByteBuffer;
 import java.util.*;
 
-import org.apache.cassandra.db.marshal.TimeUUIDType;
+import com.google.common.collect.*;
+
 import org.apache.cassandra.index.IndexRegistry;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.cql3.*;
@@ -32,10 +34,8 @@ import org.apache.cassandra.db.partitions.Partition;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.service.CASRequest;
-import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.service.paxos.Ballot;
-import org.apache.cassandra.utils.TimeUUID;
-
+import org.apache.cassandra.service.QueryState;
+import org.apache.cassandra.utils.Pair;
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import org.apache.commons.lang3.builder.ToStringStyle;
 
@@ -76,12 +76,12 @@ public class CQL3CasRequest implements CASRequest
         this.updatesStaticRow = updatesStaticRow;
     }
 
-    void addRowUpdate(Clustering<?> clustering, ModificationStatement stmt, QueryOptions options, long timestamp, long nowInSeconds)
+    void addRowUpdate(Clustering<?> clustering, ModificationStatement stmt, QueryOptions options, long timestamp, int nowInSeconds)
     {
         updates.add(new RowUpdate(clustering, stmt, options, timestamp, nowInSeconds));
     }
 
-    void addRangeDeletion(Slice slice, ModificationStatement stmt, QueryOptions options, long timestamp, long nowInSeconds)
+    void addRangeDeletion(Slice slice, ModificationStatement stmt, QueryOptions options, long timestamp, int nowInSeconds)
     {
         rangeDeletions.add(new RangeDeletion(slice, stmt, options, timestamp, nowInSeconds));
     }
@@ -177,7 +177,7 @@ public class CQL3CasRequest implements CASRequest
         return new RegularAndStaticColumns(statics, regulars);
     }
 
-    public SinglePartitionReadCommand readCommand(long nowInSec)
+    public SinglePartitionReadQuery readCommand(int nowInSec)
     {
         assert staticConditions != null || !conditions.isEmpty();
 
@@ -187,16 +187,16 @@ public class CQL3CasRequest implements CASRequest
         // With only a static condition, we still want to make the distinction between a non-existing partition and one
         // that exists (has some live data) but has not static content. So we query the first live row of the partition.
         if (conditions.isEmpty())
-            return SinglePartitionReadCommand.create(metadata,
+            return SinglePartitionReadQuery.create(metadata,
                                                    nowInSec,
                                                    columnFilter,
-                                                   RowFilter.none(),
+                                                   RowFilter.NONE,
                                                    DataLimits.cqlLimits(1),
                                                    key,
                                                    new ClusteringIndexSliceFilter(Slices.ALL, false));
 
         ClusteringIndexNamesFilter filter = new ClusteringIndexNamesFilter(conditions.navigableKeySet(), false);
-        return SinglePartitionReadCommand.create(metadata, nowInSec, key, columnFilter, filter);
+        return SinglePartitionReadQuery.create(metadata, nowInSec, key, columnFilter, filter);
     }
 
     /**
@@ -229,37 +229,19 @@ public class CQL3CasRequest implements CASRequest
         return builder.build();
     }
 
-    public PartitionUpdate makeUpdates(FilteredPartition current, ClientState clientState, Ballot ballot) throws InvalidRequestException
+    @Override
+    public PartitionUpdate makeUpdates(FilteredPartition current, QueryState state) throws InvalidRequestException
     {
-        PartitionUpdate.Builder updateBuilder = new PartitionUpdate.Builder(metadata, key, updatedColumns(), conditions.size());
-        long timeUuidNanos = 0;
+        PartitionUpdate.Builder updateBuilder = PartitionUpdate.builder(metadata, key, updatedColumns(), conditions.size());
         for (RowUpdate upd : updates)
-            timeUuidNanos = upd.applyUpdates(current, updateBuilder, clientState, ballot.msb(), timeUuidNanos);
+            upd.applyUpdates(current, updateBuilder, state);
         for (RangeDeletion upd : rangeDeletions)
-            upd.applyUpdates(current, updateBuilder, clientState);
+            upd.applyUpdates(current, updateBuilder, state);
 
         PartitionUpdate partitionUpdate = updateBuilder.build();
-        IndexRegistry.obtain(metadata).validate(partitionUpdate, clientState);
+        IndexRegistry.obtain(metadata).validate(partitionUpdate);
 
         return partitionUpdate;
-    }
-
-    private static class CASUpdateParameters extends UpdateParameters
-    {
-        final long timeUuidMsb;
-        long timeUuidNanos;
-
-        public CASUpdateParameters(TableMetadata metadata, RegularAndStaticColumns updatedColumns, ClientState state, QueryOptions options, long timestamp, long nowInSec, int ttl, Map<DecoratedKey, Partition> prefetchedRows, long timeUuidMsb, long timeUuidNanos) throws InvalidRequestException
-        {
-            super(metadata, updatedColumns, state, options, timestamp, nowInSec, ttl, prefetchedRows);
-            this.timeUuidMsb = timeUuidMsb;
-            this.timeUuidNanos = timeUuidNanos;
-        }
-
-        public byte[] nextTimeUUIDAsBytes()
-        {
-            return TimeUUID.toBytes(timeUuidMsb, TimeUUIDType.signedBytesToNativeLong(timeUuidNanos++));
-        }
     }
 
     /**
@@ -274,9 +256,9 @@ public class CQL3CasRequest implements CASRequest
         private final ModificationStatement stmt;
         private final QueryOptions options;
         private final long timestamp;
-        private final long nowInSeconds;
+        private final int nowInSeconds;
 
-        private RowUpdate(Clustering<?> clustering, ModificationStatement stmt, QueryOptions options, long timestamp, long nowInSeconds)
+        private RowUpdate(Clustering<?> clustering, ModificationStatement stmt, QueryOptions options, long timestamp, int nowInSeconds)
         {
             this.clustering = clustering;
             this.stmt = stmt;
@@ -285,14 +267,19 @@ public class CQL3CasRequest implements CASRequest
             this.nowInSeconds = nowInSeconds;
         }
 
-        long applyUpdates(FilteredPartition current, PartitionUpdate.Builder updateBuilder, ClientState state, long timeUuidMsb, long timeUuidNanos)
+        void applyUpdates(FilteredPartition current, PartitionUpdate.Builder updateBuilder, QueryState state)
         {
             Map<DecoratedKey, Partition> map = stmt.requiresRead() ? Collections.singletonMap(key, current) : null;
-            CASUpdateParameters params =
-                new CASUpdateParameters(metadata, updateBuilder.columns(), state, options, timestamp, nowInSeconds,
-                                     stmt.getTimeToLive(options), map, timeUuidMsb, timeUuidNanos);
+            UpdateParameters params =
+                new UpdateParameters(metadata,
+                                     updateBuilder.columns(),
+                                     state,
+                                     options,
+                                     timestamp,
+                                     nowInSeconds,
+                                     stmt.getTimeToLive(options),
+                                     map);
             stmt.addUpdateForKey(updateBuilder, clustering, params);
-            return params.timeUuidNanos;
         }
     }
 
@@ -302,9 +289,9 @@ public class CQL3CasRequest implements CASRequest
         private final ModificationStatement stmt;
         private final QueryOptions options;
         private final long timestamp;
-        private final long nowInSeconds;
+        private final int nowInSeconds;
 
-        private RangeDeletion(Slice slice, ModificationStatement stmt, QueryOptions options, long timestamp, long nowInSeconds)
+        private RangeDeletion(Slice slice, ModificationStatement stmt, QueryOptions options, long timestamp, int nowInSeconds)
         {
             this.slice = slice;
             this.stmt = stmt;
@@ -313,7 +300,7 @@ public class CQL3CasRequest implements CASRequest
             this.nowInSeconds = nowInSeconds;
         }
 
-        void applyUpdates(FilteredPartition current, PartitionUpdate.Builder updateBuilder, ClientState state)
+        void applyUpdates(FilteredPartition current, PartitionUpdate.Builder updateBuilder, QueryState state)
         {
             // No slice statements currently require a read, but this maintains consistency with RowUpdate, and future proofs us
             Map<DecoratedKey, Partition> map = stmt.requiresRead() ? Collections.singletonMap(key, current) : null;
@@ -370,7 +357,7 @@ public class CQL3CasRequest implements CASRequest
 
     private static class ColumnsConditions extends RowCondition
     {
-        private final Set<ColumnCondition.Bound> conditions = new HashSet<>();
+        private final Multimap<Pair<ColumnIdentifier, ByteBuffer>, ColumnCondition.Bound> conditions = HashMultimap.create();
 
         private ColumnsConditions(Clustering<?> clustering)
         {
@@ -381,14 +368,15 @@ public class CQL3CasRequest implements CASRequest
         {
             for (ColumnCondition condition : conds)
             {
-                conditions.add(condition.bind(options));
+                ColumnCondition.Bound current = condition.bind(options);
+                conditions.put(Pair.create(condition.column.name, current.getCollectionElementValue()), current);
             }
         }
 
         public boolean appliesTo(FilteredPartition current) throws InvalidRequestException
         {
             Row row = current.getRow(clustering);
-            for (ColumnCondition.Bound condition : conditions)
+            for (ColumnCondition.Bound condition : conditions.values())
             {
                 if (!condition.appliesTo(row))
                     return false;

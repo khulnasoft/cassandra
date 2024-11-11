@@ -20,9 +20,8 @@ package org.apache.cassandra.db.marshal;
 import java.nio.ByteBuffer;
 
 import org.apache.cassandra.cql3.CQL3Type;
-import org.apache.cassandra.cql3.terms.Constants;
-import org.apache.cassandra.cql3.terms.Term;
-import org.apache.cassandra.cql3.functions.ArgumentDeserializer;
+import org.apache.cassandra.cql3.Constants;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.serializers.TypeSerializer;
 import org.apache.cassandra.serializers.BooleanSerializer;
 import org.apache.cassandra.serializers.MarshalException;
@@ -30,11 +29,14 @@ import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 import org.apache.cassandra.utils.bytecomparable.ByteSource;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class BooleanType extends AbstractType<Boolean>
 {
+    private static final Logger logger = LoggerFactory.getLogger(BooleanType.class);
+
     public static final BooleanType instance = new BooleanType();
-    private static final ArgumentDeserializer ARGUMENT_DESERIALIZER = new DefaultArgumentDeserializer(instance);
-    private static final ByteBuffer MASKED_VALUE = instance.decompose(false);
 
     BooleanType() {super(ComparisonType.CUSTOM);} // singleton
 
@@ -44,7 +46,6 @@ public class BooleanType extends AbstractType<Boolean>
         return true;
     }
 
-    @Override
     public boolean isEmptyValueMeaningless()
     {
         return true;
@@ -78,7 +79,7 @@ public class BooleanType extends AbstractType<Boolean>
         if (comparableBytes == null)
             return accessor.empty();
         int b = comparableBytes.next();
-        return accessor.valueOf(b == 1);
+        return b == 1 ? accessor.valueOf(true) : accessor.valueOf(false);
     }
 
     public ByteBuffer fromString(String source) throws MarshalException
@@ -122,20 +123,8 @@ public class BooleanType extends AbstractType<Boolean>
     }
 
     @Override
-    public ArgumentDeserializer getArgumentDeserializer()
-    {
-        return ARGUMENT_DESERIALIZER;
-    }
-
-    @Override
     public int valueLengthIfFixed()
     {
         return 1;
-    }
-
-    @Override
-    public ByteBuffer getMaskedValue()
-    {
-        return MASKED_VALUE;
     }
 }

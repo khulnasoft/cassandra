@@ -19,41 +19,31 @@ package org.apache.cassandra.db.marshal;
 
 import java.nio.ByteBuffer;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 import java.util.Iterator;
-import java.util.Objects;
-import java.util.function.Consumer;
+
+import com.google.common.collect.ImmutableList;
 
 import org.apache.cassandra.cql3.CQL3Type;
 import org.apache.cassandra.cql3.ColumnSpecification;
-import org.apache.cassandra.cql3.terms.Lists;
-import org.apache.cassandra.cql3.terms.Maps;
-import org.apache.cassandra.cql3.terms.Sets;
-import org.apache.cassandra.db.TypeSizes;
+import org.apache.cassandra.cql3.Lists;
+import org.apache.cassandra.cql3.Maps;
+import org.apache.cassandra.cql3.Sets;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.CellPath;
-import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.serializers.CollectionSerializer;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.bytecomparable.ByteComparable;
-import org.apache.cassandra.utils.bytecomparable.ByteSource;
-import org.apache.cassandra.utils.bytecomparable.ByteSourceInverse;
-
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 
 /**
  * The abstract validator that is the base for maps, sets and lists (both frozen and non-frozen).
- *
- * Please note that this comparator shouldn't be used "manually" (as a custom
- * type for instance).
+ * <p>
+ * Please note that this comparator shouldn't be used "manually" (as a custom type for instance).
  */
-public abstract class CollectionType<T> extends MultiElementType<T>
+public abstract class CollectionType<T> extends MultiCellCapableType<T>
 {
     public static CellPath.Serializer cellPathSerializer = new CollectionPathSerializer();
 
@@ -82,19 +72,13 @@ public abstract class CollectionType<T> extends MultiElementType<T>
         };
 
         public abstract ColumnSpecification makeCollectionReceiver(ColumnSpecification collection, boolean isKey);
-
-        @Override
-        public String toString()
-        {
-            return toLowerCaseLocalized(super.toString());
-        }
     }
 
     public final Kind kind;
 
-    protected CollectionType(ComparisonType comparisonType, Kind kind)
+    protected CollectionType(Kind kind, ImmutableList<AbstractType<?>> subTypes, boolean isMultiCell)
     {
-        super(comparisonType);
+        super(subTypes, isMultiCell);
         this.kind = kind;
     }
 
@@ -109,12 +93,6 @@ public abstract class CollectionType<T> extends MultiElementType<T>
     public ColumnSpecification makeCollectionReceiver(ColumnSpecification collection, boolean isKey)
     {
         return kind.makeCollectionReceiver(collection, isKey);
-    }
-
-    @Override
-    public ByteBuffer decompose(T value)
-    {
-        return super.decompose(value);
     }
 
     public <V> String getString(V value, ValueAccessor<V> accessor)
@@ -140,14 +118,6 @@ public abstract class CollectionType<T> extends MultiElementType<T>
     }
 
     @Override
-    public <V> void validate(V value, ValueAccessor<V> accessor) throws MarshalException
-    {
-        if (accessor.isEmpty(value))
-            throw new MarshalException("Not enough bytes to read a " + toLowerCaseLocalized(kind.name()));
-        super.validate(value, accessor);
-    }
-
-    @Override
     public <V> void validateCellValue(V cellValue, ValueAccessor<V> accessor) throws MarshalException
     {
         if (isMultiCell())
@@ -165,78 +135,50 @@ public abstract class CollectionType<T> extends MultiElementType<T>
         return kind == Kind.MAP;
     }
 
-    @Override
-    public boolean isFreezable()
+    // Overrided by maps
+    protected int collectionSize(List<ByteBuffer> values)
     {
-        return true;
+        return values.size();
     }
 
-    public ByteBuffer serializeForNativeProtocol(Iterator<Cell<?>> cells)
+    public ByteBuffer serializeForNativeProtocol(Iterator<Cell<?>> cells, ProtocolVersion version)
     {
         assert isMultiCell();
         List<ByteBuffer> values = serializedValues(cells);
-        return getSerializer().pack(values);
+        int size = collectionSize(values);
+        return CollectionSerializer.pack(values, ByteBufferAccessor.instance, size, version);
     }
 
     @Override
-    public boolean isCompatibleWith(AbstractType<?> previous)
+    protected boolean isCompatibleWhenFrozenWith(AbstractType<?> previous)
     {
-        if (this == previous)
-            return true;
-
-        if (!getClass().equals(previous.getClass()))
-            return false;
-
-        CollectionType<?> tprev = (CollectionType<?>) previous;
-        if (this.isMultiCell() != tprev.isMultiCell())
-            return false;
-
-        // subclasses should handle compatibility checks for frozen collections
-        if (!this.isMultiCell())
-            return isCompatibleWithFrozen(tprev);
-
-        if (!this.nameComparator().isCompatibleWith(tprev.nameComparator()))
-            return false;
-
-        // the value comparator is only used for Cell values, so sorting doesn't matter
-        return this.valueComparator().isSerializationCompatibleWith(tprev.valueComparator());
+        // When frozen, the full collection is a blob, so everything must be sorted-compatible for the whole blob to
+        // be sorted-compatible. Note that for lists and sets, the first condition will always be true (as their
+        // nameComparator() is hard-coded), but this method is not so performance sensitive that it's worth bothering.
+        CollectionType<?> prev = (CollectionType<?>)previous;
+        return nameComparator().isCompatibleWith(prev.nameComparator())
+               && valueComparator().isCompatibleWith(prev.valueComparator());
     }
 
     @Override
-    public boolean isValueCompatibleWithInternal(AbstractType<?> previous)
+    protected boolean isCompatibleWhenNonFrozenWith(AbstractType<?> previous)
     {
-        // for multi-cell collections, compatibility and value-compatibility are the same
-        if (this.isMultiCell())
-            return isCompatibleWith(previous);
-
-        if (this == previous)
-            return true;
-
-        if (!getClass().equals(previous.getClass()))
-            return false;
-
-        CollectionType<?> tprev = (CollectionType<?>) previous;
-        if (this.isMultiCell() != tprev.isMultiCell())
-            return false;
-
-        // subclasses should handle compatibility checks for frozen collections
-        return isValueCompatibleWithFrozen(tprev);
+        // When multi-cell, the name comparator is the one used to compare cell-path so must be sorted-compatible
+        // (same remarks than in isCompatibleWhenFrozenWith for lists and sets), but the value comparator is never used
+        // for sorting so value-compatibility is enough.
+        CollectionType<?> prev = (CollectionType<?>)previous;
+        return nameComparator().isCompatibleWith(prev.nameComparator())
+               && valueComparator().isValueCompatibleWith(prev.valueComparator());
     }
 
     @Override
-    public boolean isSerializationCompatibleWith(AbstractType<?> previous)
+    protected boolean isValueCompatibleWhenFrozenWith(AbstractType<?> previous)
     {
-        if (!isValueCompatibleWith(previous))
-            return false;
-
-        return valueComparator().isSerializationCompatibleWith(((CollectionType<?>)previous).valueComparator());
+        // When frozen, the full collection is a blob, so value-compatibility is all we care for everything.
+        CollectionType<?> prev = (CollectionType<?>)previous;
+        return nameComparator().isValueCompatibleWith(prev.nameComparator())
+               && valueComparator().isValueCompatibleWith(prev.valueComparator());
     }
-
-    /** A version of isCompatibleWith() to deal with non-multicell (frozen) collections */
-    protected abstract boolean isCompatibleWithFrozen(CollectionType<?> previous);
-
-    /** A version of isValueCompatibleWith() to deal with non-multicell (frozen) collections */
-    protected abstract boolean isValueCompatibleWithFrozen(CollectionType<?> previous);
 
     public CQL3Type asCQL3Type()
     {
@@ -244,157 +186,9 @@ public abstract class CollectionType<T> extends MultiElementType<T>
     }
 
     @Override
-    public boolean equals(Object o)
+    protected boolean equalsNoFrozenNoSubtypes(AbstractType<?> that)
     {
-        if (this == o)
-            return true;
-
-        if (!(o instanceof CollectionType))
-            return false;
-
-        CollectionType<?> other = (CollectionType<?>) o;
-
-        if (kind != other.kind)
-            return false;
-
-        if (isMultiCell() != other.isMultiCell())
-            return false;
-
-        return nameComparator().equals(other.nameComparator()) && valueComparator().equals(other.valueComparator());
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(kind, isMultiCell(), nameComparator(), valueComparator());
-    }
-
-    @Override
-    public String toString()
-    {
-        return this.toString(false);
-    }
-
-    static <VL, VR> int compareListOrSet(AbstractType<?> elementsComparator, VL left, ValueAccessor<VL> accessorL, VR right, ValueAccessor<VR> accessorR)
-    {
-        // Note that this is only used if the collection is frozen
-        if (accessorL.isEmpty(left) || accessorR.isEmpty(right))
-            return Boolean.compare(accessorR.isEmpty(right), accessorL.isEmpty(left));
-
-        int sizeL = CollectionSerializer.readCollectionSize(left, accessorL);
-        int offsetL = CollectionSerializer.sizeOfCollectionSize();
-        int sizeR = CollectionSerializer.readCollectionSize(right, accessorR);
-        int offsetR = TypeSizes.INT_SIZE;
-
-        for (int i = 0; i < Math.min(sizeL, sizeR); i++)
-        {
-            VL v1 = CollectionSerializer.readValue(left, accessorL, offsetL);
-            offsetL += CollectionSerializer.sizeOfValue(v1, accessorL);
-            VR v2 = CollectionSerializer.readValue(right, accessorR, offsetR);
-            offsetR += CollectionSerializer.sizeOfValue(v2, accessorR);
-            int cmp = elementsComparator.compare(v1, accessorL, v2, accessorR);
-            if (cmp != 0)
-                return cmp;
-        }
-
-        return Integer.compare(sizeL, sizeR);
-    }
-
-    <V> ByteSource asComparableBytesListOrSet(AbstractType<?> elementsComparator,
-                                              ValueAccessor<V> accessor,
-                                              V data,
-                                              ByteComparable.Version version)
-    {
-        if (accessor.isEmpty(data))
-            return null;
-
-        int offset = 0;
-        int size = CollectionSerializer.readCollectionSize(data, accessor);
-        offset += CollectionSerializer.sizeOfCollectionSize();
-        ByteSource[] srcs = new ByteSource[size];
-        for (int i = 0; i < size; ++i)
-        {
-            V v = CollectionSerializer.readValue(data, accessor, offset);
-            offset += CollectionSerializer.sizeOfValue(v, accessor);
-            srcs[i] = elementsComparator.asComparableBytes(accessor, v, version);
-        }
-        return ByteSource.withTerminatorMaybeLegacy(version, 0x00, srcs);
-    }
-
-    <V> V fromComparableBytesListOrSet(ValueAccessor<V> accessor,
-                                       ByteSource.Peekable comparableBytes,
-                                       ByteComparable.Version version,
-                                       AbstractType<?> elementType)
-    {
-        if (comparableBytes == null)
-            return accessor.empty();
-        assert version != ByteComparable.Version.LEGACY; // legacy translation is not reversible
-
-        List<V> buffers = new ArrayList<>();
-        int separator = comparableBytes.next();
-        while (separator != ByteSource.TERMINATOR)
-        {
-            if (!ByteSourceInverse.nextComponentNull(separator))
-                buffers.add(elementType.fromComparableBytes(accessor, comparableBytes, version));
-            else
-                buffers.add(null);
-            separator = comparableBytes.next();
-        }
-        return getSerializer().pack(buffers, accessor);
-    }
-
-    @Override
-    public ByteBuffer pack(List<ByteBuffer> elements)
-    {
-        return getSerializer().pack(elements);
-    }
-
-    @Override
-    public List<ByteBuffer> unpack(ByteBuffer input)
-    {
-        return getSerializer().unpack(input);
-    }
-
-    /**
-     * Returns the size of the collections from the number of serialized elements.
-     *
-     * @param elements the serialized elements
-     * @return the size of the collections from the number of serialized elements.
-     */
-    public int collectionSize(Collection<ByteBuffer> elements)
-    {
-        return getSerializer().collectionSize(elements);
-    }
-
-    /**
-     * Checks if this type of collection support bind markers
-     * <p>
-     * At this point Collections do not support bind markers. The two reasons for that are:
-     * 1) it's not excessively useful and 2) we wouldn't have a good column name to return in the ColumnSpecification for those markers (not a
-     * blocker per-se but we don't bother due to 1).
-     * @return {@code false}
-     */
-    @Override
-    public boolean supportsElementBindMarkers()
-    {
-        return false;
-    }
-
-    public static String setOrListToJsonString(ByteBuffer buffer, AbstractType<?> elementsType, ProtocolVersion protocolVersion)
-    {
-        ByteBuffer value = buffer.duplicate();
-        StringBuilder sb = new StringBuilder().append('[');
-        int size = CollectionSerializer.readCollectionSize(value, ByteBufferAccessor.instance);
-        int offset = CollectionSerializer.sizeOfCollectionSize();
-        for (int i = 0; i < size; i++)
-        {
-            if (i > 0)
-                sb.append(", ");
-            ByteBuffer element = CollectionSerializer.readValue(value, ByteBufferAccessor.instance, offset);
-            offset += CollectionSerializer.sizeOfValue(element, ByteBufferAccessor.instance);
-            sb.append(elementsType.toJSONString(element, protocolVersion));
-        }
-        return sb.append(']').toString();
+        return kind == ((CollectionType<?>)that).kind;
     }
 
     private static class CollectionPathSerializer implements CellPath.Serializer
@@ -419,31 +213,4 @@ public abstract class CollectionType<T> extends MultiElementType<T>
             ByteBufferUtil.skipWithVIntLength(in);
         }
     }
-
-    public int size(ByteBuffer buffer)
-    {
-        return CollectionSerializer.readCollectionSize(buffer.duplicate(), ByteBufferAccessor.instance);
-    }
-
-    public abstract void forEach(ByteBuffer input, Consumer<ByteBuffer> action);
-
-    public final int compareCQL(ComplexColumnData columnData, List<ByteBuffer> elements)
-    {
-        Iterator<Cell<?>> cellIterator = columnData.iterator();
-        Iterator<ByteBuffer> elementIter = elements.iterator();
-        while(cellIterator.hasNext())
-        {
-            if (!elementIter.hasNext())
-                return 1;
-
-            int comparison = compareNextCell(cellIterator, elementIter);
-            if (comparison != 0)
-                return comparison;
-        }
-        return elementIter.hasNext() ? -1 : 0;
-    }
-
-    protected abstract int compareNextCell(Iterator<Cell<?>> cellIterator, Iterator<ByteBuffer> elementIter);
-
-    public abstract boolean contains(ComplexColumnData columnData, ByteBuffer value);
 }

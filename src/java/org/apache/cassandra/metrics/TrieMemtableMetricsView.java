@@ -18,24 +18,21 @@
 
 package org.apache.cassandra.metrics;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
 import com.codahale.metrics.Counter;
 
-import static com.codahale.metrics.MetricRegistry.name;
 import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
-import static org.apache.cassandra.metrics.CassandraMetricsRegistry.resolveShortMetricName;
-import static org.apache.cassandra.metrics.DefaultNameFactory.GROUP_NAME;
 
-/**
- * Metrics for TrieMemtable, the metrics are shared across all memtables in a single column family and
- * are updated by all memtables in the column family.
- */
 public class TrieMemtableMetricsView
 {
-    public static final String TYPE_NAME = "TrieMemtable";
     private static final String UNCONTENDED_PUTS = "Uncontended memtable puts";
     private static final String CONTENDED_PUTS = "Contended memtable puts";
     private static final String CONTENTION_TIME = "Contention time";
     private static final String LAST_FLUSH_SHARD_SIZES = "Shard sizes during last flush";
+
+    private static final Map<String, TrieMemtableMetricsView> perTableMetrics = new ConcurrentHashMap<>();
 
     // the number of memtable puts that did not need to wait on write lock
     public final Counter uncontendedPuts;
@@ -49,9 +46,20 @@ public class TrieMemtableMetricsView
     // shard sizes distribution
     public final MinMaxAvgMetric lastFlushShardDataSizes;
 
-    public TrieMemtableMetricsView(String keyspace, String table)
+    private final TrieMemtableMetricNameFactory factory;
+    private final String keyspace;
+    private final String table;
+
+    public static TrieMemtableMetricsView getOrCreate(String keyspace, String table)
     {
-        MetricNameFactory factory = new TrieMemtableMetricNameFactory(keyspace, table);
+        return perTableMetrics.computeIfAbsent(getKey(keyspace, table), k -> new TrieMemtableMetricsView(keyspace, table));
+    }
+
+    private TrieMemtableMetricsView(String keyspace, String table)
+    {
+        this.keyspace = keyspace;
+        this.table = table;
+        factory = new TrieMemtableMetricNameFactory(keyspace, table);
         
         uncontendedPuts = Metrics.counter(factory.createMetricName(UNCONTENDED_PUTS));
         contendedPuts = Metrics.counter(factory.createMetricName(CONTENDED_PUTS));
@@ -59,15 +67,17 @@ public class TrieMemtableMetricsView
         lastFlushShardDataSizes = new MinMaxAvgMetric(factory, LAST_FLUSH_SHARD_SIZES);
     }
 
-    public static void release(String keyspace, String table)
+    public void release()
     {
-        TrieMemtableMetricNameFactory factory = new TrieMemtableMetricNameFactory(keyspace, table);
-        Metrics.removeIfMatch(fullName -> resolveShortMetricName(fullName, GROUP_NAME, TYPE_NAME, factory.scope()),
-                              factory::createMetricName,
-                              m -> {});
+        perTableMetrics.remove(getKey(keyspace, table));
+
+        Metrics.remove(factory.createMetricName(UNCONTENDED_PUTS));
+        Metrics.remove(factory.createMetricName(CONTENDED_PUTS));
+        contentionTime.release();
+        lastFlushShardDataSizes.release();
     }
 
-    private static class TrieMemtableMetricNameFactory implements MetricNameFactory
+    static class TrieMemtableMetricNameFactory implements MetricNameFactory
     {
         private final String keyspace;
         private final String table;
@@ -78,20 +88,24 @@ public class TrieMemtableMetricsView
             this.table = table;
         }
 
-        public String scope()
-        {
-            return name(keyspace, table);
-        }
-
         public CassandraMetricsRegistry.MetricName createMetricName(String metricName)
         {
-            assert metricName.indexOf('.') == -1 : "metricName should not contain '.'; got " + metricName;
-            return new CassandraMetricsRegistry.MetricName(GROUP_NAME, TYPE_NAME, metricName, scope(),
-                                                           GROUP_NAME + ':' +
-                                                           "type=" + TYPE_NAME +
-                                                           ",keyspace=" + keyspace +
-                                                           ",scope=" + table +
-                                                           ",name=" + metricName);
+            String groupName = TableMetrics.class.getPackage().getName();
+            String type = "TrieMemtable";
+
+            StringBuilder mbeanName = new StringBuilder();
+            mbeanName.append(groupName).append(":");
+            mbeanName.append("type=").append(type);
+            mbeanName.append(",keyspace=").append(keyspace);
+            mbeanName.append(",scope=").append(table);
+            mbeanName.append(",name=").append(metricName);
+
+            return new CassandraMetricsRegistry.MetricName(groupName, type, metricName, keyspace + "." + table, mbeanName.toString());
         }
+    }
+
+    private static String getKey(String keyspace, String table)
+    {
+        return keyspace + "." + table;
     }
 }

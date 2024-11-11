@@ -50,7 +50,7 @@ public abstract class AbstractCell<V> extends Cell<V>
         return !isTombstone() && column.isCounterColumn();
     }
 
-    public boolean isLive(long nowInSec)
+    public boolean isLive(int nowInSec)
     {
         return localDeletionTime() == NO_DELETION_TIME || (ttl() != NO_TTL && nowInSec < localDeletionTime());
     }
@@ -75,7 +75,7 @@ public abstract class AbstractCell<V> extends Cell<V>
         return marked == value ? this : new BufferCell(column, timestamp(), ttl(), localDeletionTime(), marked, path());
     }
 
-    public Cell<?> purge(DeletionPurger purger, long nowInSec)
+    public Cell<?> purge(DeletionPurger purger, int nowInSec)
     {
         if (!isLive(nowInSec))
         {
@@ -96,12 +96,6 @@ public abstract class AbstractCell<V> extends Cell<V>
             }
         }
         return this;
-    }
-
-
-    public Cell<?> purgeDataOlderThan(long timestamp)
-    {
-        return this.timestamp() < timestamp ? null : this;
     }
 
     @Override
@@ -147,8 +141,6 @@ public abstract class AbstractCell<V> extends Cell<V>
             throw new MarshalException("A TTL should not be negative");
         if (localDeletionTime() < 0)
             throw new MarshalException("A local deletion time should not be negative");
-        if (localDeletionTime() == INVALID_DELETION_TIME)
-            throw new MarshalException("A local deletion time should not be a legacy overflowed value");
         if (isExpiring() && localDeletionTime() == NO_DELETION_TIME)
             throw new MarshalException("Shoud not have a TTL without an associated local deletion time");
 
@@ -161,12 +153,17 @@ public abstract class AbstractCell<V> extends Cell<V>
 
     public boolean hasInvalidDeletions()
     {
-        if (ttl() < 0 || localDeletionTime() == INVALID_DELETION_TIME || localDeletionTime() < 0 || (isExpiring() && localDeletionTime() == NO_DELETION_TIME))
+        if (ttl() < 0 || localDeletionTime() < 0 || (isExpiring() && localDeletionTime() == NO_DELETION_TIME))
             return true;
         return false;
     }
 
     public long maxTimestamp()
+    {
+        return timestamp();
+    }
+
+    public long minTimestamp()
     {
         return timestamp();
     }
@@ -209,11 +206,11 @@ public abstract class AbstractCell<V> extends Cell<V>
         AbstractType<?> type = column().type;
         if (type instanceof CollectionType && type.isMultiCell())
         {
-            CollectionType<?> ct = (CollectionType<?>) type;
+            CollectionType ct = (CollectionType)type;
             return String.format("[%s[%s]=%s %s]",
                                  column().name,
                                  ct.nameComparator().getString(path().get(0)),
-                                 isTombstone() ? "<tombstone>" : ct.valueComparator().getString(value(), accessor()),
+                                 ct.valueComparator().getString(value(), accessor()),
                                  livenessInfoString());
         }
         if (isTombstone())

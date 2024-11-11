@@ -25,28 +25,23 @@ import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.tcm.ClusterMetadata;
 
 /**
  * This is the first message that gets sent out as a start of the Gossip protocol in a
  * round.
  */
-
 public class GossipDigestSyn
 {
     public static final IVersionedSerializer<GossipDigestSyn> serializer = new GossipDigestSynSerializer();
 
     final String clusterId;
     final String partioner;
-    final int metadataId;
     final List<GossipDigest> gDigests;
 
-    public GossipDigestSyn(String clusterId, String partioner, int metadataId, List<GossipDigest> gDigests)
+    public GossipDigestSyn(String clusterId, String partioner, List<GossipDigest> gDigests)
     {
         this.clusterId = clusterId;
         this.partioner = partioner;
-        this.metadataId = metadataId;
         this.gDigests = gDigests;
     }
 
@@ -89,8 +84,6 @@ class GossipDigestSynSerializer implements IVersionedSerializer<GossipDigestSyn>
     {
         out.writeUTF(gDigestSynMessage.clusterId);
         out.writeUTF(gDigestSynMessage.partioner);
-        if (version >= MessagingService.VERSION_51)
-            out.writeUnsignedVInt32(gDigestSynMessage.metadataId);
         GossipDigestSerializationHelper.serialize(gDigestSynMessage.gDigests, out, version);
     }
 
@@ -99,19 +92,14 @@ class GossipDigestSynSerializer implements IVersionedSerializer<GossipDigestSyn>
         String clusterId = in.readUTF();
         String partioner = null;
         partioner = in.readUTF();
-        int metadataId = version >= MessagingService.VERSION_51
-                         ? in.readUnsignedVInt32()
-                         : ClusterMetadata.EMPTY_METADATA_IDENTIFIER;
         List<GossipDigest> gDigests = GossipDigestSerializationHelper.deserialize(in, version);
-        return new GossipDigestSyn(clusterId, partioner, metadataId, gDigests);
+        return new GossipDigestSyn(clusterId, partioner, gDigests);
     }
 
     public long serializedSize(GossipDigestSyn syn, int version)
     {
         long size = TypeSizes.sizeof(syn.clusterId);
         size += TypeSizes.sizeof(syn.partioner);
-        if (version >= MessagingService.VERSION_51)
-            size += TypeSizes.sizeofUnsignedVInt(syn.metadataId);
         size += GossipDigestSerializationHelper.serializedSize(syn.gDigests, version);
         return size;
     }

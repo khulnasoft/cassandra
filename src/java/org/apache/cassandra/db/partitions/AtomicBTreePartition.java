@@ -19,10 +19,9 @@ package org.apache.cassandra.db.partitions;
 
 import java.nio.ByteBuffer;
 import java.util.Iterator;
+import java.util.NavigableSet;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
-
-import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.index.transactions.UpdateTransaction;
 import org.apache.cassandra.schema.TableMetadata;
@@ -35,9 +34,8 @@ import org.apache.cassandra.utils.ObjectSizes;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import org.apache.cassandra.utils.memory.Cloner;
 import org.apache.cassandra.utils.memory.MemtableAllocator;
-import org.github.jamm.Unmetered;
 
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * A thread-safe and atomic Partition implementation.
@@ -71,7 +69,7 @@ public final class AtomicBTreePartition extends AbstractBTreePartition
 
     /**
      * (clock + allocation) granularity are combined to give us an acceptable (waste) allocation rate that is defined by
-     * the passage of real time of ALLOCATION_GRANULARITY_BYTES/CLOCK_GRANULARITY, or in this case 7.63KiB/ms, or 7.45Mb/s
+     * the passage of real time of ALLOCATION_GRANULARITY_BYTES/CLOCK_GRANULARITY, or in this case 7.63Kb/ms, or 7.45Mb/s
      *
      * in wasteTracker we maintain within EXCESS_WASTE_OFFSET before the current time; whenever we waste bytes
      * we increment the current value if it is within this window, and set it to the min of the window plus our waste
@@ -79,12 +77,9 @@ public final class AtomicBTreePartition extends AbstractBTreePartition
      */
     private volatile int wasteTracker = TRACKER_NEVER_WASTED;
 
-    @Unmetered
     private final MemtableAllocator allocator;
-
     private volatile BTreePartitionData ref;
 
-    @Unmetered
     private final TableMetadataRef metadata;
 
     public AtomicBTreePartition(TableMetadataRef metadata, DecoratedKey partitionKey, MemtableAllocator allocator)
@@ -115,23 +110,14 @@ public final class AtomicBTreePartition extends AbstractBTreePartition
      * Adds a given update to this in-memtable partition.
      *
      * @return an array containing first the difference in size seen after merging the updates, and second the minimum
-     * time delta between updates.
+     * time detla between updates.
      */
-    public BTreePartitionUpdater addAll(final PartitionUpdate update, Cloner cloner, OpOrder.Group writeOp, UpdateTransaction indexer)
+    public BTreePartitionUpdater addAll(final BTreePartitionUpdate update,
+                                        Cloner cloner,
+                                        OpOrder.Group writeOp,
+                                        UpdateTransaction indexer)
     {
         return new Updater(allocator, cloner, writeOp, indexer).addAll(update);
-    }
-
-    @VisibleForTesting
-    public void unsafeSetHolder(BTreePartitionData holder)
-    {
-        ref = holder;
-    }
-
-    @VisibleForTesting
-    public BTreePartitionData unsafeGetHolder()
-    {
-        return ref;
     }
 
     class Updater extends BTreePartitionUpdater
@@ -143,7 +129,7 @@ public final class AtomicBTreePartition extends AbstractBTreePartition
             super(allocator, cloner, writeOp, indexer);
         }
 
-        Updater addAll(final PartitionUpdate update)
+        Updater addAll(final BTreePartitionUpdate update)
         {
             try
             {
@@ -176,13 +162,18 @@ public final class AtomicBTreePartition extends AbstractBTreePartition
             }
         }
 
-        private boolean tryUpdateData(PartitionUpdate update)
+        private boolean tryUpdateData(BTreePartitionUpdate update)
         {
             current = ref;
             this.dataSize = 0;
             this.heapSize = 0;
             BTreePartitionData result = makeMergedPartition(current, update);
             return refUpdater.compareAndSet(AtomicBTreePartition.this, current, result);
+        }
+
+        public boolean abortEarly()
+        {
+            return ref != current;
         }
     }
 
@@ -217,15 +208,33 @@ public final class AtomicBTreePartition extends AbstractBTreePartition
     }
 
     @Override
+    public UnfilteredRowIterator unfilteredIterator(ColumnFilter selection, Slices slices, boolean reversed)
+    {
+        return allocator.ensureOnHeap().applyToPartition(super.unfilteredIterator(selection, slices, reversed));
+    }
+
+    @Override
+    public UnfilteredRowIterator unfilteredIterator(ColumnFilter selection, NavigableSet<Clustering<?>> clusteringsInQueryOrder, boolean reversed)
+    {
+        return allocator.ensureOnHeap().applyToPartition(super.unfilteredIterator(selection, clusteringsInQueryOrder, reversed));
+    }
+
+    @Override
+    public UnfilteredRowIterator unfilteredIterator()
+    {
+        return allocator.ensureOnHeap().applyToPartition(super.unfilteredIterator());
+    }
+
+    @Override
     public UnfilteredRowIterator unfilteredIterator(BTreePartitionData current, ColumnFilter selection, Slices slices, boolean reversed)
     {
         return allocator.ensureOnHeap().applyToPartition(super.unfilteredIterator(current, selection, slices, reversed));
     }
 
     @Override
-    public Iterator<Row> iterator()
+    public Iterator<Row> rowIterator()
     {
-        return allocator.ensureOnHeap().applyToPartition(super.iterator());
+        return allocator.ensureOnHeap().applyToPartition(super.rowIterator());
     }
 
     private boolean shouldLock(OpOrder.Group writeOp)
@@ -278,7 +287,7 @@ public final class AtomicBTreePartition extends AbstractBTreePartition
             while (TRACKER_PESSIMISTIC_LOCKING != (oldTrackerValue = wasteTracker))
             {
                 // Note this time value has an arbitrary offset, but is a constant rate 32 bit counter (that may wrap)
-                int time = (int) (nanoTime() >>> CLOCK_SHIFT);
+                int time = (int) (System.nanoTime() >>> CLOCK_SHIFT);
                 int delta = oldTrackerValue - time;
                 if (oldTrackerValue == TRACKER_NEVER_WASTED || delta >= 0 || delta < -EXCESS_WASTE_OFFSET)
                     delta = -EXCESS_WASTE_OFFSET;
@@ -300,5 +309,17 @@ public final class AtomicBTreePartition extends AbstractBTreePartition
         if (wasteTracker == TRACKER_NEVER_WASTED || wasteTracker == TRACKER_PESSIMISTIC_LOCKING)
             return wasteTracker + 1;
         return wasteTracker;
+    }
+
+    @VisibleForTesting
+    public void unsafeSetHolder(BTreePartitionData holder)
+    {
+        ref = holder;
+    }
+
+    @VisibleForTesting
+    public BTreePartitionData unsafeGetHolder()
+    {
+        return ref;
     }
 }

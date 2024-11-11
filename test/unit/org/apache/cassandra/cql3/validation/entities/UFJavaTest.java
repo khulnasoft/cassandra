@@ -29,11 +29,11 @@ import java.util.TreeSet;
 import org.junit.Assert;
 import org.junit.Test;
 
-import com.datastax.driver.core.DataType;
-import com.datastax.driver.core.Row;
-import com.datastax.driver.core.TupleType;
-import com.datastax.driver.core.TupleValue;
-import com.datastax.driver.core.UDTValue;
+import com.khulnasoft.driver.core.DataType;
+import com.khulnasoft.driver.core.Row;
+import com.khulnasoft.driver.core.TupleType;
+import com.khulnasoft.driver.core.TupleValue;
+import com.khulnasoft.driver.core.UDTValue;
 import org.apache.cassandra.cql3.CQL3Type;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.ColumnIdentifier;
@@ -119,12 +119,12 @@ public class UFJavaTest extends CQLTester
     @Test
     public void testJavaFunctionInvalidReturn() throws Throwable
     {
-        assertInvalidMessage("cannot convert from boolean to double",
+        assertInvalidMessage("cannot convert from long to Double",
                              "CREATE OR REPLACE FUNCTION " + KEYSPACE + ".jfir(val double) " +
                              "RETURNS NULL ON NULL INPUT " +
                              "RETURNS double " +
                              "LANGUAGE JAVA\n" +
-                             "AS 'return true;';");
+                             "AS 'return 1L;';");
     }
 
     @Test
@@ -482,7 +482,7 @@ public class UFJavaTest extends CQLTester
             {
                 List<Row> rowsNet = executeNet(version, "SELECT f_use1(udt) FROM %s WHERE key = 1").all();
                 Assert.assertEquals(1, rowsNet.size());
-                com.datastax.driver.core.UDTValue udtVal = rowsNet.get(0).getUDTValue(0);
+                com.khulnasoft.driver.core.UDTValue udtVal = rowsNet.get(0).getUDTValue(0);
                 Assert.assertEquals("one", udtVal.getString("txt"));
                 Assert.assertEquals(1, udtVal.getInt("i"));
             }
@@ -723,15 +723,15 @@ public class UFJavaTest extends CQLTester
                                   "(key int primary key, lst list<frozen<%s>>, st set<frozen<%s>>, mp map<int, frozen<%s>>)",
                                   type, type, type));
 
-        // The mix of the package names org.apache.cassandra.cql3.functions.types and com.datastax.driver.core is
-        // intentional to test the replacement of com.datastax.driver.core with org.apache.cassandra.cql3.functions.types.
+        // The mix of the package names org.apache.cassandra.cql3.functions.types and com.khulnasoft.driver.core is
+        // intentional to test the replacement of com.khulnasoft.driver.core with org.apache.cassandra.cql3.functions.types.
         String fName1 = createFunction(KEYSPACE, "list<frozen<" + type + ">>",
                                        "CREATE FUNCTION %s( lst list<frozen<" + type + ">> ) " +
                                        "RETURNS NULL ON NULL INPUT " +
                                        "RETURNS text " +
                                        "LANGUAGE java\n" +
                                        "AS $$" +
-                                       "     org.apache.cassandra.cql3.functions.types.UDTValue udtVal = (com.datastax.driver.core.UDTValue)lst.get(1);" +
+                                       "     org.apache.cassandra.cql3.functions.types.UDTValue udtVal = (com.khulnasoft.driver.core.UDTValue)lst.get(1);" +
                                        "     return udtVal.getString(\"txt\");$$;");
         String fName2 = createFunction(KEYSPACE, "set<frozen<" + type + ">>",
                                        "CREATE FUNCTION %s( st set<frozen<" + type + ">> ) " +
@@ -739,7 +739,7 @@ public class UFJavaTest extends CQLTester
                                        "RETURNS text " +
                                        "LANGUAGE java\n" +
                                        "AS $$" +
-                                       "     com.datastax.driver.core.UDTValue udtVal = (org.apache.cassandra.cql3.functions.types.UDTValue)st.iterator().next();" +
+                                       "     com.khulnasoft.driver.core.UDTValue udtVal = (org.apache.cassandra.cql3.functions.types.UDTValue)st.iterator().next();" +
                                        "     return udtVal.getString(\"txt\");$$;");
         String fName3 = createFunction(KEYSPACE, "map<int, frozen<" + type + ">>",
                                        "CREATE FUNCTION %s( mp map<int, frozen<" + type + ">> ) " +
@@ -747,7 +747,7 @@ public class UFJavaTest extends CQLTester
                                        "RETURNS text " +
                                        "LANGUAGE java\n" +
                                        "AS $$" +
-                                       "     org.apache.cassandra.cql3.functions.types.UDTValue udtVal = (com.datastax.driver.core.UDTValue)mp.get(Integer.valueOf(3));" +
+                                       "     org.apache.cassandra.cql3.functions.types.UDTValue udtVal = (com.khulnasoft.driver.core.UDTValue)mp.get(Integer.valueOf(3));" +
                                        "     return udtVal.getString(\"txt\");$$;");
 
         execute("INSERT INTO %s (key, lst, st, mp) values (1, " +
@@ -814,11 +814,11 @@ public class UFJavaTest extends CQLTester
                                                 "java",
                                                 "return 0;");
 
-        Assert.assertTrue(function.toCqlString(true, true, true).contains("CREATE FUNCTION IF NOT EXISTS"));
-        Assert.assertFalse(function.toCqlString(true, true, false).contains("CREATE FUNCTION IF NOT EXISTS"));
+        Assert.assertTrue(function.toCqlString(true, true).contains("CREATE FUNCTION IF NOT EXISTS"));
+        Assert.assertFalse(function.toCqlString(true, false).contains("CREATE FUNCTION IF NOT EXISTS"));
 
-        Assert.assertEquals(function.toCqlString(true, true, true), function.toCqlString(true, false, true));
-        Assert.assertEquals(function.toCqlString(true, true, false), function.toCqlString(true, false, false));
+        Assert.assertEquals(function.toCqlString(true, true), function.toCqlString(false, true));
+        Assert.assertEquals(function.toCqlString(true, false), function.toCqlString(false, false));
     }
 
     @Test
@@ -853,10 +853,10 @@ public class UFJavaTest extends CQLTester
                                                    Int32Type.instance,
                                                    null);
 
-        Assert.assertTrue(aggregate.toCqlString(true, true, true).contains("CREATE AGGREGATE IF NOT EXISTS"));
-        Assert.assertFalse(aggregate.toCqlString(true, true, false).contains("CREATE AGGREGATE IF NOT EXISTS"));
+        Assert.assertTrue(aggregate.toCqlString(true, true).contains("CREATE AGGREGATE IF NOT EXISTS"));
+        Assert.assertFalse(aggregate.toCqlString(true, false).contains("CREATE AGGREGATE IF NOT EXISTS"));
 
-        Assert.assertEquals(aggregate.toCqlString(true, true, true), aggregate.toCqlString(true, false, true));
-        Assert.assertEquals(aggregate.toCqlString(true, true, false), aggregate.toCqlString(true, false, false));
+        Assert.assertEquals(aggregate.toCqlString(true, true), aggregate.toCqlString(false, true));
+        Assert.assertEquals(aggregate.toCqlString(true, false), aggregate.toCqlString(false, false));
     }
 }

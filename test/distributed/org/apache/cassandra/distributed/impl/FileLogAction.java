@@ -18,18 +18,19 @@
 
 package org.apache.cassandra.distributed.impl;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.io.UncheckedIOException;
 import java.util.Objects;
 import java.util.function.Predicate;
 
 import com.google.common.io.Closeables;
 
-import org.apache.cassandra.io.util.File;
-import org.apache.cassandra.io.util.RandomAccessReader;
-import org.apache.cassandra.utils.AbstractIterator;
-import org.apache.cassandra.distributed.api.LogAction;
 import org.apache.cassandra.distributed.api.LineIterator;
+import org.apache.cassandra.distributed.api.LogAction;
+import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.utils.AbstractIterator;
 
 public class FileLogAction implements LogAction
 {
@@ -49,21 +50,36 @@ public class FileLogAction implements LogAction
     @Override
     public LineIterator match(long startPosition, Predicate<String> fn)
     {
-        RandomAccessReader reader;
-        reader = RandomAccessReader.open(file);
+        RandomAccessFile reader;
+        try
+        {
+            reader = new RandomAccessFile(file.toJavaIOFile(), "r");
+        }
+        catch (FileNotFoundException e)
+        {
+            // if file isn't present, don't return an empty stream as it looks the same as no log lines matched
+            throw new UncheckedIOException(e);
+        }
         if (startPosition > 0) // -1 used to disable, so ignore any negative values or 0 (default offset)
         {
-            reader.seek(startPosition);
+            try
+            {
+                reader.seek(startPosition);
+            }
+            catch (IOException e)
+            {
+                throw new UncheckedIOException("Unable to seek to " + startPosition, e);
+            }
         }
         return new FileLineIterator(reader, fn);
     }
 
     private static final class FileLineIterator extends AbstractIterator<String> implements LineIterator
     {
-        private final RandomAccessReader reader;
+        private final RandomAccessFile reader;
         private final Predicate<String> fn;
 
-        private FileLineIterator(RandomAccessReader reader, Predicate<String> fn)
+        private FileLineIterator(RandomAccessFile reader, Predicate<String> fn)
         {
             this.reader = reader;
             this.fn = fn;
@@ -72,7 +88,14 @@ public class FileLogAction implements LogAction
         @Override
         public long mark()
         {
-            return reader.getFilePointer();
+            try
+            {
+                return reader.getFilePointer();
+            }
+            catch (IOException e)
+            {
+                throw new UncheckedIOException(e);
+            }
         }
 
         @Override

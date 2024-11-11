@@ -30,8 +30,7 @@ import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
  */
 public class CommitLogMetrics
 {
-    public static final String TYPE_NAME = "CommitLog";
-    public static final MetricNameFactory factory = new DefaultNameFactory(TYPE_NAME);
+    public static final MetricNameFactory factory = new DefaultNameFactory("CommitLog");
 
     /** Number of completed tasks */
     public Gauge<Long> completedTasks;
@@ -43,8 +42,6 @@ public class CommitLogMetrics
     public final Timer waitingOnSegmentAllocation;
     /** The time spent waiting on CL sync; for Periodic this is only occurs when the sync is lagging its sync interval */
     public final Timer waitingOnCommit;
-    /** Time spent actually flushing the contents of a buffer to disk */
-    public final Timer waitingOnFlush;
     /** Number and rate of oversized mutations */
     public final Meter oversizedMutations;
 
@@ -52,7 +49,6 @@ public class CommitLogMetrics
     {
         waitingOnSegmentAllocation = Metrics.timer(factory.createMetricName("WaitingOnSegmentAllocation"));
         waitingOnCommit = Metrics.timer(factory.createMetricName("WaitingOnCommit"));
-        waitingOnFlush = Metrics.timer(factory.createMetricName("WaitingOnFlush"));
         oversizedMutations = Metrics.meter(factory.createMetricName("OverSizedMutations"));
     }
 

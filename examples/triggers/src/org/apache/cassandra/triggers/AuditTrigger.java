@@ -29,27 +29,19 @@ import org.apache.cassandra.db.partitions.Partition;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.UUIDGen;
 
 public class AuditTrigger implements ITrigger
 {
-    private static final String AUDIT_PROPERTIES_FILE_NAME = "AuditTrigger.properties";
-
-    private final Properties properties;
-    private final String auditKeyspace;
-    private final String auditTable;
-
-    public AuditTrigger()
-    {
-        properties = loadProperties();
-        auditKeyspace = properties.getProperty("keyspace");
-        auditTable = properties.getProperty("table");
-    }
+    private Properties properties = loadProperties();
 
     public Collection<Mutation> augment(Partition update)
     {
+        String auditKeyspace = properties.getProperty("keyspace");
+        String auditTable = properties.getProperty("table");
+
         TableMetadata metadata = Schema.instance.getTableMetadata(auditKeyspace, auditTable);
-        PartitionUpdate.SimpleBuilder audit = PartitionUpdate.simpleBuilder(metadata, TimeUUID.Generator.nextTimeUUID());
+        PartitionUpdate.SimpleBuilder audit = PartitionUpdate.simpleBuilder(metadata, UUIDGen.getTimeUUID());
 
         audit.row()
              .add("keyspace_name", update.metadata().keyspace)
@@ -62,7 +54,7 @@ public class AuditTrigger implements ITrigger
     private static Properties loadProperties()
     {
         Properties properties = new Properties();
-        InputStream stream = AuditTrigger.class.getClassLoader().getResourceAsStream(AUDIT_PROPERTIES_FILE_NAME);
+        InputStream stream = AuditTrigger.class.getClassLoader().getResourceAsStream("AuditTrigger.properties");
         try
         {
             properties.load(stream);

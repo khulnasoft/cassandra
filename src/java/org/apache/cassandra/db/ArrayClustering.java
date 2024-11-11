@@ -23,7 +23,7 @@ import org.apache.cassandra.utils.ObjectSizes;
 
 public class ArrayClustering extends AbstractArrayClusteringPrefix implements Clustering<byte[]>
 {
-    public static final long EMPTY_SIZE = ObjectSizes.measure(new ArrayClustering(EMPTY_VALUES_ARRAY));
+    private static final long EMPTY_SIZE = ObjectSizes.measure(new ArrayClustering(EMPTY_VALUES_ARRAY));
 
     public ArrayClustering(byte[]... values)
     {
@@ -32,7 +32,7 @@ public class ArrayClustering extends AbstractArrayClusteringPrefix implements Cl
 
     public long unsharedHeapSize()
     {
-        if (this == ByteArrayAccessor.factory.clustering() || this == ByteArrayAccessor.factory.staticClustering())
+        if (this == ByteArrayAccessor.factory.clustering())
             return 0;
         long arrayRefSize = ObjectSizes.sizeOfArray(values);
         long elementsSize = 0;
@@ -43,7 +43,7 @@ public class ArrayClustering extends AbstractArrayClusteringPrefix implements Cl
 
     public long unsharedHeapSizeExcludingData()
     {
-        if (this == ByteArrayAccessor.factory.clustering() || this == ByteArrayAccessor.factory.staticClustering())
+        if (this == ByteArrayAccessor.factory.clustering())
             return 0;
         return EMPTY_SIZE + ObjectSizes.sizeOfArray(values);
     }

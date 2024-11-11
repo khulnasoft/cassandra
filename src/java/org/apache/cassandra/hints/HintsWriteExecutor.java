@@ -20,21 +20,16 @@ package org.apache.cassandra.hints;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Iterator;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
-import org.apache.cassandra.concurrent.ExecutorPlus;
-import org.apache.cassandra.utils.concurrent.Future;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.FSError;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
-
-import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
 
 /**
  * A single threaded executor that exclusively writes all the hints and otherwise manipulate the writers.
@@ -51,18 +46,18 @@ final class HintsWriteExecutor
 
     private final HintsCatalog catalog;
     private final ByteBuffer writeBuffer;
-    private final ExecutorPlus executor;
+    private final ExecutorService executor;
 
     HintsWriteExecutor(HintsCatalog catalog)
     {
         this.catalog = catalog;
 
         writeBuffer = ByteBuffer.allocateDirect(WRITE_BUFFER_SIZE);
-        executor = executorFactory().sequential("HintsWriteExecutor");
+        executor = DebuggableThreadPoolExecutor.createWithFixedPoolSize("HintsWriteExecutor", 1);
     }
 
     /*
-     * Should be very fast (worst case scenario - write a few 10s of mebibytes to disk).
+     * Should be very fast (worst case scenario - write a few 10s of megabytes to disk).
      */
     void shutdownBlocking()
     {
@@ -74,6 +69,10 @@ final class HintsWriteExecutor
         catch (InterruptedException e)
         {
             throw new AssertionError(e);
+        }
+        finally
+        {
+            FileUtils.clean(writeBuffer);
         }
     }
 
@@ -107,11 +106,7 @@ final class HintsWriteExecutor
         {
             executor.submit(new FsyncWritersTask(stores)).get();
         }
-        catch (InterruptedException e)
-        {
-            throw new UncheckedInterruptedException(e);
-        }
-        catch (ExecutionException e)
+        catch (InterruptedException | ExecutionException e)
         {
             throw new RuntimeException(e);
         }
@@ -221,34 +216,35 @@ final class HintsWriteExecutor
 
     private void flush(Iterator<ByteBuffer> iterator, HintsStore store)
     {
-        while (iterator.hasNext())
+        while (true)
         {
-            // If we exceed the size limit for a hints file then close the current writer,
-            // if we still have more to write, we'll open a new file in the next iteration.
-            if (!flushInternal(iterator, store.getOrOpenWriter()))
-                store.closeWriter();
+            if (iterator.hasNext())
+                flushInternal(iterator, store);
+
+            if (!iterator.hasNext())
+                break;
+
+            // exceeded the size limit for an individual file, but still have more to write
+            // close the current writer and continue flushing to a new one in the next iteration
+            store.closeWriter();
         }
     }
 
-    /**
-     * @return {@code true} if we can keep writing to the file,
-     *      or {@code false} if we've exceeded max file size limit during writing
-     */
-    private boolean flushInternal(Iterator<ByteBuffer> iterator, HintsWriter writer)
+    @SuppressWarnings("resource")   // writer not closed here
+    private void flushInternal(Iterator<ByteBuffer> iterator, HintsStore store)
     {
         long maxHintsFileSize = DatabaseDescriptor.getMaxHintsFileSize();
+
+        HintsWriter writer = store.getOrOpenWriter();
 
         try (HintsWriter.Session session = writer.newSession(writeBuffer))
         {
             while (iterator.hasNext())
             {
                 session.append(iterator.next());
-
                 if (session.position() >= maxHintsFileSize)
-                    return false;
+                    break;
             }
-
-            return true;
         }
         catch (IOException e)
         {

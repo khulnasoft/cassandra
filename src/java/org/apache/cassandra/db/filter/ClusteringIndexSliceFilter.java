@@ -19,14 +19,14 @@ package org.apache.cassandra.db.filter;
 
 import java.io.IOException;
 
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.partitions.CachedPartition;
 import org.apache.cassandra.db.partitions.Partition;
-import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.transform.Transformation;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.schema.TableMetadata;
 
 /**
  * A filter over a single partition.
@@ -133,12 +133,13 @@ public class ClusteringIndexSliceFilter extends AbstractClusteringIndexFilter
         return String.format("slice(slices=%s, reversed=%b)", slices, reversed);
     }
 
-    @Override
-    public String toCQLString(TableMetadata metadata, RowFilter rowFilter)
+    public String toCQLString(TableMetadata metadata)
     {
         StringBuilder sb = new StringBuilder();
 
-        sb.append(slices.toCQLString(metadata, rowFilter));
+        if (!selectsAllPartition())
+            sb.append(slices.toCQLString(metadata));
+
         appendOrderByToCQLString(metadata, sb);
 
         return sb.toString();

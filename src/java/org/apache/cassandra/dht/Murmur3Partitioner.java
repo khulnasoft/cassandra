@@ -54,7 +54,7 @@ public class Murmur3Partitioner implements IPartitioner
     private static final int HEAP_SIZE = (int) ObjectSizes.measureDeep(MINIMUM);
 
     public static final Murmur3Partitioner instance = new Murmur3Partitioner();
-    public static final PartitionerDefinedOrder partitionOrdering = new PartitionerDefinedOrder(instance);
+    public static final AbstractType<?> partitionOrdering = new PartitionerDefinedOrder(instance);
 
     private final Splitter splitter = new Splitter(this)
     {
@@ -147,7 +147,7 @@ public class Murmur3Partitioner implements IPartitioner
     {
         static final long serialVersionUID = -5833580143318243006L;
 
-        public final long token;
+        final long token;
 
         public LongToken(long token)
         {
@@ -219,20 +219,11 @@ public class Murmur3Partitioner implements IPartitioner
         }
 
         @Override
-        public LongToken nextValidToken()
+        public Token nextValidToken()
         {
-            return new LongToken(token + 1);
+            return new LongToken(token + 1);    // wraparound to MINIMUM if token is MAXIMUM
         }
 
-        public LongToken decreaseSlightly()
-        {
-            return new LongToken(token - 1);
-        }
-
-        public static ByteBuffer keyForToken(long token)
-        {
-            return keyForToken(new LongToken(token));
-        }
 
         /**
          * Reverses murmur3 to find a possible 16 byte key that generates a given token
@@ -241,7 +232,7 @@ public class Murmur3Partitioner implements IPartitioner
         public static ByteBuffer keyForToken(LongToken token)
         {
             ByteBuffer result = ByteBuffer.allocate(16);
-            long[] inv = MurmurHash.inv_hash3_x64_128(new long[]{ token.token, 0L });
+            long[] inv = MurmurHash.inv_hash3_x64_128(new long[] {token.token, 0L});
             result.putLong(inv[0]).putLong(inv[1]).position(0);
             return result;
         }
@@ -309,7 +300,7 @@ public class Murmur3Partitioner implements IPartitioner
             throw new RuntimeException("No nodes present in the cluster. Has this node finished starting up?");
         // 1-case
         if (sortedTokens.size() == 1)
-            ownerships.put(i.next(), 1.0F);
+            ownerships.put(i.next(), new Float(1.0));
         // n-case
         else
         {
@@ -425,11 +416,6 @@ public class Murmur3Partitioner implements IPartitioner
     public AbstractType<?> partitionOrdering()
     {
         return partitionOrdering;
-    }
-
-    public AbstractType<?> partitionOrdering(AbstractType<?> partitionKeyType)
-    {
-        return partitionOrdering.withPartitionKeyType(partitionKeyType);
     }
 
     public Optional<Splitter> splitter()

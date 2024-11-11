@@ -23,6 +23,7 @@ import java.nio.ByteBuffer;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -36,11 +37,8 @@ import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.transport.messages.*;
 import org.apache.cassandra.service.QueryState;
-import org.apache.cassandra.utils.MonotonicClock;
 import org.apache.cassandra.utils.ReflectionUtils;
-import org.apache.cassandra.utils.TimeUUID;
-
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
+import org.apache.cassandra.utils.UUIDGen;
 
 /**
  * A message from the CQL binary protocol.
@@ -134,7 +132,7 @@ public abstract class Message
             Codec<?> original = this.codec;
             Field field = Type.class.getDeclaredField("codec");
             field.setAccessible(true);
-            Field modifiers = ReflectionUtils.getModifiersField();
+            Field modifiers = ReflectionUtils.getField(Field.class, "modifiers");
             modifiers.setAccessible(true);
             modifiers.setInt(field, field.getModifiers() & ~Modifier.FINAL);
             field.set(this, codec);
@@ -195,8 +193,7 @@ public abstract class Message
         this.customPayload = customPayload;
     }
 
-    @Override
-    public String toString()
+    public String debugString()
     {
         return String.format("(%s:%s:%s)", type, streamId, connection == null ? "null" :  connection.getVersion().asInt());
     }
@@ -204,59 +201,46 @@ public abstract class Message
     public static abstract class Request extends Message
     {
         private boolean tracingRequested;
-        public final long createdAtNanos;
+
         protected Request(Type type)
         {
             super(type);
-
-            createdAtNanos = MonotonicClock.Global.preciseTime.now();
 
             if (type.direction != Direction.REQUEST)
                 throw new IllegalArgumentException();
         }
 
-        /**
-         * @return true if the execution of this {@link Request} should be recorded in a tracing session
-         */
         protected boolean isTraceable()
         {
             return false;
         }
 
-        /**
-         * @return true if warnings should be tracked and aborts enforced for resource limits on this {@link Request}
-         */
-        protected boolean isTrackable()
-        {
-            return false;
-        }
+        protected abstract Response execute(QueryState queryState, long queryStartNanoTime, boolean traceRequest);
 
-        protected abstract Response execute(QueryState queryState, Dispatcher.RequestTime requestTime, boolean traceRequest);
-
-        public final Response execute(QueryState queryState, Dispatcher.RequestTime requestTime)
+        public final Response execute(QueryState queryState, long queryStartNanoTime)
         {
             boolean shouldTrace = false;
-            TimeUUID tracingSessionId = null;
+            UUID tracingSessionId = null;
 
             if (isTraceable())
             {
                 if (isTracingRequested())
                 {
                     shouldTrace = true;
-                    tracingSessionId = nextTimeUUID();
-                    Tracing.instance.newSession(tracingSessionId, getCustomPayload());
+                    tracingSessionId = UUIDGen.getTimeUUID();
+                    Tracing.instance.newSession(queryState.getClientState(), tracingSessionId, getCustomPayload());
                 }
                 else if (StorageService.instance.shouldTraceProbablistically())
                 {
                     shouldTrace = true;
-                    Tracing.instance.newSession(getCustomPayload());
+                    Tracing.instance.newSession(queryState.getClientState(), getCustomPayload());
                 }
             }
 
             Response response;
             try
             {
-                response = execute(queryState, requestTime, shouldTrace);
+                response = execute(queryState, queryStartNanoTime, shouldTrace);
             }
             finally
             {
@@ -270,7 +254,7 @@ public abstract class Message
             return response;
         }
 
-        void setTracingRequested()
+        public void setTracingRequested()
         {
             tracingRequested = true;
         }
@@ -279,20 +263,11 @@ public abstract class Message
         {
             return tracingRequested;
         }
-
-        @Override
-        public String toString()
-        {
-            return "Request{" +
-                   "tracingRequested=" + tracingRequested +
-                   ", createdAtNanos=" + createdAtNanos +
-                   '}';
-        }
     }
 
     public static abstract class Response extends Message
     {
-        protected TimeUUID tracingId;
+        protected UUID tracingId;
         protected List<String> warnings;
 
         protected Response(Type type)
@@ -303,13 +278,13 @@ public abstract class Message
                 throw new IllegalArgumentException();
         }
 
-        Message setTracingId(TimeUUID tracingId)
+        public Message setTracingId(UUID tracingId)
         {
             this.tracingId = tracingId;
             return this;
         }
 
-        TimeUUID getTracingId()
+        public UUID getTracingId()
         {
             return tracingId;
         }
@@ -338,23 +313,16 @@ public abstract class Message
             if (this instanceof Response)
             {
                 Response message = (Response)this;
-                TimeUUID tracingId = message.getTracingId();
+                UUID tracingId = message.getTracingId();
                 Map<String, ByteBuffer> customPayload = message.getCustomPayload();
                 if (tracingId != null)
-                    messageSize += TimeUUID.sizeInBytes();
+                    messageSize += CBUtil.sizeOfUUID(tracingId);
                 List<String> warnings = message.getWarnings();
                 if (warnings != null)
                 {
-                    // if cassandra populates warnings for <= v3 protocol, this is a bug
                     if (version.isSmallerThan(ProtocolVersion.V4))
-                    {
-                        logger.warn("Warnings present in message with version less than v4 (it is {}); warnings={}", version, warnings);
-                        warnings = null;
-                    }
-                    else
-                    {
-                        messageSize += CBUtil.sizeOfStringList(warnings);
-                    }
+                        throw new ProtocolException("Must not send frame with WARNING flag for native protocol version < 4");
+                    messageSize += CBUtil.sizeOfStringList(warnings);
                 }
                 if (customPayload != null)
                 {
@@ -431,7 +399,7 @@ public abstract class Message
             boolean isCustomPayload = inbound.header.flags.contains(Envelope.Header.Flag.CUSTOM_PAYLOAD);
             boolean hasWarning = inbound.header.flags.contains(Envelope.Header.Flag.WARNING);
 
-            TimeUUID tracingId = isRequest || !isTracing ? null : CBUtil.readTimeUUID(inbound.body);
+            UUID tracingId = isRequest || !isTracing ? null : CBUtil.readUUID(inbound.body);
             List<String> warnings = isRequest || !hasWarning ? null : CBUtil.readStringList(inbound.body);
             Map<String, ByteBuffer> customPayload = !isCustomPayload ? null : CBUtil.readBytesMap(inbound.body);
 

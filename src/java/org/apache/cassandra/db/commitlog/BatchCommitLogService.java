@@ -17,7 +17,7 @@
  */
 package org.apache.cassandra.db.commitlog;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.BATCH_COMMIT_LOG_SYNC_INTERVAL;
+import org.apache.cassandra.utils.MonotonicClock;
 
 class BatchCommitLogService extends AbstractCommitLogService
 {
@@ -26,11 +26,11 @@ class BatchCommitLogService extends AbstractCommitLogService
      * the disk sync. Instead we trigger it explicitly in {@link #maybeWaitForSync(CommitLogSegment.Allocation)}.
      * This value here is largely irrelevant, but should high enough so the sync thread is not continually waking up.
      */
-    private static final int POLL_TIME_MILLIS = BATCH_COMMIT_LOG_SYNC_INTERVAL.getInt();
+    private static final int POLL_TIME_MILLIS = 1000;
 
-    public BatchCommitLogService(CommitLog commitLog)
+    public BatchCommitLogService(CommitLog commitLog, MonotonicClock clock)
     {
-        super(commitLog, "COMMIT-LOG-WRITER", POLL_TIME_MILLIS);
+        super(commitLog, "COMMIT-LOG-WRITER", POLL_TIME_MILLIS, clock);
     }
 
     protected void maybeWaitForSync(CommitLogSegment.Allocation alloc)

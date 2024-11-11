@@ -17,29 +17,29 @@
  */
 package org.apache.cassandra.schema;
 
-import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
+import com.google.common.base.Splitter;
+import com.google.common.collect.ImmutableMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.db.TypeSizes;
-import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.tcm.serialization.MetadataSerializer;
-import org.apache.cassandra.tcm.serialization.Version;
+import org.apache.cassandra.locator.NetworkTopologyStrategy;
 
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
+import static org.apache.cassandra.config.CassandraRelevantProperties.SYSTEM_DISTRIBUTED_NTS_DC_OVERRIDE_PROPERTY;
+import static org.apache.cassandra.config.CassandraRelevantProperties.SYSTEM_DISTRIBUTED_NTS_RF_OVERRIDE_PROPERTY;
 
 /**
  * An immutable class representing keyspace parameters (durability and replication).
  */
 public final class KeyspaceParams
 {
-    public static final Serializer serializer = new Serializer();
+    private static final Logger logger = LoggerFactory.getLogger(KeyspaceParams.class);
 
     public static final boolean DEFAULT_DURABLE_WRITES = true;
 
@@ -59,12 +59,14 @@ public final class KeyspaceParams
         @Override
         public String toString()
         {
-            return toLowerCaseLocalized(name());
+            return name().toLowerCase();
         }
     }
 
     public final boolean durableWrites;
     public final ReplicationParams replication;
+
+    private static final Map<String, String> SYSTEM_DISTRIBUTED_NTS_OVERRIDE = getSystemDistributedNtsOverride();
 
     public KeyspaceParams(boolean durableWrites, ReplicationParams replication)
     {
@@ -97,14 +99,38 @@ public final class KeyspaceParams
         return new KeyspaceParams(false, ReplicationParams.simple(replicationFactor));
     }
 
+    public static KeyspaceParams everywhere()
+    {
+        return new KeyspaceParams(true, ReplicationParams.everywhere());
+    }
+
     public static KeyspaceParams nts(Object... args)
     {
         return new KeyspaceParams(true, ReplicationParams.nts(args));
     }
 
-    public void validate(String name, ClientState state, ClusterMetadata metadata)
+    public void validate(String name)
     {
-        replication.validate(name, state, metadata);
+        replication.validate(name);
+    }
+
+    /**
+     * Used to pick the default replication strategy for all distributed system keyspaces.
+     * The default will be SimpleStrategy and a hard coded RF factor.
+     * <p>
+     * One can change this default to NTS by passing in system properties:
+     * -Dcassandra.system_distributed_replication_per_dc=3
+     * -Dcassandra.system_distributed_replication_dc_names=cloud-east,cloud-west
+     */
+    public static KeyspaceParams systemDistributed(int rf)
+    {
+        if (!SYSTEM_DISTRIBUTED_NTS_OVERRIDE.isEmpty())
+        {
+            logger.info("Using override for distributed system keyspaces: {}", SYSTEM_DISTRIBUTED_NTS_OVERRIDE);
+            return create(true, SYSTEM_DISTRIBUTED_NTS_OVERRIDE);
+        }
+
+        return simple(rf);
     }
 
     @Override
@@ -136,25 +162,40 @@ public final class KeyspaceParams
                           .toString();
     }
 
-    public static class Serializer implements MetadataSerializer<KeyspaceParams>
+    @VisibleForTesting
+    static Map<String, String> getSystemDistributedNtsOverride()
     {
-        public void serialize(KeyspaceParams t, DataOutputPlus out, Version version) throws IOException
+        int rfOverride = -1;
+        List<String> dcOverride = Collections.emptyList();
+        ImmutableMap.Builder<String, String> ntsOverride = ImmutableMap.builder();
+
+        try
         {
-            ReplicationParams.serializer.serialize(t.replication, out, version);
-            out.writeBoolean(t.durableWrites);
+            rfOverride = SYSTEM_DISTRIBUTED_NTS_RF_OVERRIDE_PROPERTY.getInt(-1);
+            dcOverride = Splitter.on(',').trimResults().omitEmptyStrings().splitToList(SYSTEM_DISTRIBUTED_NTS_DC_OVERRIDE_PROPERTY.getString(","));
+        }
+        catch (RuntimeException ex)
+        {
+            logger.error("Error parsing system distributed replication override properties", ex);
         }
 
-        public KeyspaceParams deserialize(DataInputPlus in, Version version) throws IOException
+        if (rfOverride != -1 && !dcOverride.isEmpty())
         {
-            ReplicationParams params = ReplicationParams.serializer.deserialize(in, version);
-            boolean durableWrites = in.readBoolean();
-            return new KeyspaceParams(durableWrites, params);
+            // Validate reasonable defaults
+            if (rfOverride <= 0 || rfOverride > 5)
+            {
+                logger.error("Invalid value for {}", SYSTEM_DISTRIBUTED_NTS_RF_OVERRIDE_PROPERTY.getKey());
+            }
+            else
+            {
+                for (String dc : dcOverride)
+                    ntsOverride.put(dc, String.valueOf(rfOverride));
+
+                ntsOverride.put(ReplicationParams.CLASS, NetworkTopologyStrategy.class.getCanonicalName());
+                return ntsOverride.build();
+            }
         }
 
-        public long serializedSize(KeyspaceParams t, Version version)
-        {
-            return ReplicationParams.serializer.serializedSize(t.replication, version) +
-                   TypeSizes.sizeof(t.durableWrites);
-        }
+        return Collections.emptyMap();
     }
 }

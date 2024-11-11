@@ -17,133 +17,62 @@
  */
 package org.apache.cassandra.index.sai.disk.v1.postings;
 
-import java.io.Closeable;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
-import java.util.PriorityQueue;
 import javax.annotation.concurrent.NotThreadSafe;
 
-import org.apache.cassandra.index.sai.postings.PeekablePostingList;
-import org.apache.cassandra.index.sai.postings.PostingList;
+import org.apache.cassandra.index.sai.disk.PostingList;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.utils.IntMerger;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
 /**
  * Merges multiple {@link PostingList} which individually contain unique items into a single list.
- * While the individual lists contain unique items, there can be duplicate items between lists so
- * the class also checks for duplicates and only returns unique items in sorted order.
  */
 @NotThreadSafe
-public class MergePostingList implements PostingList
+public class MergePostingList extends IntMerger<PostingList> implements PostingList
 {
-    private final PriorityQueue<PeekablePostingList> postingLists;
-    private final List<PeekablePostingList> temp;
-    private final Closeable onClose;
-    private final long minimum;
-    private final long maximum;
-    private final long size;
-    private long lastRowId = -1;
+    final int size;
 
-    private MergePostingList(PriorityQueue<PeekablePostingList> postingLists, Closeable onClose)
+    private MergePostingList(List<? extends PostingList> postingLists)
     {
-        this.temp = new ArrayList<>(postingLists.size());
-        this.onClose = onClose;
-        this.postingLists = postingLists;
-        long minimum = 0;
-        long maximum = 0;
+        super(postingLists, PostingList.class);
+        checkArgument(!postingLists.isEmpty());
         long totalPostings = 0;
         for (PostingList postingList : postingLists)
-        {
-            minimum = Math.min(minimum, postingList.minimum());
-            maximum = Math.max(maximum, postingList.maximum());
             totalPostings += postingList.size();
-        }
-        this.minimum = minimum;
-        this.maximum = maximum;
-        this.size = totalPostings;
-    }
 
-    public static PostingList merge(PriorityQueue<PeekablePostingList> postings, Closeable onClose)
-    {
-        checkArgument(!postings.isEmpty(), "Cannot merge an empty queue of posting lists");
-        return postings.size() > 1 ? new MergePostingList(postings, onClose) : postings.poll();
-    }
-
-    public static PostingList merge(PriorityQueue<PeekablePostingList> postings)
-    {
-        return merge(postings, () -> FileUtils.close(postings));
+        // We could technically "overflow" integer if enough row ids are duplicated in the source posting lists.
+        // The size does not affect correctness, so just use integer max if that happens.
+        this.size = (int) Math.min(totalPostings, Integer.MAX_VALUE);
     }
 
     public static PostingList merge(List<PostingList> postings)
     {
-        PriorityQueue<PeekablePostingList> postingsQueue = new PriorityQueue<>(postings.size(), Comparator.comparingLong(PeekablePostingList::peek));
-        postings.stream().map(PeekablePostingList::makePeekable).forEach(postingsQueue::add);
-        return merge(postingsQueue);
+        if (postings.isEmpty())
+            return PostingList.EMPTY;
+
+        if (postings.size() == 1)
+            return postings.get(0);
+
+        return new MergePostingList(postings);
     }
 
     @Override
-    public long minimum()
+    public int nextPosting() throws IOException
     {
-        return minimum;
+        return advance();
     }
 
     @Override
-    public long maximum()
+    public int advance(int targetRowID) throws IOException
     {
-        return maximum;
+        return skipTo(targetRowID);
     }
 
     @Override
-    public long nextPosting() throws IOException
-    {
-        while (!postingLists.isEmpty())
-        {
-            PeekablePostingList head = postingLists.poll();
-            long next = head.nextPosting();
-
-            if (next == END_OF_STREAM)
-            {
-                // skip current posting list
-                continue;
-            }
-
-            if (next > lastRowId)
-            {
-                lastRowId = next;
-                postingLists.add(head);
-                return next;
-            }
-            else if (next == lastRowId)
-            {
-                postingLists.add(head);
-            }
-        }
-
-        return PostingList.END_OF_STREAM;
-    }
-
-    @Override
-    public long advance(long targetRowID) throws IOException
-    {
-        temp.clear();
-
-        while (!postingLists.isEmpty())
-        {
-            PeekablePostingList peekable = postingLists.poll();
-            peekable.advanceWithoutConsuming(targetRowID);
-            if (peekable.peek() != PostingList.END_OF_STREAM)
-                temp.add(peekable);
-        }
-        postingLists.addAll(temp);
-
-        return nextPosting();
-    }
-
-    @Override
-    public long size()
+    public int size()
     {
         return size;
     }
@@ -151,6 +80,18 @@ public class MergePostingList implements PostingList
     @Override
     public void close()
     {
-        FileUtils.closeQuietly(onClose);
+        applyToAllSources(FileUtils::closeQuietly);
+    }
+
+    @Override
+    public int advanceSource(PostingList s) throws IOException
+    {
+        return s.nextPosting();
+    }
+
+    @Override
+    protected int skipSource(PostingList s, int targetPosition) throws IOException
+    {
+        return s.advance(targetPosition);
     }
 }

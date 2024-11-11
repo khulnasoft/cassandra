@@ -27,17 +27,17 @@ import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.schema.ColumnMetadata;
 
 /**
- * A base <code>Selector.Factory</code> for list/set, tuples, and vectors.
+ * A base <code>Selector.Factory</code> for collections, tuples, and vectors.
  */
 abstract class MultiElementFactory extends Factory
 {
     /**
-     * The list/set, tuples, and vectors type.
+     * The collection or tuple type.
      */
     private final AbstractType<?> type;
 
     /**
-     * The list/set, tuples, and vectors element factories.
+     * The collection or tuple element factories.
      */
     private final SelectorFactories factories;
 

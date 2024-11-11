@@ -20,22 +20,26 @@
  */
 package org.apache.cassandra.io.util;
 
-import com.google.common.base.Charsets;
-import com.google.common.primitives.UnsignedBytes;
-import com.google.common.primitives.UnsignedLong;
-import org.junit.Test;
-
-import java.io.*;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
 import java.nio.channels.ReadableByteChannel;
 import java.util.ArrayDeque;
 import java.util.Queue;
 import java.util.Random;
 
-import org.apache.cassandra.utils.CassandraUInt;
+import org.junit.Test;
 
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
+import com.google.common.base.Charsets;
+import com.google.common.primitives.UnsignedBytes;
+import com.google.common.primitives.UnsignedInteger;
+import com.google.common.primitives.UnsignedLong;
+
 import static org.junit.Assert.*;
 
 public class NIODataInputStreamTest
@@ -46,7 +50,7 @@ public class NIODataInputStreamTest
 
     void init()
     {
-        long seed = nanoTime();
+        long seed = System.nanoTime();
         //seed = 365238103404423L;
         System.out.println("Seed " + seed);
         r = new Random(seed);
@@ -193,12 +197,14 @@ public class NIODataInputStreamTest
         assertFalse(fakeStream.markSupported());
     }
 
+    @SuppressWarnings("resource")
     @Test(expected = NullPointerException.class)
     public void testNullRBC() throws Exception
     {
         new NIODataInputStream(null, 9);
     }
 
+    @SuppressWarnings("resource")
     @Test
     public void testAvailable() throws Exception
     {
@@ -216,11 +222,11 @@ public class NIODataInputStreamTest
         assertEquals(8190 - 10 - 4096, is.available());
 
         File f = FileUtils.createTempFile("foo", "bar");
-        FileChannel fos = f.newReadWriteChannel();
-        fos.write(ByteBuffer.wrap(new byte[10]));
-        fos.position(0);
+        RandomAccessFile fos = new RandomAccessFile(f.toJavaIOFile(), "rw");
+        fos.write(new byte[10]);
+        fos.seek(0);
 
-        is = new NIODataInputStream(fos, 9);
+        is = new NIODataInputStream(fos.getChannel(), 9);
 
         int remaining = 10;
         assertEquals(10, is.available());
@@ -259,6 +265,7 @@ public class NIODataInputStreamTest
         };
     }
 
+    @SuppressWarnings("resource")
     @Test
     public void testReadUTF() throws Exception
     {
@@ -284,6 +291,7 @@ public class NIODataInputStreamTest
         assertEquals(BufferedDataOutputStreamTest.fourByte, is.readUTF());
     }
 
+    @SuppressWarnings("resource")
     @Test
     public void testReadVInt() throws Exception {
         final ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -319,6 +327,7 @@ public class NIODataInputStreamTest
         assertTrue(threw);
     }
 
+    @SuppressWarnings("resource")
     @Test
     public void testReadUnsignedVInt() throws Exception {
         final ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -327,7 +336,7 @@ public class NIODataInputStreamTest
         long values[] = new long[] {
                 0, 1
                 , UnsignedLong.MAX_VALUE.longValue(), UnsignedLong.MAX_VALUE.longValue() - 1, UnsignedLong.MAX_VALUE.longValue() + 1
-                , CassandraUInt.MAX_VALUE_LONG, CassandraUInt.MAX_VALUE_LONG - 1, CassandraUInt.MAX_VALUE_LONG + 1
+                , UnsignedInteger.MAX_VALUE.longValue(), UnsignedInteger.MAX_VALUE.longValue() - 1, UnsignedInteger.MAX_VALUE.longValue() + 1
                 , UnsignedBytes.MAX_VALUE, UnsignedBytes.MAX_VALUE - 1, UnsignedBytes.MAX_VALUE + 1
                 , 65536, 65536 - 1, 65536 + 1 };
         values = BufferedDataOutputStreamTest.enrich(values);
@@ -380,7 +389,7 @@ public class NIODataInputStreamTest
 
     DataInputStream dis;
 
-    @SuppressWarnings("unused")
+    @SuppressWarnings({ "resource", "unused" })
     void fuzzOnce() throws Exception
     {
         init();
@@ -750,6 +759,7 @@ public class NIODataInputStreamTest
 
 
     @Test
+    @SuppressWarnings({ "resource"})
     public void testVIntRemainingBytes() throws Exception
     {
         for(int ii = 0; ii < 10; ii++)
@@ -778,6 +788,7 @@ public class NIODataInputStreamTest
     }
 
     @Test
+    @SuppressWarnings({ "resource"})
     public void testVIntSmallBuffer() throws Exception
     {
         for(int ii = 0; ii < 10; ii++)
@@ -810,6 +821,7 @@ public class NIODataInputStreamTest
     }
 
     @Test
+    @SuppressWarnings({ "resource"})
     public void testVIntTruncationEOF() throws Exception
     {
         for(int ii = 0; ii < 10; ii++)

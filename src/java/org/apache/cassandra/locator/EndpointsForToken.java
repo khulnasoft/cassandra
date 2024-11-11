@@ -19,11 +19,7 @@
 package org.apache.cassandra.locator;
 
 import com.google.common.base.Preconditions;
-
-import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.tcm.ownership.VersionedEndpoints;
 
 import java.util.Arrays;
 import java.util.Collection;
@@ -69,11 +65,6 @@ public class EndpointsForToken extends Endpoints<EndpointsForToken>
         if (this.byEndpoint != null && list.isSubList(newList))
             byEndpoint = this.byEndpoint.forSubList(newList);
         return new EndpointsForToken(token, newList, byEndpoint);
-    }
-
-    public Replica lookup(InetAddressAndPort endpoint)
-    {
-        return byEndpoint().get(endpoint);
     }
 
     public static class Builder extends EndpointsForToken implements ReplicaCollection.Builder<EndpointsForToken>
@@ -155,16 +146,4 @@ public class EndpointsForToken extends Endpoints<EndpointsForToken>
         if (replicas.isEmpty()) return empty(token);
         return builder(token, replicas.size()).addAll(replicas).build();
     }
-
-    public static EndpointsForToken copyOf(Token token, Iterable<Replica> replicas)
-    {
-        if (!replicas.iterator().hasNext()) return empty(token);
-        return builder(token).addAll(replicas).build();
-    }
-
-    public static VersionedEndpoints.ForToken natural(Keyspace keyspace, Token token)
-    {
-        return ClusterMetadata.current().placements.get(keyspace.getMetadata().params.replication).reads.forToken(token);
-    }
-
 }

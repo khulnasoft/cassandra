@@ -19,33 +19,32 @@
 package org.apache.cassandra.distributed.test;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import com.google.common.collect.ImmutableMap;
-import org.apache.commons.io.FileUtils;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.Feature;
 import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.tools.BulkLoader;
 import org.apache.cassandra.tools.ToolRunner;
-import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.NativeSSTableLoaderClient;
 
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertTrue;
-
-import static com.google.common.collect.Lists.transform;
-import static org.apache.cassandra.distributed.test.ExecUtil.rethrow;
 import static org.apache.cassandra.distributed.shared.AssertUtils.assertRows;
 import static org.apache.cassandra.distributed.shared.AssertUtils.row;
+import static org.apache.cassandra.distributed.test.ExecUtil.rethrow;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertTrue;
 
 public class SSTableLoaderEncryptionOptionsTest extends AbstractEncryptionOptionsImpl
 {
@@ -98,7 +97,6 @@ public class SSTableLoaderEncryptionOptionsTest extends AbstractEncryptionOption
                                                             "--truststore", validTrustStorePath,
                                                             "--truststore-password", validTrustStorePassword,
                                                             "--conf-path", "test/conf/sstableloader_with_encryption.yaml",
-                                                            "--ssl-ciphers", "TLS_RSA_WITH_AES_128_CBC_SHA,TLS_RSA_WITH_AES_256_CBC_SHA",
                                                             sstables_to_upload.absolutePath());
         tool.assertOnCleanExit();
         assertTrue(tool.getStdout().contains("Summary statistics"));
@@ -159,8 +157,7 @@ public class SSTableLoaderEncryptionOptionsTest extends AbstractEncryptionOption
         {
             CLUSTER.get(1).executeInternal(String.format("INSERT INTO ssl_upload_tables.test (pk, val) VALUES (%s, '%s')", i, i));
         }
-        CLUSTER.get(1).runOnInstance(rethrow(() -> StorageService.instance.forceKeyspaceFlush("ssl_upload_tables",
-                                                                                              ColumnFamilyStore.FlushReason.UNIT_TESTS)));
+        CLUSTER.get(1).runOnInstance(rethrow(() -> StorageService.instance.forceKeyspaceFlush("ssl_upload_tables")));
     }
 
     private static void truncateGeneratedTables() throws IOException
@@ -172,17 +169,15 @@ public class SSTableLoaderEncryptionOptionsTest extends AbstractEncryptionOption
     {
         File cfDir = new File("build/test/cassandra/ssl_upload_tables", table);
         cfDir.tryCreateDirectories();
-        // Get paths as Strings, because org.apache.cassandra.io.util.File in the dtest
-        // node is loaded by org.apache.cassandra.distributed.shared.InstanceClassLoader.
-        List<String> keyspace_dir_paths = CLUSTER.get(1).callOnInstance(() -> {
-            List<File> cfDirs = Keyspace.open("ssl_upload_tables").getColumnFamilyStore(table).getDirectories().getCFDirectories();
-            return transform(cfDirs, (d) -> d.absolutePath());
-        });
-        for (File srcDir : transform(keyspace_dir_paths, (p) -> new File(p)))
+        List<Path> keyspace_dirs = CLUSTER.get(1).callOnInstance(() -> Keyspace.open("ssl_upload_tables").getColumnFamilyStore(table).getDirectories().getCFDirectories().stream().map(File::toPath).collect(Collectors.toList()));
+        for (Path srcDir : keyspace_dirs)
         {
-            for (File file : srcDir.tryList((file) -> file.isFile()))
+            for (File file : new File(srcDir).tryList())
             {
-                FileUtils.copyFileToDirectory(file.toJavaIOFile(), cfDir.toJavaIOFile());
+                if (file.isFile())
+                {
+                    FileUtils.copyToDirectoryWithConfirm(file, cfDir);
+                }
             }
         }
         return cfDir;

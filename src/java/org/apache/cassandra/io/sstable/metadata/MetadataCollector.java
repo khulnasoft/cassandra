@@ -25,17 +25,10 @@ import java.util.UUID;
 
 import com.clearspring.analytics.stream.cardinality.HyperLogLogPlus;
 import com.clearspring.analytics.stream.cardinality.ICardinality;
-import org.apache.cassandra.db.Clustering;
-import org.apache.cassandra.db.ClusteringBound;
-import org.apache.cassandra.db.ClusteringBoundOrBoundary;
-import org.apache.cassandra.db.ClusteringComparator;
-import org.apache.cassandra.db.ClusteringPrefix;
-import org.apache.cassandra.db.DeletionTime;
-import org.apache.cassandra.db.LivenessInfo;
-import org.apache.cassandra.db.SerializationHeader;
-import org.apache.cassandra.db.Slice;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.commitlog.CommitLogPosition;
 import org.apache.cassandra.db.commitlog.IntervalSet;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.partitions.PartitionStatisticsCollector;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.Unfiltered;
@@ -43,17 +36,15 @@ import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.EstimatedHistogram;
-import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MurmurHash;
-import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.streamhist.StreamingTombstoneHistogramBuilder;
 import org.apache.cassandra.utils.streamhist.TombstoneHistogram;
 
 public class MetadataCollector implements PartitionStatisticsCollector
 {
     public static final double NO_COMPRESSION_RATIO = -1.0;
+    private static final ByteBuffer[] EMPTY_CLUSTERING = new ByteBuffer[0];
 
     private long currentPartitionCells = 0;
 
@@ -65,9 +56,8 @@ public class MetadataCollector implements PartitionStatisticsCollector
 
     static EstimatedHistogram defaultPartitionSizeHistogram()
     {
-        // EH of 155 can track a max value of 3520571548412 i.e. 3.5TB
-        return new EstimatedHistogram(155);
-
+        // EH of 150 can track a max value of 1697806495183, i.e., > 1.5PB
+        return new EstimatedHistogram(150);
     }
 
     static TombstoneHistogram defaultTombstoneDropTimeHistogram()
@@ -92,6 +82,7 @@ public class MetadataCollector implements PartitionStatisticsCollector
                                  Collections.emptyList(),
                                  Slice.ALL,
                                  true,
+                                 true,
                                  ActiveRepairService.UNREPAIRED_SSTABLE,
                                  -1,
                                  -1,
@@ -99,9 +90,8 @@ public class MetadataCollector implements PartitionStatisticsCollector
                                  null,
                                  null,
                                  false,
-                                 true,
-                                 ByteBufferUtil.EMPTY_BYTE_BUFFER,
-                                 ByteBufferUtil.EMPTY_BYTE_BUFFER);
+                                 Collections.emptyMap(),
+                                 ZeroCopyMetadata.EMPTY);
     }
 
     protected EstimatedHistogram estimatedPartitionSize = defaultPartitionSizeHistogram();
@@ -109,7 +99,7 @@ public class MetadataCollector implements PartitionStatisticsCollector
     protected EstimatedHistogram estimatedCellPerPartitionCount = defaultCellPerPartitionCountHistogram();
     protected IntervalSet<CommitLogPosition> commitLogIntervals = IntervalSet.empty();
     protected final MinMaxLongTracker timestampTracker = new MinMaxLongTracker();
-    protected final MinMaxLongTracker localDeletionTimeTracker = new MinMaxLongTracker(Cell.NO_DELETION_TIME, Cell.NO_DELETION_TIME);
+    protected final MinMaxIntTracker localDeletionTimeTracker = new MinMaxIntTracker(Cell.NO_DELETION_TIME, Cell.NO_DELETION_TIME);
     protected final MinMaxIntTracker ttlTracker = new MinMaxIntTracker(Cell.NO_TTL, Cell.NO_TTL);
     protected double compressionRatio = NO_COMPRESSION_RATIO;
     protected StreamingTombstoneHistogramBuilder estimatedTombstoneDropTime = new StreamingTombstoneHistogramBuilder(SSTable.TOMBSTONE_HISTOGRAM_BIN_SIZE, SSTable.TOMBSTONE_HISTOGRAM_SPOOL_SIZE, SSTable.TOMBSTONE_HISTOGRAM_TTL_ROUND_SECONDS);
@@ -129,15 +119,16 @@ public class MetadataCollector implements PartitionStatisticsCollector
      * be a corresponding end bound that is bigger).
      */
     private ClusteringPrefix<?> maxClustering = ClusteringBound.MIN_END;
+    private boolean clusteringInitialized = false;
 
     protected boolean hasLegacyCounterShards = false;
     private boolean hasPartitionLevelDeletions = false;
     protected long totalColumnsSet;
     protected long totalRows;
-    public int totalTombstones;
 
     protected double tokenSpaceCoverage = Double.NaN;
 
+    private final AbstractType<?>[] comparators;
     /**
      * Default cardinality estimation method is to use HyperLogLog++.
      * Parameter here(p=13, sp=25) should give reasonable estimation
@@ -146,7 +137,6 @@ public class MetadataCollector implements PartitionStatisticsCollector
      */
     protected ICardinality cardinality = new HyperLogLogPlus(13, 25);
     private final ClusteringComparator comparator;
-    private final long nowInSec = FBUtilities.nowInSeconds();
 
     private final UUID originatingHostId;
 
@@ -158,6 +148,11 @@ public class MetadataCollector implements PartitionStatisticsCollector
     public MetadataCollector(ClusteringComparator comparator, UUID originatingHostId)
     {
         this.comparator = comparator;
+
+        int clusteringTypesNum = comparator.size();
+        this.comparators = new AbstractType[clusteringTypesNum];
+        for (int i = 0; i < clusteringTypesNum; i++)
+            comparators[i] = comparator.subtype(i);
         this.originatingHostId = originatingHostId;
     }
 
@@ -177,11 +172,16 @@ public class MetadataCollector implements PartitionStatisticsCollector
         commitLogIntervals(intervals.build());
     }
 
+    public MetadataCollector(Iterable<SSTableReader> sstables, ClusteringComparator comparator, int level)
+    {
+        this(sstables, comparator);
+        sstableLevel(level);
+    }
+
     public MetadataCollector addKey(ByteBuffer key)
     {
         long hashed = MurmurHash.hash2_64(key, key.position(), key.remaining(), 0);
         cardinality.offerHashed(hashed);
-        totalTombstones = 0;
         return this;
     }
 
@@ -222,8 +222,6 @@ public class MetadataCollector implements PartitionStatisticsCollector
         updateTimestamp(newInfo.timestamp());
         updateTTL(newInfo.ttl());
         updateLocalDeletionTime(newInfo.localExpirationTime());
-        if (!newInfo.isLive(nowInSec))
-            updateTombstoneCount();
     }
 
     public void update(Cell<?> cell)
@@ -232,8 +230,6 @@ public class MetadataCollector implements PartitionStatisticsCollector
         updateTimestamp(cell.timestamp());
         updateTTL(cell.ttl());
         updateLocalDeletionTime(cell.localDeletionTime());
-        if (!cell.isLive(nowInSec))
-            updateTombstoneCount();
     }
 
     public void updatePartitionDeletion(DeletionTime dt)
@@ -249,7 +245,6 @@ public class MetadataCollector implements PartitionStatisticsCollector
         {
             updateTimestamp(dt.markedForDeleteAt());
             updateLocalDeletionTime(dt.localDeletionTime());
-            updateTombstoneCount();
         }
     }
 
@@ -264,16 +259,11 @@ public class MetadataCollector implements PartitionStatisticsCollector
         timestampTracker.update(newTimestamp);
     }
 
-    private void updateLocalDeletionTime(long newLocalDeletionTime)
+    private void updateLocalDeletionTime(int newLocalDeletionTime)
     {
         localDeletionTimeTracker.update(newLocalDeletionTime);
         if (newLocalDeletionTime != Cell.NO_DELETION_TIME)
             estimatedTombstoneDropTime.update(newLocalDeletionTime);
-    }
-
-    private void updateTombstoneCount()
-    {
-        ++totalTombstones;
     }
 
     private void updateTTL(int newTTL)
@@ -304,17 +294,16 @@ public class MetadataCollector implements PartitionStatisticsCollector
         if (clustering == Clustering.STATIC_CLUSTERING)
             return;
 
-        // In case of monotonically growing stream of clusterings, we will usually require only one comparison
-        // because if we detected X is greater than the current MAX, then it cannot be lower than the current MIN
-        // at the same time. The only case when we need to update MIN when the current MAX was detected to be updated
-        // is the case when MIN was not yet initialized and still point the ClusteringBound.MAX_START
-        if (comparator.compare(clustering, maxClustering) > 0)
+        if (!clusteringInitialized)
+        {
+            clusteringInitialized = true;
+            maxClustering = minClustering = clustering;
+        }
+        else if (comparator.compare((ClusteringPrefix<?>) clustering, (ClusteringPrefix<?>) maxClustering) > 0)
         {
             maxClustering = clustering;
-            if (minClustering == ClusteringBound.MAX_START)
-                minClustering = clustering;
         }
-        else if (comparator.compare(clustering, minClustering) < 0)
+        else if (comparator.compare((ClusteringPrefix<?>) clustering, (ClusteringPrefix<?>) minClustering) < 0)
         {
             minClustering = clustering;
         }
@@ -323,28 +312,25 @@ public class MetadataCollector implements PartitionStatisticsCollector
     public void updateClusteringValuesByBoundOrBoundary(ClusteringBoundOrBoundary<?> clusteringBoundOrBoundary)
     {
         // In a SSTable, every opening marker will be closed, so the start of a range tombstone marker will never be
-        // the maxClustering (the corresponding close might though) and there is no point in doing the comparison
+        // be the maxClustering (the corresponding close might though) and there is no point in doing the comparison
         // (and vice-versa for the close). By the same reasoning, a boundary will never be either the min or max
-        // clustering, and we can save on comparisons.
+        // clustering and we can save comparisons.
         if (clusteringBoundOrBoundary.isBoundary())
             return;
 
-        // see the comment in updateClusteringValues(Clustering)
-        if (comparator.compare(clusteringBoundOrBoundary, maxClustering) > 0)
+        if (!clusteringInitialized)
         {
-            if (clusteringBoundOrBoundary.kind().isEnd())
-                maxClustering = clusteringBoundOrBoundary;
-
-            // note that since we excluded boundaries above, there is no way that the provided clustering prefix is
-            // a start and en end at the same time
-            else if (minClustering == ClusteringBound.MAX_START)
+            clusteringInitialized = true;
+            maxClustering = minClustering = clusteringBoundOrBoundary;
+        }
+        else if (clusteringBoundOrBoundary.kind().isStart())
+        {
+            if (comparator.compare(clusteringBoundOrBoundary, minClustering) < 0)
                 minClustering = clusteringBoundOrBoundary;
         }
-        else if (comparator.compare(clusteringBoundOrBoundary, minClustering) < 0)
+        else
         {
-            if (clusteringBoundOrBoundary.kind().isStart())
-                minClustering = clusteringBoundOrBoundary;
-            else if (maxClustering == ClusteringBound.MIN_END)
+            if (comparator.compare(clusteringBoundOrBoundary, maxClustering) > 0)
                 maxClustering = clusteringBoundOrBoundary;
         }
     }
@@ -354,16 +340,13 @@ public class MetadataCollector implements PartitionStatisticsCollector
         this.hasLegacyCounterShards = this.hasLegacyCounterShards || hasLegacyCounterShards;
     }
 
-    public Map<MetadataType, MetadataComponent> finalizeMetadata(String partitioner, double bloomFilterFPChance, long repairedAt, TimeUUID pendingRepair, boolean isTransient, SerializationHeader header, ByteBuffer firstKey, ByteBuffer lastKey)
+    public Map<MetadataType, MetadataComponent> finalizeMetadata(String partitioner, double bloomFilterFPChance, long repairedAt, UUID pendingRepair, boolean isTransient, SerializationHeader header)
     {
-        assert minClustering.kind() == ClusteringPrefix.Kind.CLUSTERING || minClustering.kind().isStart();
-        assert maxClustering.kind() == ClusteringPrefix.Kind.CLUSTERING || maxClustering.kind().isEnd();
-
         Map<MetadataType, MetadataComponent> components = new EnumMap<>(MetadataType.class);
         components.put(MetadataType.VALIDATION, new ValidationMetadata(partitioner, bloomFilterFPChance));
         components.put(MetadataType.STATS, new StatsMetadata(estimatedPartitionSize,
                                                              estimatedCellPerPartitionCount,
-                                                             commitLogIntervals,
+                                                             commitLogIntervals != null ? commitLogIntervals : IntervalSet.empty(),
                                                              timestampTracker.min(),
                                                              timestampTracker.max(),
                                                              localDeletionTimeTracker.min(),
@@ -374,8 +357,10 @@ public class MetadataCollector implements PartitionStatisticsCollector
                                                              estimatedTombstoneDropTime.build(),
                                                              sstableLevel,
                                                              comparator.subtypes(),
-                                                             Slice.make(minClustering.retainable().asStartBound(), maxClustering.retainable().asEndBound()),
+                                                             Slice.make(minClustering.retainable(),
+                                                                        maxClustering.retainable()),
                                                              hasLegacyCounterShards,
+                                                             hasPartitionLevelDeletions,
                                                              repairedAt,
                                                              totalColumnsSet,
                                                              totalRows,
@@ -383,9 +368,8 @@ public class MetadataCollector implements PartitionStatisticsCollector
                                                              originatingHostId,
                                                              pendingRepair,
                                                              isTransient,
-                                                             hasPartitionLevelDeletions,
-                                                             firstKey,
-                                                             lastKey));
+                                                             Collections.emptyMap(),
+                                                             ZeroCopyMetadata.EMPTY));
         components.put(MetadataType.COMPACTION, new CompactionMetadata(cardinality));
         components.put(MetadataType.HEADER, header.toComponent());
         return components;

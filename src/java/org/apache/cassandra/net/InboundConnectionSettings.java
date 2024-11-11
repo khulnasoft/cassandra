@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.net;
 
+import java.net.InetAddress;
 import java.util.function.Function;
 
 import com.google.common.base.Preconditions;
@@ -70,10 +71,20 @@ public class InboundConnectionSettings
         this(null, null, null, null, null, null, null, null, null);
     }
 
+    public boolean authenticate(InetAddressAndPort endpoint)
+    {
+        return authenticator.authenticate(endpoint.address, endpoint.port);
+    }
+
+    public boolean authenticate(InetAddress address, int port)
+    {
+        return authenticator.authenticate(address, port);
+    }
+
     public String toString()
     {
         return format("address: (%s), nic: %s, encryption: %s",
-                      bindAddress, FBUtilities.getNetworkInterface(bindAddress.getAddress()), SocketFactory.encryptionOptionsSummary(encryption));
+                      bindAddress, FBUtilities.getNetworkInterface(bindAddress.address), SocketFactory.encryptionOptionsSummary(encryption));
     }
 
     public InboundConnectionSettings withAuthenticator(IInternodeAuthenticator authenticator)
@@ -157,9 +168,9 @@ public class InboundConnectionSettings
     public InboundConnectionSettings withDefaults()
     {
         // this is for the socket that can be plain, only ssl, or optional plain/ssl
-        if (bindAddress.getPort() != DatabaseDescriptor.getStoragePort() && bindAddress.getPort() != DatabaseDescriptor.getSSLStoragePort())
+        if (bindAddress.port != DatabaseDescriptor.getStoragePort() && bindAddress.port != DatabaseDescriptor.getSSLStoragePort())
             throw new ConfigurationException(format("Local endpoint port %d doesn't match YAML configured port %d or legacy SSL port %d",
-                                                    bindAddress.getPort(), DatabaseDescriptor.getStoragePort(), DatabaseDescriptor.getSSLStoragePort()));
+                                                    bindAddress.port, DatabaseDescriptor.getStoragePort(), DatabaseDescriptor.getSSLStoragePort()));
 
         IInternodeAuthenticator authenticator = this.authenticator;
         ServerEncryptionOptions encryption = this.encryption;

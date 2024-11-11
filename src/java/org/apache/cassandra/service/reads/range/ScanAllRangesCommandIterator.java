@@ -36,25 +36,19 @@ import org.apache.cassandra.locator.ReplicaPlan;
 import org.apache.cassandra.locator.ReplicaPlans;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.service.QueryInfoTracker;
 import org.apache.cassandra.service.reads.DataResolver;
 import org.apache.cassandra.service.reads.ReadCallback;
 import org.apache.cassandra.service.reads.repair.NoopReadRepair;
 import org.apache.cassandra.tracing.Tracing;
-import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.utils.CloseableIterator;
 
 /**
  * A custom {@link RangeCommandIterator} that queries all replicas required by consistency level at once with data range
  * specify in {@link PartitionRangeReadCommand}.
- * <p>
+ *
  * This is to speed up {@link Index.QueryPlan#isTopK()} queries that needs to find global top-k rows in the cluster, because
  * existing {@link RangeCommandIterator} has to execute a top-k search per vnode range which is wasting resources.
- * <p>
- * The implementation combines the replica plans for each data range into a single shared replica plan. This results in
- * queries using reconciliation where it may not be expected. This is handled in the {@link DataResolver} for top-K queries
- * so any usage for queries other that top-K should bear this in mind.
- * <p>
- * It is important to note that this implementation can only be used with {@link ConsistencyLevel#ONE} and {@link ConsistencyLevel#LOCAL_ONE}
  */
 public class ScanAllRangesCommandIterator extends RangeCommandIterator
 {
@@ -63,9 +57,10 @@ public class ScanAllRangesCommandIterator extends RangeCommandIterator
     ScanAllRangesCommandIterator(Keyspace keyspace, CloseableIterator<ReplicaPlan.ForRangeRead> replicaPlans,
                                  PartitionRangeReadCommand command,
                                  int totalRangeCount,
-                                 Dispatcher.RequestTime requestTime)
+                                 long queryStartNanoTime,
+                                 QueryInfoTracker.ReadTracker readTracker)
     {
-        super(replicaPlans, command, totalRangeCount, totalRangeCount, totalRangeCount, requestTime);
+        super(replicaPlans, command, totalRangeCount, totalRangeCount, totalRangeCount, queryStartNanoTime, readTracker);
         Preconditions.checkState(command.isTopK());
 
         this.keyspace = keyspace;
@@ -92,14 +87,14 @@ public class ScanAllRangesCommandIterator extends RangeCommandIterator
 
         ReplicaPlan.ForRangeRead plan = ReplicaPlans.forFullRangeRead(keyspace, consistencyLevel, command.dataRange().keyRange(), replicasToQuery, totalRangeCount);
         ReplicaPlan.SharedForRangeRead sharedReplicaPlan = ReplicaPlan.shared(plan);
-        DataResolver<EndpointsForRange, ReplicaPlan.ForRangeRead> resolver = new DataResolver<>(command, sharedReplicaPlan, NoopReadRepair.instance, requestTime, false);
-        ReadCallback<EndpointsForRange, ReplicaPlan.ForRangeRead> handler = new ReadCallback<>(resolver, command, sharedReplicaPlan, requestTime);
+        DataResolver<EndpointsForRange, ReplicaPlan.ForRangeRead> resolver = new DataResolver<>(command, sharedReplicaPlan, NoopReadRepair.instance, queryStartNanoTime, false, readTracker);
+        ReadCallback<EndpointsForRange, ReplicaPlan.ForRangeRead> handler = new ReadCallback<>(resolver, command, sharedReplicaPlan, queryStartNanoTime);
 
         int nodes = 0;
         for (InetAddressAndPort endpoint : replicasToQuery)
         {
             Tracing.trace("Enqueuing request to {}", endpoint);
-            Message<ReadCommand> message = command.createMessage(false, requestTime);
+            Message<ReadCommand> message = command.createMessage(false);
             MessagingService.instance().sendWithCallback(message, endpoint, handler);
             nodes++;
         }

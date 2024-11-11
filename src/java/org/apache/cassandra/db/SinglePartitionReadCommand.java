@@ -19,14 +19,9 @@ package org.apache.cassandra.db;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.NavigableSet;
-import java.util.TreeSet;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
+import java.util.function.Function;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Sets;
@@ -35,51 +30,27 @@ import org.apache.cassandra.cache.IRowCacheEntry;
 import org.apache.cassandra.cache.RowCacheKey;
 import org.apache.cassandra.cache.RowCacheSentinel;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.filter.ClusteringIndexFilter;
-import org.apache.cassandra.db.filter.ClusteringIndexNamesFilter;
-import org.apache.cassandra.db.filter.ClusteringIndexSliceFilter;
-import org.apache.cassandra.db.filter.ColumnFilter;
-import org.apache.cassandra.db.filter.DataLimits;
-import org.apache.cassandra.db.filter.RowFilter;
-import org.apache.cassandra.db.lifecycle.SSTableSet;
-import org.apache.cassandra.db.lifecycle.View;
+import org.apache.cassandra.db.filter.*;
+import org.apache.cassandra.db.lifecycle.*;
 import org.apache.cassandra.db.memtable.Memtable;
-import org.apache.cassandra.db.partitions.CachedBTreePartition;
-import org.apache.cassandra.db.partitions.CachedPartition;
-import org.apache.cassandra.db.partitions.ImmutableBTreePartition;
-import org.apache.cassandra.db.partitions.PartitionIterator;
-import org.apache.cassandra.db.partitions.PartitionIterators;
-import org.apache.cassandra.db.partitions.SingletonUnfilteredPartitionIterator;
-import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
-import org.apache.cassandra.db.rows.Cell;
-import org.apache.cassandra.db.rows.Row;
-import org.apache.cassandra.db.rows.Rows;
-import org.apache.cassandra.db.rows.Unfiltered;
-import org.apache.cassandra.db.rows.UnfilteredRowIterator;
-import org.apache.cassandra.db.rows.UnfilteredRowIteratorWithLowerBound;
-import org.apache.cassandra.db.rows.UnfilteredRowIterators;
-import org.apache.cassandra.db.rows.WrappingUnfilteredRowIterator;
+import org.apache.cassandra.db.partitions.*;
+import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.transform.RTBoundValidator;
 import org.apache.cassandra.db.transform.Transformation;
-import org.apache.cassandra.db.virtual.VirtualKeyspaceRegistry;
-import org.apache.cassandra.db.virtual.VirtualTable;
-import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.index.Index;
-import org.apache.cassandra.io.sstable.SSTableReadsListener;
+import org.apache.cassandra.index.sai.utils.RowWithSourceTable;
+import org.apache.cassandra.io.sstable.format.RowIndexEntry;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.SSTableReadsListener;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.metrics.TableMetrics;
 import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.service.CacheService;
-import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.service.StorageProxy;
-import org.apache.cassandra.tcm.Epoch;
+import org.apache.cassandra.service.*;
 import org.apache.cassandra.tracing.Tracing;
-import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.btree.BTreeSet;
 
@@ -90,78 +61,26 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
 {
     protected static final SelectionDeserializer selectionDeserializer = new Deserializer();
 
-    protected final DecoratedKey partitionKey;
-    protected final ClusteringIndexFilter clusteringIndexFilter;
+    private final DecoratedKey partitionKey;
+    private final ClusteringIndexFilter clusteringIndexFilter;
 
     @VisibleForTesting
-    protected SinglePartitionReadCommand(Epoch serializedAtEpoch,
-                                         boolean isDigest,
+    protected SinglePartitionReadCommand(boolean isDigest,
                                          int digestVersion,
                                          boolean acceptsTransient,
                                          TableMetadata metadata,
-                                         long nowInSec,
+                                         int nowInSec,
                                          ColumnFilter columnFilter,
                                          RowFilter rowFilter,
                                          DataLimits limits,
                                          DecoratedKey partitionKey,
                                          ClusteringIndexFilter clusteringIndexFilter,
-                                         Index.QueryPlan indexQueryPlan,
-                                         boolean trackWarnings,
-                                         DataRange dataRange)
+                                         Index.QueryPlan indexQueryPlan)
     {
-        super(serializedAtEpoch, Kind.SINGLE_PARTITION, isDigest, digestVersion, acceptsTransient, metadata, nowInSec, columnFilter, rowFilter, limits, indexQueryPlan, trackWarnings, dataRange);
+        super(Kind.SINGLE_PARTITION, isDigest, digestVersion, acceptsTransient, metadata, nowInSec, columnFilter, rowFilter, limits, indexQueryPlan);
         assert partitionKey.getPartitioner() == metadata.partitioner;
         this.partitionKey = partitionKey;
         this.clusteringIndexFilter = clusteringIndexFilter;
-    }
-
-    private static SinglePartitionReadCommand create(Epoch serializedAtEpoch,
-                                                     boolean isDigest,
-                                                     int digestVersion,
-                                                     boolean acceptsTransient,
-                                                     TableMetadata metadata,
-                                                     long nowInSec,
-                                                     ColumnFilter columnFilter,
-                                                     RowFilter rowFilter,
-                                                     DataLimits limits,
-                                                     DecoratedKey partitionKey,
-                                                     ClusteringIndexFilter clusteringIndexFilter,
-                                                     Index.QueryPlan indexQueryPlan,
-                                                     boolean trackWarnings)
-    {
-        DataRange dataRange = new DataRange(new Bounds<>(partitionKey, partitionKey), clusteringIndexFilter);
-
-        if (metadata.isVirtual())
-        {
-            return new VirtualTableSinglePartitionReadCommand(isDigest,
-                                                              digestVersion,
-                                                              acceptsTransient,
-                                                              metadata,
-                                                              nowInSec,
-                                                              columnFilter,
-                                                              rowFilter,
-                                                              limits,
-                                                              partitionKey,
-                                                              clusteringIndexFilter,
-                                                              indexQueryPlan,
-                                                              trackWarnings,
-                                                              dataRange);
-        }
-
-        return new SinglePartitionReadCommand(serializedAtEpoch,
-                                              isDigest,
-                                              digestVersion,
-                                              acceptsTransient,
-                                              metadata,
-                                              nowInSec,
-                                              columnFilter,
-                                              rowFilter,
-                                              limits,
-                                              partitionKey,
-                                              clusteringIndexFilter,
-                                              indexQueryPlan,
-                                              trackWarnings,
-                                              dataRange);
     }
 
     /**
@@ -179,7 +98,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      * @return a newly created read command.
      */
     public static SinglePartitionReadCommand create(TableMetadata metadata,
-                                                    long nowInSec,
+                                                    int nowInSec,
                                                     ColumnFilter columnFilter,
                                                     RowFilter rowFilter,
                                                     DataLimits limits,
@@ -187,19 +106,17 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                                                     ClusteringIndexFilter clusteringIndexFilter,
                                                     Index.QueryPlan indexQueryPlan)
     {
-        return create(metadata.epoch,
-                      false,
-                      0,
-                      false,
-                      metadata,
-                      nowInSec,
-                      columnFilter,
-                      rowFilter,
-                      limits,
-                      partitionKey,
-                      clusteringIndexFilter,
-                      indexQueryPlan,
-                      false);
+        return new SinglePartitionReadCommand(false,
+                                              0,
+                                              false,
+                                              metadata,
+                                              nowInSec,
+                                              columnFilter,
+                                              rowFilter,
+                                              limits,
+                                              partitionKey,
+                                              clusteringIndexFilter,
+                                              indexQueryPlan);
     }
 
     /**
@@ -216,7 +133,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      * @return a newly created read command.
      */
     public static SinglePartitionReadCommand create(TableMetadata metadata,
-                                                    long nowInSec,
+                                                    int nowInSec,
                                                     ColumnFilter columnFilter,
                                                     RowFilter rowFilter,
                                                     DataLimits limits,
@@ -245,12 +162,12 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      * @return a newly created read command. The returned command will use no row filter and have no limits.
      */
     public static SinglePartitionReadCommand create(TableMetadata metadata,
-                                                    long nowInSec,
+                                                    int nowInSec,
                                                     DecoratedKey key,
                                                     ColumnFilter columnFilter,
                                                     ClusteringIndexFilter filter)
     {
-        return create(metadata, nowInSec, columnFilter, RowFilter.none(), DataLimits.NONE, key, filter);
+        return create(metadata, nowInSec, columnFilter, RowFilter.NONE, DataLimits.NONE, key, filter);
     }
 
     /**
@@ -262,7 +179,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      *
      * @return a newly created read command that queries all the rows of {@code key}.
      */
-    public static SinglePartitionReadCommand fullPartitionRead(TableMetadata metadata, long nowInSec, DecoratedKey key)
+    public static SinglePartitionReadCommand fullPartitionRead(TableMetadata metadata, int nowInSec, DecoratedKey key)
     {
         return create(metadata, nowInSec, key, Slices.ALL);
     }
@@ -276,7 +193,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      *
      * @return a newly created read command that queries all the rows of {@code key}.
      */
-    public static SinglePartitionReadCommand fullPartitionRead(TableMetadata metadata, long nowInSec, ByteBuffer key)
+    public static SinglePartitionReadCommand fullPartitionRead(TableMetadata metadata, int nowInSec, ByteBuffer key)
     {
         return create(metadata, nowInSec, metadata.partitioner.decorateKey(key), Slices.ALL);
     }
@@ -292,7 +209,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      * @return a newly created read command that queries {@code slice} in {@code key}. The returned query will
      * query every columns for the table (without limit or row filtering) and be in forward order.
      */
-    public static SinglePartitionReadCommand create(TableMetadata metadata, long nowInSec, DecoratedKey key, Slice slice)
+    public static SinglePartitionReadCommand create(TableMetadata metadata, int nowInSec, DecoratedKey key, Slice slice)
     {
         return create(metadata, nowInSec, key, Slices.with(metadata.comparator, slice));
     }
@@ -308,10 +225,10 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      * @return a newly created read command that queries the {@code slices} in {@code key}. The returned query will
      * query every columns for the table (without limit or row filtering) and be in forward order.
      */
-    public static SinglePartitionReadCommand create(TableMetadata metadata, long nowInSec, DecoratedKey key, Slices slices)
+    public static SinglePartitionReadCommand create(TableMetadata metadata, int nowInSec, DecoratedKey key, Slices slices)
     {
         ClusteringIndexSliceFilter filter = new ClusteringIndexSliceFilter(slices, false);
-        return create(metadata, nowInSec, ColumnFilter.all(metadata), RowFilter.none(), DataLimits.NONE, key, filter);
+        return create(metadata, nowInSec, ColumnFilter.all(metadata), RowFilter.NONE, DataLimits.NONE, key, filter);
     }
 
     /**
@@ -325,7 +242,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      * @return a newly created read command that queries the {@code slices} in {@code key}. The returned query will
      * query every columns for the table (without limit or row filtering) and be in forward order.
      */
-    public static SinglePartitionReadCommand create(TableMetadata metadata, long nowInSec, ByteBuffer key, Slices slices)
+    public static SinglePartitionReadCommand create(TableMetadata metadata, int nowInSec, ByteBuffer key, Slices slices)
     {
         return create(metadata, nowInSec, metadata.partitioner.decorateKey(key), slices);
     }
@@ -341,10 +258,10 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      * @return a newly created read command that queries the {@code names} in {@code key}. The returned query will
      * query every columns (without limit or row filtering) and be in forward order.
      */
-    public static SinglePartitionReadCommand create(TableMetadata metadata, long nowInSec, DecoratedKey key, NavigableSet<Clustering<?>> names)
+    public static SinglePartitionReadCommand create(TableMetadata metadata, int nowInSec, DecoratedKey key, NavigableSet<Clustering<?>> names)
     {
         ClusteringIndexNamesFilter filter = new ClusteringIndexNamesFilter(names, false);
-        return create(metadata, nowInSec, ColumnFilter.all(metadata), RowFilter.none(), DataLimits.NONE, key, filter);
+        return create(metadata, nowInSec, ColumnFilter.all(metadata), RowFilter.NONE, DataLimits.NONE, key, filter);
     }
 
     /**
@@ -358,80 +275,72 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      * @return a newly created read command that queries {@code name} in {@code key}. The returned query will
      * query every columns (without limit or row filtering).
      */
-    public static SinglePartitionReadCommand create(TableMetadata metadata, long nowInSec, DecoratedKey key, Clustering<?> name)
+    public static SinglePartitionReadCommand create(TableMetadata metadata, int nowInSec, DecoratedKey key, Clustering<?> name)
     {
         return create(metadata, nowInSec, key, FBUtilities.singleton(name, metadata.comparator));
     }
 
     public SinglePartitionReadCommand copy()
     {
-        return create(serializedAtEpoch(),
-                      isDigestQuery(),
-                      digestVersion(),
-                      acceptsTransient(),
-                      metadata(),
-                      nowInSec(),
-                      columnFilter(),
-                      rowFilter(),
-                      limits(),
-                      partitionKey(),
-                      clusteringIndexFilter(),
-                      indexQueryPlan(),
-                      isTrackingWarnings());
+        return new SinglePartitionReadCommand(isDigestQuery(),
+                                              digestVersion(),
+                                              acceptsTransient(),
+                                              metadata(),
+                                              nowInSec(),
+                                              columnFilter(),
+                                              rowFilter(),
+                                              limits(),
+                                              partitionKey(),
+                                              clusteringIndexFilter(),
+                                              indexQueryPlan());
     }
 
     @Override
     protected SinglePartitionReadCommand copyAsDigestQuery()
     {
-        return create(serializedAtEpoch(),
-                      true,
-                      digestVersion(),
-                      acceptsTransient(),
-                      metadata(),
-                      nowInSec(),
-                      columnFilter(),
-                      rowFilter(),
-                      limits(),
-                      partitionKey(),
-                      clusteringIndexFilter(),
-                      indexQueryPlan(),
-                      isTrackingWarnings());
+        return new SinglePartitionReadCommand(true,
+                                              digestVersion(),
+                                              acceptsTransient(),
+                                              metadata(),
+                                              nowInSec(),
+                                              columnFilter(),
+                                              rowFilter(),
+                                              limits(),
+                                              partitionKey(),
+                                              clusteringIndexFilter(),
+                                              indexQueryPlan());
     }
 
     @Override
     protected SinglePartitionReadCommand copyAsTransientQuery()
     {
-        return create(serializedAtEpoch(),
-                      false,
-                      0,
-                      true,
-                      metadata(),
-                      nowInSec(),
-                      columnFilter(),
-                      rowFilter(),
-                      limits(),
-                      partitionKey(),
-                      clusteringIndexFilter(),
-                      indexQueryPlan(),
-                      isTrackingWarnings());
+        return new SinglePartitionReadCommand(false,
+                                              0,
+                                              true,
+                                              metadata(),
+                                              nowInSec(),
+                                              columnFilter(),
+                                              rowFilter(),
+                                              limits(),
+                                              partitionKey(),
+                                              clusteringIndexFilter(),
+                                              indexQueryPlan());
     }
 
     @Override
     public SinglePartitionReadCommand withUpdatedLimit(DataLimits newLimits)
     {
-        return create(serializedAtEpoch(),
-                      isDigestQuery(),
-                      digestVersion(),
-                      acceptsTransient(),
-                      metadata(),
-                      nowInSec(),
-                      columnFilter(),
-                      rowFilter(),
-                      newLimits,
-                      partitionKey(),
-                      clusteringIndexFilter(),
-                      indexQueryPlan(),
-                      isTrackingWarnings());
+        return new SinglePartitionReadCommand(isDigestQuery(),
+                                              digestVersion(),
+                                              acceptsTransient(),
+                                              metadata(),
+                                              nowInSec(),
+                                              columnFilter(),
+                                              rowFilter(),
+                                              newLimits,
+                                              partitionKey(),
+                                              clusteringIndexFilter(),
+                                              indexQueryPlan());
     }
 
     @Override
@@ -466,32 +375,34 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
     {
         // We shouldn't have set digest yet when reaching that point
         assert !isDigestQuery();
-        SinglePartitionReadCommand cmd = create(metadata(),
-                                                nowInSec(),
-                                                columnFilter(),
-                                                rowFilter(),
-                                                limits,
-                                                partitionKey(),
-                                                lastReturned == null ? clusteringIndexFilter() : clusteringIndexFilter.forPaging(metadata().comparator, lastReturned, false));
-        if (isTrackingWarnings())
-            cmd.trackWarnings();
-        return cmd;
+        return create(metadata(),
+                      nowInSec(),
+                      columnFilter(),
+                      rowFilter(),
+                      limits,
+                      partitionKey(),
+                      lastReturned == null ? clusteringIndexFilter() : clusteringIndexFilter.forPaging(metadata().comparator, lastReturned, false));
     }
 
-    @Override
-    public PartitionIterator execute(ConsistencyLevel consistency, ClientState state, Dispatcher.RequestTime requestTime) throws RequestExecutionException
+    public PartitionIterator execute(ConsistencyLevel consistency, QueryState queryState, long queryStartNanoTime) throws RequestExecutionException
     {
         if (clusteringIndexFilter.isEmpty(metadata().comparator))
             return EmptyIterators.partition();
 
-        return StorageProxy.read(Group.one(this), consistency, requestTime);
+        return StorageProxy.read(Group.one(this), consistency, queryState, queryStartNanoTime);
     }
 
-    protected void recordLatency(TableMetrics metric, long latencyNanos)
+    protected void recordReadLatency(TableMetrics metric, long latencyNanos)
     {
         metric.readLatency.addNano(latencyNanos);
     }
 
+    protected void recordReadRequest(TableMetrics metric)
+    {
+        metric.readRequests.inc();
+    }
+
+    @SuppressWarnings("resource") // we close the created iterator through closing the result of this method (and SingletonUnfilteredPartitionIterator ctor cannot fail)
     protected UnfilteredPartitionIterator queryStorage(final ColumnFamilyStore cfs, ReadExecutionController executionController)
     {
         // skip the row cache and go directly to sstables/memtable if repaired status of
@@ -511,6 +422,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      * If the partition is is not cached, we figure out what filter is "biggest", read
      * that from disk, then filter the result and either cache that or return it.
      */
+    @SuppressWarnings("resource")
     private UnfilteredRowIterator getThroughCache(ColumnFamilyStore cfs, ReadExecutionController executionController)
     {
         assert !cfs.isIndex(); // CASSANDRA-5732
@@ -538,7 +450,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                 cfs.metric.rowCacheHit.inc();
                 Tracing.trace("Row cache hit");
                 UnfilteredRowIterator unfilteredRowIterator = clusteringIndexFilter().getUnfilteredRowIterator(columnFilter(), cachedPartition);
-                cfs.metric.updateSSTableIterated(0);
+                cfs.metric.updateSSTableIterated(0, 0, 0);
                 return unfilteredRowIterator;
             }
 
@@ -574,30 +486,25 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                 final int rowsToCache = metadata().params.caching.rowsPerPartitionToCache();
                 final boolean enforceStrictLiveness = metadata().enforceStrictLiveness();
 
+                @SuppressWarnings("resource") // we close on exception or upon closing the result of this method
                 UnfilteredRowIterator iter = fullPartitionRead(metadata(), nowInSec(), partitionKey()).queryMemtableAndDisk(cfs, executionController);
                 try
                 {
                     // Use a custom iterator instead of DataLimits to avoid stopping the original iterator
-                    UnfilteredRowIterator toCacheIterator = new WrappingUnfilteredRowIterator()
+                    UnfilteredRowIterator toCacheIterator = new WrappingUnfilteredRowIterator(iter)
                     {
                         private int rowsCounted = 0;
 
                         @Override
-                        public UnfilteredRowIterator wrapped()
-                        {
-                            return iter;
-                        }
-
-                        @Override
                         public boolean hasNext()
                         {
-                            return rowsCounted < rowsToCache && iter.hasNext();
+                            return rowsCounted < rowsToCache && super.hasNext();
                         }
 
                         @Override
                         public Unfiltered next()
                         {
-                            Unfiltered unfiltered = iter.next();
+                            Unfiltered unfiltered = super.next();
                             if (unfiltered.isRow())
                             {
                                 Row row = (Row) unfiltered;
@@ -666,12 +573,35 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
     public UnfilteredRowIterator queryMemtableAndDisk(ColumnFamilyStore cfs, ReadExecutionController executionController)
     {
         assert executionController != null && executionController.validForReadOn(cfs);
-        Tracing.trace("Executing single-partition query on {}", cfs.name);
+        if (Tracing.traceSinglePartitions())
+            Tracing.trace("Executing single-partition query on {}", cfs.name);
 
-        return queryMemtableAndDiskInternal(cfs, executionController);
+        return queryMemtableAndDiskInternal(cfs, executionController, System.nanoTime());
     }
 
-    private UnfilteredRowIterator queryMemtableAndDiskInternal(ColumnFamilyStore cfs, ReadExecutionController controller)
+    public UnfilteredRowIterator queryMemtableAndDisk(ColumnFamilyStore cfs,
+                                                      ColumnFamilyStore.ViewFragment view,
+                                                      Function<Object, Transformation<BaseRowIterator<?>>> rowTransformer,
+                                                      ReadExecutionController executionController)
+    {
+        assert executionController != null && executionController.validForReadOn(cfs);
+        if (Tracing.traceSinglePartitions())
+            Tracing.trace("Executing single-partition query on {}", cfs.name);
+
+        return queryMemtableAndDiskInternal(cfs, view, rowTransformer, executionController, System.nanoTime());
+    }
+
+
+    private UnfilteredRowIterator queryMemtableAndDiskInternal(ColumnFamilyStore cfs, ReadExecutionController controller, long startTimeNanos)
+    {
+        var view = cfs.select(View.select(SSTableSet.LIVE, partitionKey()));
+        return queryMemtableAndDiskInternal(cfs, view, null, controller, startTimeNanos);
+    }
+    private UnfilteredRowIterator queryMemtableAndDiskInternal(ColumnFamilyStore cfs,
+                                                               ColumnFamilyStore.ViewFragment view,
+                                                               Function<Object, Transformation<BaseRowIterator<?>>> rowTransformer,
+                                                               ReadExecutionController controller,
+                                                               long startTimeNanos)
     {
         /*
          * We have 2 main strategies:
@@ -695,11 +625,12 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
             && !queriesMulticellType()
             && !controller.isTrackingRepairedStatus())
         {
-            return queryMemtableAndSSTablesInTimestampOrder(cfs, (ClusteringIndexNamesFilter)clusteringIndexFilter(), controller);
+            return queryMemtableAndSSTablesInTimestampOrder(cfs, view, rowTransformer, (ClusteringIndexNamesFilter)clusteringIndexFilter(), controller, startTimeNanos);
         }
 
-        Tracing.trace("Acquiring sstable references");
-        ColumnFamilyStore.ViewFragment view = cfs.select(View.select(SSTableSet.LIVE, partitionKey()));
+        if (Tracing.traceSinglePartitions())
+            Tracing.trace("Acquiring sstable references");
+
         view.sstables.sort(SSTableReader.maxTimestampDescending);
         ClusteringIndexFilter filter = clusteringIndexFilter();
         long minTimestamp = Long.MAX_VALUE;
@@ -707,20 +638,23 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         InputCollector<UnfilteredRowIterator> inputCollector = iteratorsForPartition(view, controller);
         try
         {
-            SSTableReadMetricsCollector metricsCollector = new SSTableReadMetricsCollector();
-
             for (Memtable memtable : view.memtables)
             {
-                UnfilteredRowIterator iter = memtable.rowIterator(partitionKey(), filter.getSlices(metadata()), columnFilter(), filter.isReversed(), metricsCollector);
-                if (iter == null)
+                Partition partition = memtable.getPartition(partitionKey());
+                if (partition == null)
                     continue;
 
                 if (memtable.getMinTimestamp() != Memtable.NO_MIN_TIMESTAMP)
                     minTimestamp = Math.min(minTimestamp, memtable.getMinTimestamp());
 
+                @SuppressWarnings("resource") // 'iter' is added to iterators which is closed on exception, or through the closing of the final merged iterator
+                UnfilteredRowIterator iter = filter.getUnfilteredRowIterator(columnFilter(), partition);
+
+                var wrapped = rowTransformer != null ? Transformation.apply(iter, rowTransformer.apply(memtable)) : iter;
+
                 // Memtable data is always considered unrepaired
-                controller.updateMinOldestUnrepairedTombstone(memtable.getMinLocalDeletionTime());
-                inputCollector.addMemtableIterator(RTBoundValidator.validate(iter, RTBoundValidator.Stage.MEMTABLE, false));
+                controller.updateMinOldestUnrepairedTombstone(partition.stats().minLocalDeletionTime);
+                inputCollector.addMemtableIterator(RTBoundValidator.validate(wrapped, RTBoundValidator.Stage.MEMTABLE, false));
 
                 mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
                                                         iter.partitionLevelDeletion().markedForDeleteAt());
@@ -741,6 +675,8 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
             view.sstables.sort(SSTableReader.maxTimestampDescending);
             int nonIntersectingSSTables = 0;
             int includedDueToTombstones = 0;
+
+            SSTableReadMetricsCollector metricsCollector = new SSTableReadMetricsCollector();
 
             if (controller.isTrackingRepairedStatus())
                 Tracing.trace("Collecting data from sstables and tracking repaired status");
@@ -764,54 +700,42 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
 
                 if (!intersects && !hasRequiredStatics && !hasPartitionLevelDeletions)
                 {
-                    nonIntersectingSSTables++;
                     continue;
                 }
 
-                if (intersects || hasRequiredStatics)
-                {
-                    if (!sstable.isRepaired())
-                        controller.updateMinOldestUnrepairedTombstone(sstable.getMinLocalDeletionTime());
-
-                    // 'iter' is added to iterators which is closed on exception, or through the closing of the final merged iterator
-                    UnfilteredRowIterator iter = intersects ? makeRowIteratorWithLowerBound(cfs, sstable, metricsCollector)
-                                                            : makeRowIteratorWithSkippedNonStaticContent(cfs, sstable, metricsCollector);
-
-                    inputCollector.addSSTableIterator(sstable, iter);
-                    mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
-                                                            iter.partitionLevelDeletion().markedForDeleteAt());
-                }
-                else
+                @SuppressWarnings("resource")
+                UnfilteredRowIterator iter = intersects
+                                             ? makeIterator(cfs, sstable, metricsCollector)
+                                             : makeIteratorWithSkippedNonStaticContent(cfs, sstable, metricsCollector);
+                if (!intersects)
                 {
                     nonIntersectingSSTables++;
 
-                    // if the sstable contained range or cell tombstones, it would intersect; since we are here, it means
-                    // that there are no cell or range tombstones we are interested in (due to the filter)
-                    // however, we know that there are partition level deletions in this sstable and we need to make
-                    // an iterator figure out that (see `StatsMetadata.hasPartitionLevelDeletions`)
-
-                    // 'iter' is added to iterators which is closed on exception, or through the closing of the final merged iterator
-                    UnfilteredRowIterator iter = makeRowIteratorWithSkippedNonStaticContent(cfs, sstable, metricsCollector);
-
-                    // if the sstable contains a partition delete, then we must include it regardless of whether it
-                    // shadows any other data seen locally as we can't guarantee that other replicas have seen it
-                    if (!iter.partitionLevelDeletion().isLive())
-                    {
-                        if (!sstable.isRepaired())
-                            controller.updateMinOldestUnrepairedTombstone(sstable.getMinLocalDeletionTime());
-                        inputCollector.addSSTableIterator(sstable, iter);
-                        includedDueToTombstones++;
-                        mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
-                                                                iter.partitionLevelDeletion().markedForDeleteAt());
-                    }
-                    else
-                    {
-                        iter.close();
+                    if (!hasRequiredStatics) { // => has partition level deletions
+                        if (!iter.partitionLevelDeletion().isLive())
+                        {
+                            includedDueToTombstones++;
+                        }
+                        else
+                        {
+                            iter.close();
+                            continue;
+                        }
                     }
                 }
+
+                if (!sstable.isRepaired())
+                    controller.updateMinOldestUnrepairedTombstone(Math.min(controller.oldestUnrepairedTombstone(), sstable.getMinLocalDeletionTime()));
+
+                var wrapped = rowTransformer != null ? Transformation.apply(iter, rowTransformer.apply(sstable.getId())) : iter;
+
+                inputCollector.addSSTableIterator(sstable, wrapped);
+                if (hasPartitionLevelDeletions)
+                    mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
+                                                            iter.partitionLevelDeletion().markedForDeleteAt());
             }
 
-            if (Tracing.isTracing())
+            if (Tracing.traceSinglePartitions())
                 Tracing.trace("Skipped {}/{} non-slice-intersecting sstables, included {} due to tombstones",
                                nonIntersectingSSTables, view.sstables.size(), includedDueToTombstones);
 
@@ -821,7 +745,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
             StorageHook.instance.reportRead(cfs.metadata().id, partitionKey());
 
             List<UnfilteredRowIterator> iterators = inputCollector.finalizeIterators(cfs, nowInSec(), controller.oldestUnrepairedTombstone());
-            return withSSTablesIterated(iterators, cfs.metric, metricsCollector);
+            return withSSTablesIterated(iterators, controller, view.sstables.size(), cfs.metric, metricsCollector, startTimeNanos);
         }
         catch (RuntimeException | Error e)
         {
@@ -837,42 +761,38 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         }
     }
 
-    @Override
-    protected boolean intersects(SSTableReader sstable)
+    private boolean intersects(SSTableReader sstable)
     {
         return clusteringIndexFilter().intersects(sstable.metadata().comparator, sstable.getSSTableMetadata().coveredClustering);
     }
 
-    private UnfilteredRowIteratorWithLowerBound makeRowIteratorWithLowerBound(ColumnFamilyStore cfs,
-                                                                              SSTableReader sstable,
-                                                                              SSTableReadsListener listener)
+    private boolean hasRequiredStatics(SSTableReader sstable) {
+        // If some static columns are queried, we should always include the sstable: the clustering values stats of the sstable
+        // don't tell us if the sstable contains static values in particular.
+        return !columnFilter().fetchedColumns().statics.isEmpty() && sstable.header.hasStatic();
+    }
+
+    private boolean hasPartitionLevelDeletions(SSTableReader sstable)
+    {
+        return sstable.getSSTableMetadata().hasPartitionLevelDeletions;
+    }
+
+    private UnfilteredRowIteratorWithLowerBound makeIterator(ColumnFamilyStore cfs,
+                                                             SSTableReader sstable,
+                                                             SSTableReadsListener listener)
     {
         return StorageHook.instance.makeRowIteratorWithLowerBound(cfs,
-                                                                  sstable,
                                                                   partitionKey(),
+                                                                  sstable,
                                                                   clusteringIndexFilter(),
                                                                   columnFilter(),
                                                                   listener);
 
     }
 
-    private UnfilteredRowIterator makeRowIterator(ColumnFamilyStore cfs,
-                                                  SSTableReader sstable,
-                                                  ClusteringIndexNamesFilter clusteringIndexFilter,
-                                                  SSTableReadsListener listener)
-    {
-        return StorageHook.instance.makeRowIterator(cfs,
-                                                    sstable,
-                                                    partitionKey(),
-                                                    clusteringIndexFilter.getSlices(cfs.metadata()),
-                                                    columnFilter(),
-                                                    clusteringIndexFilter.isReversed(),
-                                                    listener);
-    }
-
-    private UnfilteredRowIterator makeRowIteratorWithSkippedNonStaticContent(ColumnFamilyStore cfs,
-                                                                             SSTableReader sstable,
-                                                                             SSTableReadsListener listener)
+    private UnfilteredRowIterator makeIteratorWithSkippedNonStaticContent(ColumnFamilyStore cfs,
+                                                                          SSTableReader sstable,
+                                                                          SSTableReadsListener listener)
     {
         return StorageHook.instance.makeRowIterator(cfs,
                                                     sstable,
@@ -888,29 +808,43 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      * Note that we cannot use the Transformations framework because they greedily get the static row, which
      * would cause all iterators to be initialized and hence all sstables to be accessed.
      */
+    @SuppressWarnings("resource")
     private UnfilteredRowIterator withSSTablesIterated(List<UnfilteredRowIterator> iterators,
+                                                       ReadExecutionController controller,
+                                                       int totalIntersectingSSTables,
                                                        TableMetrics metrics,
-                                                       SSTableReadMetricsCollector metricsCollector)
+                                                       SSTableReadMetricsCollector metricsCollector,
+                                                       long startTimeNanos)
     {
+        @SuppressWarnings("resource") //  Closed through the closing of the result of the caller method.
         UnfilteredRowIterator merged = UnfilteredRowIterators.merge(iterators);
 
-        if (!merged.isEmpty())
+        return withSSTablesIterated(merged, controller, totalIntersectingSSTables, metrics, metricsCollector, startTimeNanos);
+    }
+
+    private UnfilteredRowIterator withSSTablesIterated(UnfilteredRowIterator iterator,
+                                                       ReadExecutionController controller,
+                                                       int totalIntersectingSSTables,
+                                                       TableMetrics metrics,
+                                                       SSTableReadMetricsCollector metricsCollector,
+                                                       long startTimeNanos)
+    {
+        if (!iterator.isEmpty())
         {
-            DecoratedKey key = merged.partitionKey();
+            DecoratedKey key = iterator.partitionKey();
             metrics.topReadPartitionFrequency.addSample(key.getKey(), 1);
-            metrics.topReadPartitionSSTableCount.addSample(key.getKey(), metricsCollector.getMergedSSTables());
         }
 
         class UpdateSstablesIterated extends Transformation<UnfilteredRowIterator>
         {
-           public void onPartitionClose()
-           {
-               int mergedSSTablesIterated = metricsCollector.getMergedSSTables();
-               metrics.updateSSTableIterated(mergedSSTablesIterated);
-               Tracing.trace("Merged data from memtables and {} sstables", mergedSSTablesIterated);
-           }
+            public void onPartitionClose()
+            {
+                int mergedSSTablesIterated = metricsCollector.getMergedSSTables();
+                metrics.updateSSTableIterated(mergedSSTablesIterated, totalIntersectingSSTables, System.nanoTime() - startTimeNanos);
+                controller.updateSstablesIteratedPerRow(mergedSSTablesIterated);
+            }
         }
-        return Transformation.apply(merged, new UpdateSstablesIterated());
+        return Transformation.apply(iterator, new UpdateSstablesIterated());
     }
 
     private boolean queriesMulticellType()
@@ -932,23 +866,34 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      * no collection or counters are included).
      * This method assumes the filter is a {@code ClusteringIndexNamesFilter}.
      */
-    private UnfilteredRowIterator queryMemtableAndSSTablesInTimestampOrder(ColumnFamilyStore cfs, ClusteringIndexNamesFilter filter, ReadExecutionController controller)
+    private UnfilteredRowIterator queryMemtableAndSSTablesInTimestampOrder(ColumnFamilyStore cfs,
+                                                                           ColumnFamilyStore.ViewFragment view,
+                                                                           Function<Object, Transformation<BaseRowIterator<?>>> rowTransformer,
+                                                                           ClusteringIndexNamesFilter filter,
+                                                                           ReadExecutionController controller,
+                                                                           long startTimeNanos)
     {
-        Tracing.trace("Acquiring sstable references");
-        ColumnFamilyStore.ViewFragment view = cfs.select(View.select(SSTableSet.LIVE, partitionKey()));
+        if (Tracing.traceSinglePartitions())
+            Tracing.trace("Acquiring sstable references");
 
         ImmutableBTreePartition result = null;
-        SSTableReadMetricsCollector metricsCollector = new SSTableReadMetricsCollector();
 
-        Tracing.trace("Merging memtable contents");
+        if (Tracing.traceSinglePartitions())
+            Tracing.trace("Merging memtable contents");
+
         for (Memtable memtable : view.memtables)
         {
-            try (UnfilteredRowIterator iter = memtable.rowIterator(partitionKey, filter.getSlices(metadata()), columnFilter(), isReversed(), metricsCollector))
+            Partition partition = memtable.getPartition(partitionKey());
+            if (partition == null)
+                continue;
+
+            try (UnfilteredRowIterator iter = filter.getUnfilteredRowIterator(columnFilter(), partition))
             {
-                if (iter == null)
+                if (iter.isEmpty())
                     continue;
 
-                result = add(RTBoundValidator.validate(iter, RTBoundValidator.Stage.MEMTABLE, false),
+                var wrapped = rowTransformer != null ? Transformation.apply(iter, rowTransformer.apply(memtable)) : iter;
+                result = add(RTBoundValidator.validate(wrapped, RTBoundValidator.Stage.MEMTABLE, false),
                              result,
                              filter,
                              false,
@@ -959,6 +904,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         /* add the SSTables on disk */
         view.sstables.sort(SSTableReader.maxTimestampDescending);
         // read sorted sstables
+        SSTableReadMetricsCollector metricsCollector = new SSTableReadMetricsCollector();
         for (SSTableReader sstable : view.sstables)
         {
             // if we've already seen a partition tombstone with a timestamp greater
@@ -977,67 +923,62 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
             boolean hasRequiredStatics = hasRequiredStatics(sstable);
             boolean hasPartitionLevelDeletions = hasPartitionLevelDeletions(sstable);
 
-            if (!intersects && !hasRequiredStatics)
+            if (!intersects && !hasRequiredStatics && !hasPartitionLevelDeletions)
             {
                 // This mean that nothing queried by the filter can be in the sstable. One exception is the top-level partition deletion
                 // however: if it is set, it impacts everything and must be included. Getting that top-level partition deletion costs us
                 // some seek in general however (unless the partition is indexed and is in the key cache), so we first check if the sstable
                 // has any tombstone at all as a shortcut.
-                if (!hasPartitionLevelDeletions)
-                    continue; // no tombstone at all, we can skip that sstable
-
-                // We need to get the partition deletion and include it if it's live. In any case though, we're done with that sstable.
-                try (UnfilteredRowIterator iter = makeRowIteratorWithSkippedNonStaticContent(cfs, sstable, metricsCollector))
-                {
-                    if (!iter.partitionLevelDeletion().isLive())
-                    {
-                        result = add(UnfilteredRowIterators.noRowsIterator(iter.metadata(),
-                                                                           iter.partitionKey(),
-                                                                           Rows.EMPTY_STATIC_ROW,
-                                                                           iter.partitionLevelDeletion(),
-                                                                           filter.isReversed()),
-                                     result,
-                                     filter,
-                                     sstable.isRepaired(),
-                                     controller);
-                    }
-                    else
-                    {
-                        result = add(RTBoundValidator.validate(iter, RTBoundValidator.Stage.SSTABLE, false),
-                                     result,
-                                     filter,
-                                     sstable.isRepaired(),
-                                     controller);
-                    }
-                }
-
                 continue;
             }
 
-            try (UnfilteredRowIterator iter = makeRowIterator(cfs, sstable, filter, metricsCollector))
+            try (UnfilteredRowIterator iter = StorageHook.instance.makeRowIterator(cfs,
+                                                                                   sstable,
+                                                                                   partitionKey(),
+                                                                                   intersects ? filter.getSlices(metadata()) : Slices.NONE,
+                                                                                   columnFilter(),
+                                                                                   filter.isReversed(),
+                                                                                   metricsCollector))
             {
-                if (iter.isEmpty())
-                    continue;
+                if (!hasRequiredStatics && !intersects && !iter.partitionLevelDeletion().isLive()) // => partitionLevelDelections == true
+                {
+                    result = add(UnfilteredRowIterators.noRowsIterator(iter.metadata(),
+                                                                       iter.partitionKey(),
+                                                                       Rows.EMPTY_STATIC_ROW,
+                                                                       iter.partitionLevelDeletion(),
+                                                                       filter.isReversed()),
+                                 result,
+                                 filter,
+                                 sstable.isRepaired(),
+                                 controller);
+                }
+                else
+                {
+                    if (!hasRequiredStatics && iter.isEmpty())
+                        continue;
 
-                result = add(RTBoundValidator.validate(iter, RTBoundValidator.Stage.SSTABLE, false),
-                             result,
-                             filter,
-                             sstable.isRepaired(),
-                             controller);
+                    var wrapped = rowTransformer != null ? Transformation.apply(iter, rowTransformer.apply(sstable.getId())) : iter;
+                    result = add(RTBoundValidator.validate(wrapped, RTBoundValidator.Stage.SSTABLE, false),
+                                 result,
+                                 filter,
+                                 sstable.isRepaired(),
+                                 controller);
+                }
             }
         }
 
-        cfs.metric.updateSSTableIterated(metricsCollector.getMergedSSTables());
+        cfs.metric.updateSSTableIterated(metricsCollector.getMergedSSTables(), view.sstables.size(), System.nanoTime() - startTimeNanos);
 
         if (result == null || result.isEmpty())
             return EmptyIterators.unfilteredRow(metadata(), partitionKey(), false);
 
         DecoratedKey key = result.partitionKey();
         cfs.metric.topReadPartitionFrequency.addSample(key.getKey(), 1);
-        cfs.metric.topReadPartitionSSTableCount.addSample(key.getKey(), metricsCollector.getMergedSSTables());
         StorageHook.instance.reportRead(cfs.metadata.id, partitionKey());
 
-        return result.unfilteredIterator(columnFilter(), Slices.ALL, clusteringIndexFilter().isReversed());
+        var iterator = result.unfilteredIterator(columnFilter(), Slices.ALL, clusteringIndexFilter().isReversed());
+        return withSSTablesIterated(iterator, controller, view.sstables.size(), cfs.metric, metricsCollector, startTimeNanos);
+
     }
 
     private ImmutableBTreePartition add(UnfilteredRowIterator iter, ImmutableBTreePartition result, ClusteringIndexNamesFilter filter, boolean isRepaired, ReadExecutionController controller)
@@ -1203,24 +1144,20 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         return Verb.READ_REQ;
     }
 
-    @Override
     protected void appendCQLWhereClause(StringBuilder sb)
     {
-        sb.append(" WHERE ").append(partitionKey().toCQLString(metadata()));
+        sb.append(" WHERE ");
 
-        String filterString = clusteringIndexFilter().toCQLString(metadata(), rowFilter());
+        sb.append(ColumnMetadata.toCQLString(metadata().partitionKeyColumns())).append(" = ");
+        DataRange.appendKeyString(sb, metadata().partitionKeyType, partitionKey().getKey());
+
+        // We put the row filter first because the clustering index filter can end by "ORDER BY"
+        if (!rowFilter().isEmpty())
+            sb.append(" AND ").append(rowFilter());
+
+        String filterString = clusteringIndexFilter().toCQLString(metadata());
         if (!filterString.isEmpty())
-        {
-            if (!clusteringIndexFilter().selectsAllPartition() || !rowFilter().isEmpty())
-                sb.append(" AND ");
-            sb.append(filterString);
-        }
-    }
-
-    @Override
-    public String loggableTokens()
-    {
-        return "token=" + partitionKey.getToken().toString();
+            sb.append(" AND ").append(filterString);
     }
 
     protected void serializeSelection(DataOutputPlus out, int version) throws IOException
@@ -1251,7 +1188,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
     public static class Group extends SinglePartitionReadQuery.Group<SinglePartitionReadCommand>
     {
         public static Group create(TableMetadata metadata,
-                                   long nowInSec,
+                                   int nowInSec,
                                    ColumnFilter columnFilter,
                                    RowFilter rowFilter,
                                    DataLimits limits,
@@ -1270,48 +1207,22 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                                                                clusteringIndexFilter));
             }
 
-            return create(commands, limits);
+            return new Group(commands, limits);
         }
 
-        private Group(List<SinglePartitionReadCommand> commands, DataLimits limits)
+        public Group(List<SinglePartitionReadCommand> commands, DataLimits limits)
         {
             super(commands, limits);
         }
 
         public static Group one(SinglePartitionReadCommand command)
         {
-            return create(Collections.singletonList(command), command.limits());
+            return new Group(Collections.singletonList(command), command.limits());
         }
 
-        public static Group create(List<SinglePartitionReadCommand> commands, DataLimits limits)
+        public PartitionIterator execute(ConsistencyLevel consistency, QueryState queryState, long queryStartNanoTime) throws RequestExecutionException
         {
-            return commands.get(0).metadata().isVirtual() ?
-                   new VirtualTableGroup(commands, limits) :
-                   new Group(commands, limits);
-        }
-
-        public PartitionIterator execute(ConsistencyLevel consistency, ClientState state, Dispatcher.RequestTime requestTime) throws RequestExecutionException
-        {
-            return StorageProxy.read(this, consistency, requestTime);
-        }
-    }
-
-    public static class VirtualTableGroup extends Group
-    {
-        public VirtualTableGroup(List<SinglePartitionReadCommand> commands, DataLimits limits)
-        {
-            super(commands, limits);
-        }
-
-        @Override
-        public PartitionIterator execute(ConsistencyLevel consistency, ClientState state, Dispatcher.RequestTime requestTime) throws RequestExecutionException
-        {
-            if (queries.size() == 1)
-                return queries.get(0).execute(consistency, state, requestTime);
-
-            return PartitionIterators.concat(queries.stream()
-                                                    .map(q -> q.execute(consistency, state, requestTime))
-                                                    .collect(Collectors.toList()));
+            return StorageProxy.read(this, consistency, queryState, queryStartNanoTime);
         }
     }
 
@@ -1319,12 +1230,11 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
     {
         public ReadCommand deserialize(DataInputPlus in,
                                        int version,
-                                       Epoch serializedAtEpoch,
                                        boolean isDigest,
                                        int digestVersion,
                                        boolean acceptsTransient,
                                        TableMetadata metadata,
-                                       long nowInSec,
+                                       int nowInSec,
                                        ColumnFilter columnFilter,
                                        RowFilter rowFilter,
                                        DataLimits limits,
@@ -1333,7 +1243,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         {
             DecoratedKey key = metadata.partitioner.decorateKey(metadata.partitionKeyType.readBuffer(in, DatabaseDescriptor.getMaxValueSize()));
             ClusteringIndexFilter filter = ClusteringIndexFilter.serializer.deserialize(in, version, metadata);
-            return SinglePartitionReadCommand.create(serializedAtEpoch, isDigest, digestVersion, acceptsTransient, metadata, nowInSec, columnFilter, rowFilter, limits, key, filter, indexQueryPlan, false);
+            return new SinglePartitionReadCommand(isDigest, digestVersion, acceptsTransient, metadata, nowInSec, columnFilter, rowFilter, limits, key, filter, indexQueryPlan);
         }
     }
 
@@ -1349,7 +1259,13 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         private int mergedSSTables;
 
         @Override
-        public void onSSTableSelected(SSTableReader sstable, SelectionReason reason)
+        public void onSSTablePartitionIndexAccessed(SSTableReader sstable)
+        {
+            sstable.incrementIndexReadCount();
+        }
+
+        @Override
+        public void onSSTableSelected(SSTableReader sstable, RowIndexEntry indexEntry, SelectionReason reason)
         {
             sstable.incrementReadCount();
             mergedSSTables++;
@@ -1362,53 +1278,6 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         public int getMergedSSTables()
         {
             return mergedSSTables;
-        }
-    }
-
-    public static class VirtualTableSinglePartitionReadCommand extends SinglePartitionReadCommand
-    {
-        protected VirtualTableSinglePartitionReadCommand(boolean isDigest,
-                                                         int digestVersion,
-                                                         boolean acceptsTransient,
-                                                         TableMetadata metadata,
-                                                         long nowInSec,
-                                                         ColumnFilter columnFilter,
-                                                         RowFilter rowFilter,
-                                                         DataLimits limits,
-                                                         DecoratedKey partitionKey,
-                                                         ClusteringIndexFilter clusteringIndexFilter,
-                                                         Index.QueryPlan indexQueryPlan,
-                                                         boolean trackWarnings,
-                                                         DataRange dataRange)
-        {
-            super(metadata.epoch, isDigest, digestVersion, acceptsTransient, metadata, nowInSec, columnFilter, 
-                  rowFilter, limits, partitionKey, clusteringIndexFilter, indexQueryPlan, trackWarnings, dataRange);
-        }
-
-        @Override
-        public PartitionIterator execute(ConsistencyLevel consistency, ClientState state, Dispatcher.RequestTime requestTime) throws RequestExecutionException
-        {
-            return executeInternal(executionController());
-        }
-
-        @Override
-        public UnfilteredPartitionIterator executeLocally(ReadExecutionController executionController)
-        {
-            VirtualTable view = VirtualKeyspaceRegistry.instance.getTableNullable(metadata().id);
-            UnfilteredPartitionIterator resultIterator = view.select(partitionKey, clusteringIndexFilter, columnFilter());
-            return limits().filter(rowFilter().filter(resultIterator, nowInSec()), nowInSec(), selectsFullPartition());
-        }
-
-        @Override
-        public ReadExecutionController executionController()
-        {
-            return ReadExecutionController.empty();
-        }
-
-        @Override
-        public ReadExecutionController executionController(boolean trackRepairedStatus)
-        {
-            return executionController();
         }
     }
 }

@@ -19,11 +19,12 @@ package org.apache.cassandra.repair.messages;
 
 import java.io.IOException;
 import java.util.Objects;
+import java.util.UUID;
 
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.UUIDSerializer;
 
 /**
  * Message to cleanup repair resources on replica nodes.
@@ -32,18 +33,12 @@ import org.apache.cassandra.utils.TimeUUID;
  */
 public class CleanupMessage extends RepairMessage
 {
-    public final TimeUUID parentRepairSession;
+    public final UUID parentRepairSession;
 
-    public CleanupMessage(TimeUUID parentRepairSession)
+    public CleanupMessage(UUID parentRepairSession)
     {
         super(null);
         this.parentRepairSession = parentRepairSession;
-    }
-
-    @Override
-    public TimeUUID parentRepairSession()
-    {
-        return parentRepairSession;
     }
 
     @Override
@@ -65,18 +60,18 @@ public class CleanupMessage extends RepairMessage
     {
         public void serialize(CleanupMessage message, DataOutputPlus out, int version) throws IOException
         {
-            message.parentRepairSession.serialize(out);
+            UUIDSerializer.serializer.serialize(message.parentRepairSession, out, version);
         }
 
         public CleanupMessage deserialize(DataInputPlus in, int version) throws IOException
         {
-            TimeUUID parentRepairSession = TimeUUID.deserialize(in);
+            UUID parentRepairSession = UUIDSerializer.serializer.deserialize(in, version);
             return new CleanupMessage(parentRepairSession);
         }
 
         public long serializedSize(CleanupMessage message, int version)
         {
-            return TimeUUID.sizeInBytes();
+            return UUIDSerializer.serializer.serializedSize(message.parentRepairSession, version);
         }
     };
 }

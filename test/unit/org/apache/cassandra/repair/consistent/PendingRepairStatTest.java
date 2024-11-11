@@ -21,6 +21,7 @@ package org.apache.cassandra.repair.consistent;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.Set;
+import java.util.UUID;
 
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
@@ -30,9 +31,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.repair.SharedContext;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.statements.schema.CreateTableStatement;
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -48,14 +47,14 @@ import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.UUIDGen;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.apache.cassandra.repair.consistent.ConsistentSession.State.FAILED;
 import static org.apache.cassandra.repair.consistent.ConsistentSession.State.FINALIZED;
 import static org.apache.cassandra.repair.consistent.ConsistentSession.State.PREPARING;
 import static org.apache.cassandra.service.ActiveRepairService.NO_PENDING_REPAIR;
 import static org.apache.cassandra.service.ActiveRepairService.UNREPAIRED_SSTABLE;
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 
 public class PendingRepairStatTest extends AbstractRepairTest
 {
@@ -91,16 +90,16 @@ public class PendingRepairStatTest extends AbstractRepairTest
 
     static LocalSession createSession()
     {
-        LocalSession.Builder builder = LocalSession.builder(SharedContext.Global.instance);
+        LocalSession.Builder builder = LocalSession.builder();
         builder.withState(PREPARING);
-        builder.withSessionID(nextTimeUUID());
+        builder.withSessionID(UUIDGen.getTimeUUID());
         builder.withCoordinator(COORDINATOR);
         builder.withUUIDTableIds(Sets.newHashSet(cfm.id.asUUID()));
         builder.withRepairedAt(System.currentTimeMillis());
         builder.withRanges(Collections.singleton(FULL_RANGE));
         builder.withParticipants(Sets.newHashSet(PARTICIPANT1, PARTICIPANT2, PARTICIPANT3));
 
-        long now = FBUtilities.nowInSeconds();
+        int now = FBUtilities.nowInSeconds();
         builder.withStartedAt(now);
         builder.withLastUpdate(now);
 
@@ -116,15 +115,15 @@ public class PendingRepairStatTest extends AbstractRepairTest
             int key = startKey + i;
             QueryProcessor.executeInternal(String.format("INSERT INTO %s.%s (k, v) VALUES (?, ?)", cfm.keyspace, cfm.name), key, key);
         }
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         return Iterables.getOnlyElement(Sets.difference(cfs.getLiveSSTables(), existing));
     }
 
-    private static void mutateRepaired(SSTableReader sstable, long repairedAt, TimeUUID pendingRepair)
+    private static void mutateRepaired(SSTableReader sstable, long repairedAt, UUID pendingRepair)
     {
         try
         {
-            cfs.getCompactionStrategyManager().mutateRepaired(Collections.singleton(sstable), repairedAt, pendingRepair, false);
+            cfs.mutateRepaired(Collections.singleton(sstable), repairedAt, pendingRepair, false);
         }
         catch (IOException e)
         {

@@ -19,36 +19,47 @@
 package org.apache.cassandra.io.sstable.format;
 
 import java.io.IOException;
+import java.util.Collection;
 
+import com.google.common.annotations.VisibleForTesting;
+
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.rows.RangeTombstoneMarker;
 import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.db.rows.SerializationHelper;
 import org.apache.cassandra.db.rows.Unfiltered;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.db.rows.UnfilteredSerializer;
+import org.apache.cassandra.io.sstable.format.trieindex.TrieIndexSSTableWriter;
 import org.apache.cassandra.io.util.SequentialWriter;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
-import static com.google.common.base.Preconditions.checkState;
-
+/**
+ * Partition writer used by {@link TrieIndexSSTableWriter}.
+ *
+ * Writes all passed data to the given SequentialWriter and if necessary builds a RowIndex by constructing an entry
+ * for each row within a partition that follows {@link org.apache.cassandra.config.Config#column_index_cache_size_in_kb}
+ * kilobytes of written data.
+ */
 public abstract class SortedTablePartitionWriter implements AutoCloseable
 {
-    protected final UnfilteredSerializer unfilteredSerializer;
-
+    private final UnfilteredSerializer unfilteredSerializer;
     private final SerializationHeader header;
     private final SequentialWriter writer;
+    private final Collection<SSTableFlushObserver> observers;
     private final SerializationHelper helper;
-    private final Version version;
+    private final int version;
 
-    private long previousRowStart;
-    private long initialPosition;
-    private long headerLength;
-
+    protected long initialPosition;
     protected long startPosition;
+
     protected int written;
+    protected long previousRowStart;
 
     protected ClusteringPrefix<?> firstClustering;
     protected ClusteringPrefix<?> lastClustering;
@@ -64,19 +75,22 @@ public abstract class SortedTablePartitionWriter implements AutoCloseable
         AWAITING_ROWS,
         COMPLETED
     }
+    State state;
 
-    State state = State.AWAITING_PARTITION_HEADER;
-
-    protected SortedTablePartitionWriter(SerializationHeader header, SequentialWriter writer, Version version)
+    protected SortedTablePartitionWriter(SerializationHeader header,
+                                         SequentialWriter writer,
+                                         Version version,
+                                         Collection<SSTableFlushObserver> observers)
     {
         this.header = header;
         this.writer = writer;
+        this.observers = observers;
         this.unfilteredSerializer = UnfilteredSerializer.serializer;
         this.helper = new SerializationHelper(header);
-        this.version = version;
+        this.version = version.correspondingMessagingVersion();
     }
 
-    protected void reset()
+    public void reset()
     {
         this.initialPosition = writer.position();
         this.startPosition = -1;
@@ -85,49 +99,59 @@ public abstract class SortedTablePartitionWriter implements AutoCloseable
         this.firstClustering = null;
         this.lastClustering = null;
         this.openMarker = DeletionTime.LIVE;
-        this.headerLength = -1;
         this.state = State.AWAITING_PARTITION_HEADER;
     }
 
-    public long getHeaderLength()
+    @VisibleForTesting
+    public void buildRowIndex(UnfilteredRowIterator iterator) throws IOException
     {
-        return headerLength;
+        reset();
+        writePartitionHeader(iterator.partitionKey(), iterator.partitionLevelDeletion());
+        if (!iterator.staticRow().isEmpty())
+            addUnfiltered(iterator.staticRow());
+
+        while (iterator.hasNext())
+            addUnfiltered(iterator.next());
+
+        endPartition();
     }
 
-    public void start(DecoratedKey key, DeletionTime partitionLevelDeletion) throws IOException
+    public void writePartitionHeader(DecoratedKey partitionKey, DeletionTime partitionLevelDeletion) throws IOException
     {
-        if (state == State.COMPLETED)
-            reset();
+        assert state == State.AWAITING_PARTITION_HEADER;
+        ByteBufferUtil.writeWithShortLength(partitionKey.getKey(), writer);
 
-        checkState(state == State.AWAITING_PARTITION_HEADER);
-
-        ByteBufferUtil.writeWithShortLength(key.getKey(), writer);
-        DeletionTime.getSerializer(version).serialize(partitionLevelDeletion, writer);
-
-        if (!header.hasStatic())
-        {
-            this.headerLength = writer.position() - initialPosition;
-            state = State.AWAITING_ROWS;
-            return;
-        }
-
-        state = State.AWAITING_STATIC_ROW;
+        long partitionDeletionPosition = writer.position();
+        DeletionTime.serializer.serialize(partitionLevelDeletion, writer);
+        if (!observers.isEmpty())
+            observers.forEach((o) -> o.partitionLevelDeletion(partitionLevelDeletion, partitionDeletionPosition));
+        state = header.hasStatic() ? State.AWAITING_STATIC_ROW : State.AWAITING_ROWS;
     }
 
-    public void addStaticRow(Row staticRow) throws IOException
+    protected void doWriteStaticRow(Row staticRow) throws IOException
     {
-        checkState(state == State.AWAITING_STATIC_ROW);
-        checkState(staticRow.isStatic());
-
-        UnfilteredSerializer.serializer.serializeStaticRow(staticRow, helper, writer, version.correspondingMessagingVersion());
-
-        this.headerLength = writer.position() - initialPosition;
+        assert state == State.AWAITING_STATIC_ROW;
+        long staticRowPosition = writer.position();
+        UnfilteredSerializer.serializer.serializeStaticRow(staticRow, helper, writer, version);
+        if (!observers.isEmpty())
+            observers.forEach(o -> o.staticRow(staticRow, staticRowPosition));
         state = State.AWAITING_ROWS;
     }
 
     public void addUnfiltered(Unfiltered unfiltered) throws IOException
     {
-        checkState(state == State.AWAITING_ROWS);
+        if (state == State.AWAITING_STATIC_ROW)
+        {
+            if (unfiltered.isRow() && ((Row) unfiltered).isStatic())
+            {
+                doWriteStaticRow((Row) unfiltered);
+                return;
+            }
+
+            doWriteStaticRow(Rows.EMPTY_STATIC_ROW);
+        }
+
+        assert state == State.AWAITING_ROWS;
 
         long pos = currentPosition();
 
@@ -140,7 +164,11 @@ public abstract class SortedTablePartitionWriter implements AutoCloseable
         }
 
         long unfilteredPosition = writer.position();
-        unfilteredSerializer.serialize(unfiltered, helper, writer, pos - previousRowStart, version.correspondingMessagingVersion());
+        unfilteredSerializer.serialize(unfiltered, helper, writer, pos - previousRowStart, version);
+
+        // notify observers about each new row
+        if (!observers.isEmpty())
+            observers.forEach(o -> o.nextUnfilteredCluster(unfiltered, unfilteredPosition));
 
         lastClustering = unfiltered.clustering();
         previousRowStart = pos;
@@ -151,12 +179,17 @@ public abstract class SortedTablePartitionWriter implements AutoCloseable
             RangeTombstoneMarker marker = (RangeTombstoneMarker) unfiltered;
             openMarker = marker.isOpen(false) ? marker.openDeletionTime(false) : DeletionTime.LIVE;
         }
+
+        // if we hit the row index size that we have to index after, go ahead and index it.
+        if (currentPosition() - startPosition >= DatabaseDescriptor.getColumnIndexSize())
+            addIndexBlock();
     }
 
-    protected long finish() throws IOException
+    public long endPartition() throws IOException
     {
-        checkState(state == State.AWAITING_ROWS);
-
+        if (state == State.AWAITING_STATIC_ROW)
+            doWriteStaticRow(Rows.EMPTY_STATIC_ROW);
+        assert state == State.AWAITING_ROWS;
         state = State.COMPLETED;
 
         long endPosition = currentPosition();
@@ -170,8 +203,5 @@ public abstract class SortedTablePartitionWriter implements AutoCloseable
         return writer.position() - initialPosition;
     }
 
-    public long getInitialPosition()
-    {
-        return initialPosition;
-    }
+    protected abstract void addIndexBlock() throws IOException;
 }

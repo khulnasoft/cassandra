@@ -22,27 +22,22 @@ import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.Objects;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLongArray;
-import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.primitives.Ints;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-import com.codahale.metrics.ExponentiallyDecayingReservoir;
+import com.codahale.metrics.Clock;
 import com.codahale.metrics.Reservoir;
 import com.codahale.metrics.Snapshot;
+import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.utils.EstimatedHistogram;
-import org.apache.cassandra.utils.MonotonicClock;
-import org.apache.cassandra.utils.NoSpamLogger;
 
 import static java.lang.Math.max;
 import static java.lang.Math.min;
-import static org.apache.cassandra.config.CassandraRelevantProperties.DECAYING_ESTIMATED_HISTOGRAM_RESERVOIR_STRIPE_COUNT;
 
 /**
  * A decaying histogram reservoir where values collected during each minute will be twice as significant as the values
@@ -52,8 +47,9 @@ import static org.apache.cassandra.config.CassandraRelevantProperties.DECAYING_E
  * <p/>
  * The histogram use forward decay [1] to make recent values more significant. The forward decay factor will be doubled
  * every minute (half-life time set to 60 seconds) [2]. The forward decay landmark is reset every 30 minutes (or at
- * first read/update after 30 minutes). The 30 minute rescale interval is used based on the assumption that in an
- * extreme case we would have to collect a metric 1M times for a single bucket each second. By the
+ * first read/update after 30 minutes). During landmark reset, updates and reads in the reservoir will be blocked in a
+ * fashion similar to the one used in the metrics library [3]. The 30 minute rescale interval is used based on the
+ * assumption that in an extreme case we would have to collect a metric 1M times for a single bucket each second. By the
  * end of the 30:th minute all collected values will roughly add up to 1.000.000 * 60 * pow(2, 30) which can be
  * represented with 56 bits giving us some head room in a signed 64 bit long.
  * <p/>
@@ -81,34 +77,47 @@ import static org.apache.cassandra.config.CassandraRelevantProperties.DECAYING_E
  *   <li>[2]: https://en.wikipedia.org/wiki/Half-life</li>
  *   <li>[3]: https://github.com/dropwizard/metrics/blob/v3.1.2/metrics-core/src/main/java/com/codahale/metrics/ExponentiallyDecayingReservoir.java</li>
  * </ul>
- *
- * @see ExponentiallyDecayingReservoir
  */
-public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoir
+public class DecayingEstimatedHistogramReservoir implements Reservoir
 {
-    private static final Logger logger = LoggerFactory.getLogger(DecayingEstimatedHistogramReservoir.class);
-    private static final NoSpamLogger noSpamLogger = NoSpamLogger.getLogger(logger, 5L, TimeUnit.MINUTES);
+
     /**
      * The default number of decayingBuckets. Use this bucket count to reduce memory allocation for bucket offsets.
      */
     public static final int DEFAULT_BUCKET_COUNT = 164;
-    public static final int LOW_BUCKET_COUNT = 127;
-    public static final int DEFAULT_STRIPE_COUNT = DECAYING_ESTIMATED_HISTOGRAM_RESERVOIR_STRIPE_COUNT.getInt();
+    public static final int DEFAULT_STRIPE_COUNT = Integer.parseInt(System.getProperty("cassandra.dehr_stripe_count", "2"));
     public static final int MAX_BUCKET_COUNT = 237;
     public static final boolean DEFAULT_ZERO_CONSIDERATION = false;
 
     private static final int[] DISTRIBUTION_PRIMES = new int[] { 17, 19, 23, 29 };
 
     // The offsets used with a default sized bucket array without a separate bucket for zero values.
-    public static final long[] DEFAULT_WITHOUT_ZERO_BUCKET_OFFSETS = EstimatedHistogram.newOffsets(DEFAULT_BUCKET_COUNT, false);
+    private static final long[] DEFAULT_WITHOUT_ZERO_BUCKET_OFFSETS = EstimatedHistogram.newCassandraOffsets(DEFAULT_BUCKET_COUNT, false);
 
     // The offsets used with a default sized bucket array with a separate bucket for zero values.
-    public static final long[] DEFAULT_WITH_ZERO_BUCKET_OFFSETS = EstimatedHistogram.newOffsets(DEFAULT_BUCKET_COUNT, true);
+    private static final long[] DEFAULT_WITH_ZERO_BUCKET_OFFSETS = EstimatedHistogram.newCassandraOffsets(DEFAULT_BUCKET_COUNT, true);
 
     private static final int TABLE_BITS = 4;
     private static final int TABLE_MASK = -1 >>> (32 - TABLE_BITS);
     private static final float[] LOG2_TABLE = computeTable(TABLE_BITS);
     private static final float log2_12_recp = (float) (1d / slowLog2(1.2d));
+
+    // DSE COMPATIBILITY CHANGES START
+    // The DSE-compatible offsets used with a default sized bucket array without a separate bucket for zero values.
+    private static final long[] DEFAULT_DSE_WITHOUT_ZERO_BUCKET_OFFSETS = newDseOffsets(DEFAULT_BUCKET_COUNT, false);
+
+    // The DSE-compatibleoffsets used with a default sized bucket array with a separate bucket for zero values.
+    private static final long[] DEFAULT_DSE_WITH_ZERO_BUCKET_OFFSETS = newDseOffsets(DEFAULT_BUCKET_COUNT, true);
+
+    /** Values for calculating buckets and indexes */
+    final static int subBucketCount = 8;  // number of sub-buckets in each bucket
+    final static int subBucketHalfCount = subBucketCount / 2;
+    final static int unitMagnitude = 0; // power of two of the unit in bucket zero (2^0 = 1)
+    final static int subBucketCountMagnitude = 3; // power of two of the number of sub buckets
+    final static int subBucketHalfCountMagnitude = subBucketCountMagnitude - 1; // power of two of half the number of sub-buckets
+    final static long subBucketMask = (long)(subBucketCount - 1) << unitMagnitude;
+    final static int leadingZeroCountBase = 64 - unitMagnitude - subBucketHalfCountMagnitude - 1;
+    // DSE COMPATIBILITY CHANGES END
 
     private static float[] computeTable(int bits)
     {
@@ -150,27 +159,26 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
     private final long[] bucketOffsets;
     private final int distributionPrime;
 
-    private static final AtomicReferenceFieldUpdater<DecayingEstimatedHistogramReservoir, DecayingBuckets> decayingBucketsUpdater =
-        AtomicReferenceFieldUpdater.newUpdater(DecayingEstimatedHistogramReservoir.class, DecayingBuckets.class, "decayingBuckets");
-
     // decayingBuckets and buckets are one element longer than bucketOffsets -- the last element is values greater than the last offset
     private volatile DecayingBuckets decayingBuckets;
     private final AtomicLongArray buckets;
 
     public static final long HALF_TIME_IN_S = 60L;
     public static final double MEAN_LIFETIME_IN_S = HALF_TIME_IN_S / Math.log(2.0);
-    public static final long LANDMARK_RESET_INTERVAL_IN_NS = TimeUnit.MINUTES.toNanos(30L);
+    public static final long LANDMARK_RESET_INTERVAL_IN_MS = 30L * 60L * 1000L;
+
+    private final AtomicBoolean rescaling = new AtomicBoolean(false);
+
     // Wrapper around System.nanoTime() to simplify unit testing.
-    private final MonotonicClock clock;
-    /** Interval in minutes to reset the forward decay landmark for the decaying histograms. Default {@code 30 mins}. */
-    private final long landmarkResetIntervalInNs;
+    private final Clock clock;
+
 
     /**
      * Construct a decaying histogram with default number of buckets and without considering zeroes.
      */
     public DecayingEstimatedHistogramReservoir()
     {
-        this(DEFAULT_ZERO_CONSIDERATION, DEFAULT_BUCKET_COUNT, DEFAULT_STRIPE_COUNT, MonotonicClock.Global.approxTime);
+        this(DEFAULT_ZERO_CONSIDERATION, DEFAULT_BUCKET_COUNT, DEFAULT_STRIPE_COUNT, Clock.defaultClock());
     }
 
     /**
@@ -181,7 +189,7 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
      */
     public DecayingEstimatedHistogramReservoir(boolean considerZeroes)
     {
-        this(considerZeroes, DEFAULT_BUCKET_COUNT, DEFAULT_STRIPE_COUNT, MonotonicClock.Global.approxTime);
+        this(considerZeroes, DEFAULT_BUCKET_COUNT, DEFAULT_STRIPE_COUNT, Clock.defaultClock());
     }
 
     /**
@@ -193,40 +201,26 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
      */
     public DecayingEstimatedHistogramReservoir(boolean considerZeroes, int bucketCount, int stripes)
     {
-        this(considerZeroes, bucketCount, stripes, MonotonicClock.Global.approxTime);
+        this(considerZeroes, bucketCount, stripes, Clock.defaultClock());
     }
 
     @VisibleForTesting
-    public DecayingEstimatedHistogramReservoir(MonotonicClock clock)
+    public DecayingEstimatedHistogramReservoir(Clock clock)
     {
         this(DEFAULT_ZERO_CONSIDERATION, DEFAULT_BUCKET_COUNT, DEFAULT_STRIPE_COUNT, clock);
     }
 
     @VisibleForTesting
-    DecayingEstimatedHistogramReservoir(boolean considerZeroes, int bucketCount, int stripes, MonotonicClock clock)
-    {
-        this(considerZeroes, bucketCount, stripes, clock, LANDMARK_RESET_INTERVAL_IN_NS);
-    }
-
-    @VisibleForTesting
-    public DecayingEstimatedHistogramReservoir(boolean considerZeroes,
-                                               int bucketCount,
-                                               int stripes,
-                                               MonotonicClock clock,
-                                               long landmarkResetIntervalInNs)
+    DecayingEstimatedHistogramReservoir(boolean considerZeroes, int bucketCount, int stripes, Clock clock)
     {
         assert bucketCount <= MAX_BUCKET_COUNT : "bucket count cannot exceed: " + MAX_BUCKET_COUNT;
 
         if (bucketCount == DEFAULT_BUCKET_COUNT)
         {
-            if (considerZeroes == true)
-            {
-                bucketOffsets = DEFAULT_WITH_ZERO_BUCKET_OFFSETS;
-            }
+            if (CassandraRelevantProperties.USE_DSE_COMPATIBLE_HISTOGRAM_BOUNDARIES.getBoolean())
+                bucketOffsets = considerZeroes ? DEFAULT_DSE_WITH_ZERO_BUCKET_OFFSETS : DEFAULT_DSE_WITHOUT_ZERO_BUCKET_OFFSETS;
             else
-            {
-                bucketOffsets = DEFAULT_WITHOUT_ZERO_BUCKET_OFFSETS;
-            }
+                bucketOffsets = considerZeroes ? DEFAULT_WITH_ZERO_BUCKET_OFFSETS : DEFAULT_WITHOUT_ZERO_BUCKET_OFFSETS;
         }
         else
         {
@@ -236,8 +230,7 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
         nStripes = stripes;
         this.clock = clock;
         buckets = new AtomicLongArray((bucketOffsets.length + 1) * nStripes);
-        decayingBuckets = new DecayingBuckets(clock.now());
-        this.landmarkResetIntervalInNs = landmarkResetIntervalInNs;
+        decayingBuckets = new DecayingBuckets(clock.getTime(), new long[(bucketOffsets.length + 1) * nStripes]);
         int distributionPrime = 1;
         for (int prime : DISTRIBUTION_PRIMES)
         {
@@ -257,12 +250,12 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
      */
     public void update(long value)
     {
-        long now = clock.now();
-        DecayingBuckets rescaledDecayingBuckets = rescaleIfNeeded(now);
+        long now = clock.getTime();
+        rescaleIfNeeded(now);
 
         int index = findIndex(bucketOffsets, value);
 
-        rescaledDecayingBuckets.update(index, now);
+        decayingBuckets.update(index, now);
         updateBucket(buckets, index, 1);
     }
 
@@ -280,6 +273,9 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
     @VisibleForTesting
     public static int findIndex(long[] bucketOffsets, long value)
     {
+        if (CassandraRelevantProperties.USE_DSE_COMPATIBLE_HISTOGRAM_BOUNDARIES.getBoolean())
+            return findIndexDse(bucketOffsets, value);
+
         // values below zero are nonsense, but we have never failed when presented them
         value = max(value, 0);
 
@@ -298,6 +294,66 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
 
         int firstCandidate = max(0, min(bucketOffsets.length - 1, ((int) fastLog12(value)) - offset));
         return value <= bucketOffsets[firstCandidate] ? firstCandidate : firstCandidate + 1;
+    }
+
+    /**
+     * this is almost a copy-paste from DSE DecayingEstimatedHistogram::BucketProperties::getIndex
+     * Almost, because:
+     * 1. C* and DSE differently implement the "considerZeroes" flag.
+     * The zeroesCorrection variable is used to adjust the index in the C* case.
+     * <p/>
+     * 2. C* and DSE differently implement the histogram overflow.
+     * In DSE, there is a separate flag isOverflowed which is set when a value doesn't fit in buckets; the getIndex
+     * function is supposed to always return index for an actual bucket.
+     * In C* there is a special bucket for overflowed values, and the findIndex function is supposed to return
+     * the index of this additional bucket if the value doesn't fit in the regular buckets.
+     * This is the origin of the min() function in the return statement.
+     *
+     * @param bucketOffsets the offsets of the histogram buckets (upper inclusive bounds)
+     * @param value the value with which we want to update the histogram
+     * @return index of the bucket that keeps track of the value OR the index of the last bucket which is used for
+     * overflowed values
+     */
+    private static int findIndexDse(long[] bucketOffsets, long value)
+    {
+        if (value < 0) {
+            throw new ArrayIndexOutOfBoundsException("Histogram recorded value cannot be negative.");
+        }
+
+        // Calculates the number of powers of two by which the value is greater than the biggest value that fits in
+        // bucket 0. This is the bucket index since each successive bucket can hold a value 2x greater.
+        // The mask maps small values to bucket 0.
+        final int bucketIndex = leadingZeroCountBase - Long.numberOfLeadingZeros(value | subBucketMask);
+
+        // For bucketIndex 0, this is just value, so it may be anywhere in 0 to subBucketCount.
+        // For other bucketIndex, this will always end up in the top half of subBucketCount: assume that for some bucket
+        // k > 0, this calculation will yield a value in the bottom half of 0 to subBucketCount. Then, because of how
+        // buckets overlap, it would have also been in the top half of bucket k-1, and therefore would have
+        // returned k-1 in getBucketIndex(). Since we would then shift it one fewer bits here, it would be twice as big,
+        // and therefore in the top half of subBucketCount.
+        final int subBucketIndex = (int)(value >>> (bucketIndex + unitMagnitude));
+
+        //assert(subBucketIndex < subBucketCount);
+        //assert(bucketIndex == 0 || (subBucketIndex >= subBucketHalfCount));
+        // Calculate the index for the first entry that will be used in the bucket (halfway through subBucketCount).
+        // For bucketIndex 0, all subBucketCount entries may be used, but bucketBaseIndex is still set in the middle.
+        final int bucketBaseIndex = (bucketIndex + 1) << subBucketHalfCountMagnitude;
+
+        // Calculate the offset in the bucket. This subtraction will result in a positive value in all buckets except
+        // the 0th bucket (since a value in that bucket may be less than half the bucket's 0 to subBucketCount range).
+        // However, this works out since we give bucket 0 twice as much space.
+        final int offsetInBucket = subBucketIndex - subBucketHalfCount;
+
+        // The following is the equivalent of ((subBucketIndex  - subBucketHalfCount) + bucketBaseIndex,
+        final int dseBucket = bucketBaseIndex + offsetInBucket;
+
+        // DSE bucket for zero values always exists, and during snapshot creation it is added to the second bucket
+        // if the histogram should not "considerZeroes".
+        // Cassandra does that differently. We either have or have not a separate bucket for zeroes.
+        // Thus, we should subtract 1 from the DSE index if we don't consider zeroes AND the value > 0.
+        final int zeroesCorrection = bucketOffsets[0] > 0 && value > 0 ? 1 : 0;
+
+        return min(bucketOffsets.length, bucketBaseIndex + offsetInBucket - zeroesCorrection);
     }
 
     /**
@@ -326,21 +382,10 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
      *
      * @return the snapshot
      */
-    @Override
     public Snapshot getSnapshot()
     {
+        rescaleIfNeeded();
         return new EstimatedHistogramReservoirSnapshot(this);
-    }
-
-    @Override
-    public Snapshot getPercentileSnapshot()
-    {
-        return new DecayingBucketsOnlySnapshot(this);
-    }
-
-    private DecayingBuckets getDecayingBuckets()
-    {
-        return rescaleIfNeeded(clock.now());
     }
 
     /**
@@ -349,7 +394,7 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
     @VisibleForTesting
     boolean isOverflowed()
     {
-        return bucketValue(bucketOffsets.length, getDecayingBuckets().decayBuckets) > 0;
+        return bucketValue(bucketOffsets.length, decayingBuckets.buckets) > 0;
     }
 
     private long bucketValue(int index, AtomicLongArray buckets)
@@ -364,41 +409,72 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
     @VisibleForTesting
     long stripedBucketValue(int i, boolean withDecay)
     {
-        return withDecay ? getDecayingBuckets().decayBuckets.get(i) : buckets.get(i);
+        return withDecay ? decayingBuckets.buckets.get(i) : buckets.get(i);
     }
 
-    private DecayingBuckets rescaleIfNeeded(long now)
+    private void rescaleIfNeeded()
     {
-        DecayingBuckets buckets = decayingBuckets;
-        while (now - buckets.decayLandmark > landmarkResetIntervalInNs)
-        {
-            double rescaleFactor = buckets.forwardDecayWeight(now);
-            DecayingBuckets newBuckets = new DecayingBuckets(now);
-            for (int i = 0; i < buckets.decayBuckets.length(); i++)
-                newBuckets.decayBuckets.set(i, Math.round(buckets.decayBuckets.get(i) / rescaleFactor));
+        rescaleIfNeeded(clock.getTime());
+    }
 
-            boolean success = decayingBucketsUpdater.compareAndSet(this, buckets, newBuckets);
-            if (success)
-                return newBuckets;
-            buckets = decayingBuckets;
+    private void rescaleIfNeeded(long now)
+    {
+        if (needRescale(now))
+        {
+            if (rescaling.compareAndSet(false, true))
+            {
+                try
+                {
+                    decayingBuckets = rescale(now);
+                }
+                finally
+                {
+                    rescaling.set(false);
+                }
+            }
         }
-        return buckets;
+    }
+
+    /**
+     * rescale races with update;
+     * If rescale is called at the same time as an update, and an update falls into an already
+     * processed bucket this update will be lost. We accept that for the sake of update performance.
+     * OTOH, if the update falls into a bucket that is yet to be processed, it will be added
+     * with a weight that is consistent with the rescaleFactor used by rescale, so the new rescaled
+     * buckets will all have values consistent with the new decay landmark.
+     */
+    private DecayingBuckets rescale(long now)
+    {
+        final double rescaleFactor = decayingBuckets.forwardDecayWeight(now);
+        long[] newDecayingBuckets = new long[decayingBuckets.buckets.length()];
+        for (int i = 0; i < decayingBuckets.buckets.length(); i++)
+        {
+            newDecayingBuckets[i] = Math.round(decayingBuckets.buckets.get(i) / rescaleFactor);
+        }
+        return new DecayingBuckets(now, newDecayingBuckets);
+    }
+
+    private boolean needRescale(long now)
+    {
+        return (now - decayingBuckets.decayLandmark) > LANDMARK_RESET_INTERVAL_IN_MS;
     }
 
     @VisibleForTesting
     public void clear()
     {
-        for (int i = 0; i < buckets.length(); i++)
+        final int bucketCount = buckets.length();
+        for (int i = 0; i < bucketCount; i++)
+        {
             buckets.set(i, 0L);
-
-        decayingBucketsUpdater.set(this, new DecayingBuckets(clock.now()));
+        }
+        decayingBuckets = new DecayingBuckets(decayingBuckets.decayLandmark, new long[bucketCount]);
     }
 
     /**
      * Replaces current internal values with the given one from a Snapshot. This method is NOT thread safe, values
      * added at the same time to this reservoir using methods such as update may lose their data
      */
-    private void rebase(EstimatedHistogramReservoirSnapshot snapshot)
+    public void rebase(EstimatedHistogramReservoirSnapshot snapshot)
     {
         // Check bucket count (a snapshot always has one stripe so the logical bucket count is used
         if (size() != snapshot.decayingBuckets.length)
@@ -415,66 +491,107 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
             }
         }
 
-        DecayingBuckets newDecayingBuckets = new DecayingBuckets(snapshot.snapshotLandmark);
+        long[] bs = new long[(bucketOffsets.length + 1) * nStripes];
         for (int i = 0; i < size(); i++)
         {
             // set rebased values in the first stripe and clear out all other data
-            newDecayingBuckets.decayBuckets.set(stripedIndex(i, 0), snapshot.decayingBuckets[i]);
-            buckets.set(stripedIndex(i, 0), snapshot.values[i]);
+            int bucketIdx = stripedIndex(i, 0);
+            bs[bucketIdx] = snapshot.decayingBuckets[i];
+            buckets.set(bucketIdx, snapshot.values[i]);
             for (int stripe = 1; stripe < nStripes; stripe++)
             {
-                newDecayingBuckets.decayBuckets.set(stripedIndex(i, stripe), 0);
-                buckets.set(stripedIndex(i, stripe), 0);
+                int stripeBucketIdx = stripedIndex(i, stripe);
+                bs[stripeBucketIdx] = 0; // not strictly needed, but let's leave it for consistency
+                buckets.set(stripeBucketIdx, 0);
             }
         }
-        decayingBucketsUpdater.set(this, newDecayingBuckets);
+        decayingBuckets = new DecayingBuckets(snapshot.snapshotLandmark, bs);
     }
 
     /**
-     * The DecayingBuckets class provides a facility to prevent destruction of the reservoir internal state from
-     * occurring. The root cause of CASSANDRA-19365 is lack of synchronization between udpates and rescaling.
-     * This class lets us retain lack of synchronization (for performance reasons) while changing the race condition
-     * effect from destructive to benign.
-     * <p>
-     * DecayingBuckets class encapsulates the decaying buckets and the decay landmark together. The decay landmark is
-     * immutable and so the values in the buckets are consistent with the landmark at any given time. In particular,
-     * every update is always given a weight that's consistent with weights given to other updates of the same buckets.
-     * <p>
-     * Additionally, the class allows creating snapshots of the reservoir without risking that the snapshot uses data
-     * from a half-rescaled reservoir.
+     * The DecayingBuckets class provides a facility to prevent destruction of the reservoir internal
+     * state (CASSANDRA-19365) from occurring.
+     * The root cause of CASSANDRA-19365 is lack of synchronization between udpates and rescaling.
+     * This class lets us retain lack of synchronization (for performance reasons) while changing
+     * the race condition effect from destructive to benign.
+     * <p/>
+     * DecayingBuckets class encapsulates the decaying buckets and the decay landmark together.
+     * The decay landmark is immutable and so the values in the buckets are consistent with the landmark
+     * at any given time. In particular, every update is always given a weight that's consistent
+     * with weights given to other updates of the same DecayingBuckets.
+     * <p/>
+     * Additionally, the class allows creating snapshots of the reservoir without risking that
+     * the snapshot uses data from a half-rescaled reservoir.
+     * <p/>
+     * DecayingBuckets are not suitable for thread-safe rescaling in place. Instead,
+     * a new instance of DecayingBuckets should be created when rescaling is needed.
+     * <p/>
+     * This class does NOT provide thread safety guarantees for updates vs rescale
+     * As a matter of fact, there is a known race condition between update and rescale
+     * (see {@link #rescale(long)}).
+     * <p/>
      */
     private class DecayingBuckets
     {
         private final long decayLandmark;
-        private final AtomicLongArray decayBuckets;
+        private final AtomicLongArray buckets;
 
-        public DecayingBuckets(long decayLandmark)
+        public DecayingBuckets(long decayLandmark, long[] buckets)
         {
             this.decayLandmark = decayLandmark;
-            this.decayBuckets = new AtomicLongArray((bucketOffsets.length + 1) * nStripes);
+            this.buckets = new AtomicLongArray(buckets);
         }
 
         public void update(int index, long now)
         {
-            updateBucket(decayBuckets, index, forwardDecayWeight(now));
+            updateBucket(buckets, index, forwardDecayWeight(now));
         }
 
         private long forwardDecayWeight(long now)
         {
-            return Math.round(Math.exp(TimeUnit.NANOSECONDS.toSeconds(now - decayLandmark) / MEAN_LIFETIME_IN_S));
+            return Math.round(Math.exp(((now - decayLandmark) / 1000.0) / MEAN_LIFETIME_IN_S));
         }
     }
 
-    private static abstract class AbstractSnapshot extends Snapshot
+    /**
+     * Represents a snapshot of the decaying histogram.
+     *
+     * The decaying buckets are copied into a snapshot array to give a consistent view for all getters. However, the
+     * copy is made without a write-lock and so other threads may change the buckets while the array is copied,
+     * probably causign a slight skew up in the quantiles and mean values.
+     *
+     * The decaying buckets will be used for quantile calculations and mean values, but the non decaying buckets will be
+     * exposed for calls to {@link Snapshot#getValues()}.
+     */
+    public static class EstimatedHistogramReservoirSnapshot extends Snapshot
     {
-        protected final long[] decayingBuckets;
-        protected final long[] bucketOffsets;
+        private final long[] decayingBuckets;
+        private final long[] values;
+        private long count;
+        private long snapshotLandmark;
+        private long[] bucketOffsets;
+        private DecayingEstimatedHistogramReservoir reservoir;
 
-        AbstractSnapshot(DecayingEstimatedHistogramReservoir reservoir)
+        public EstimatedHistogramReservoirSnapshot(DecayingEstimatedHistogramReservoir reservoir)
         {
-            int length = reservoir.size();
+            final int length = reservoir.size();
             this.decayingBuckets = new long[length];
+            this.values = new long[length];
             this.bucketOffsets = reservoir.bucketOffsets; // No need to copy, these are immutable
+
+            DecayingBuckets decayingBucketsRef = reservoir.decayingBuckets;
+
+            this.snapshotLandmark = decayingBucketsRef.decayLandmark;
+            double rescaleFactor = decayingBucketsRef.forwardDecayWeight(reservoir.clock.getTime());
+
+            for (int i = 0; i < length; i++)
+            {
+                this.decayingBuckets[i] = Math.round(reservoir.bucketValue(i, decayingBucketsRef.buckets) / rescaleFactor);
+                this.values[i] = reservoir.bucketValue(i, reservoir.buckets);
+            }
+
+            this.count = count();
+            this.reservoir = reservoir;
         }
 
         /**
@@ -484,7 +601,6 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
          * @return estimated value at given quantile
          * @throws IllegalStateException in case the histogram overflowed
          */
-        @Override
         public double getValue(double quantile)
         {
             assert quantile >= 0 && quantile <= 1.0;
@@ -492,10 +608,7 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
             final int lastBucket = decayingBuckets.length - 1;
 
             if (decayingBuckets[lastBucket] > 0)
-            {
-                try { throw new IllegalStateException("EstimatedHistogram overflow: " + Arrays.toString(decayingBuckets)); }
-                catch (IllegalStateException e) { noSpamLogger.warn("", e); }
-            }
+                throw new IllegalStateException("Unable to compute when histogram overflowed");
 
             final long qcount = (long) Math.ceil(count() * quantile);
             if (qcount == 0)
@@ -512,11 +625,53 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
         }
 
         /**
+         * Will return a snapshot of the non-decaying buckets.
+         *
+         * The values returned will not be consistent with the quantile and mean values. The caller must be aware of the
+         * offsets created by {@link EstimatedHistogram#getBucketOffsets()} to make use of the values returned.
+         *
+         * @return a snapshot of the non-decaying buckets.
+         */
+        public long[] getValues()
+        {
+            return values;
+        }
+
+        public long[] getOffsets()
+        {
+            return bucketOffsets;
+        }
+
+        /**
+         * @see {@link Snapshot#size()}
+         * @return
+         */
+        public int size()
+        {
+            return Ints.saturatedCast(count);
+        }
+
+        @VisibleForTesting
+        public long getSnapshotLandmark()
+        {
+            return snapshotLandmark;
+        }
+
+        @VisibleForTesting
+        public Range getBucketingRangeForValue(long value)
+        {
+            int index = findIndex(bucketOffsets, value);
+            long max = bucketOffsets[index];
+            long min = index == 0 ? 0 : 1 + bucketOffsets[index - 1];
+            return new Range(min, max);
+        }
+
+        /**
          * Return the number of registered values taking forward decay into account.
          *
          * @return the sum of all bucket values
          */
-        protected long count()
+        private long count()
         {
             long sum = 0L;
             for (int i = 0; i < decayingBuckets.length; i++)
@@ -533,7 +688,6 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
          * @return the largest value that could have been added to this reservoir, or Long.MAX_VALUE if the reservoir
          * overflowed
          */
-        @Override
         public long getMax()
         {
             final int lastBucket = decayingBuckets.length - 1;
@@ -555,7 +709,6 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
          * @return the mean histogram value (average of bucket offsets, weighted by count)
          * @throws IllegalStateException if any values were greater than the largest bucket threshold
          */
-        @Override
         public double getMean()
         {
             final int lastBucket = decayingBuckets.length - 1;
@@ -583,7 +736,6 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
          *
          * @return the smallest value that could have been added to this reservoir
          */
-        @Override
         public long getMin()
         {
             for (int i = 0; i < decayingBuckets.length; i++)
@@ -602,7 +754,6 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
          *
          * @return an estimate of the standard deviation
          */
-        @Override
         public double getStdDev()
         {
             final int lastBucket = decayingBuckets.length - 1;
@@ -632,7 +783,6 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
             }
         }
 
-        @Override
         public void dump(OutputStream output)
         {
             try (PrintWriter out = new PrintWriter(new OutputStreamWriter(output, StandardCharsets.UTF_8)))
@@ -644,80 +794,6 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
                     out.printf("%d%n", decayingBuckets[i]);
                 }
             }
-        }
-    }
-
-    /**
-     * Represents a snapshot of the decaying histogram.
-     *
-     * The decaying buckets are copied into a snapshot array to give a consistent view for all getters. However, the
-     * copy is made without a write-lock and so other threads may change the buckets while the array is copied,
-     * probably causing a slight skew up in the quantiles and mean values.
-     *
-     * The decaying buckets will be used for quantile calculations and mean values, but the non decaying buckets will be
-     * exposed for calls to {@link Snapshot#getValues()}.
-     */
-    static class EstimatedHistogramReservoirSnapshot extends AbstractSnapshot
-    {
-        private final long[] values;
-        private long count;
-        private long snapshotLandmark;
-        private final DecayingEstimatedHistogramReservoir reservoir;
-
-        public EstimatedHistogramReservoirSnapshot(DecayingEstimatedHistogramReservoir reservoir)
-        {
-            super(reservoir);
-            
-            int length = reservoir.size();
-            this.values = new long[length];
-
-            DecayingBuckets decayingBucketsRef = reservoir.getDecayingBuckets();
-
-            this.snapshotLandmark = decayingBucketsRef.decayLandmark;
-            double rescaleFactor = decayingBucketsRef.forwardDecayWeight(reservoir.clock.now());
-
-            for (int i = 0; i < length; i++)
-            {
-                this.decayingBuckets[i] = Math.round(reservoir.bucketValue(i, decayingBucketsRef.decayBuckets) / rescaleFactor);
-                this.values[i] = reservoir.bucketValue(i, reservoir.buckets);
-            }
-
-            this.count = count();
-            this.reservoir = reservoir;
-        }
-
-        /**
-         * Will return a snapshot of the non-decaying buckets.
-         *
-         * The values returned will not be consistent with the quantile and mean values. The caller must be aware of the
-         * offsets created by {@link EstimatedHistogram#getBucketOffsets()} to make use of the values returned.
-         *
-         * @return a snapshot of the non-decaying buckets.
-         */
-        public long[] getValues()
-        {
-            return values;
-        }
-
-        @Override
-        public int size()
-        {
-            return Ints.saturatedCast(count);
-        }
-
-        @VisibleForTesting
-        public long getSnapshotLandmark()
-        {
-            return snapshotLandmark;
-        }
-
-        @VisibleForTesting
-        public Range getBucketingRangeForValue(long value)
-        {
-            int index = findIndex(bucketOffsets, value);
-            long max = bucketOffsets[index];
-            long min = index == 0 ? 0 : 1 + bucketOffsets[index - 1];
-            return new Range(min, max);
         }
 
         /**
@@ -778,49 +854,9 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
             }
         }
 
-        public void rebaseReservoir()
+        public void rebaseReservoir() 
         {
             this.reservoir.rebase(this);
-        }
-    }
-
-    /**
-     * Like {@link EstimatedHistogramReservoirSnapshot}, represents a snapshot of a given histogram reservoir.
-     * 
-     * Unlike {@link EstimatedHistogramReservoirSnapshot}, this only copies and supports operations based on the
-     * decaying buckets from the source reservoir. (ex. percentiles, min, max) It also does not support snapshot 
-     * merging or rebasing on the source reservoir.
-     */
-    private static class DecayingBucketsOnlySnapshot extends AbstractSnapshot
-    {
-        private final long count;
-
-        public DecayingBucketsOnlySnapshot(DecayingEstimatedHistogramReservoir reservoir)
-        {
-            super(reservoir);
-
-            int length = reservoir.size();
-            DecayingBuckets decayingBucketsRef = reservoir.getDecayingBuckets();
-            double rescaleFactor = decayingBucketsRef.forwardDecayWeight(reservoir.clock.now());
-
-            for (int i = 0; i < length; i++)
-            {
-                this.decayingBuckets[i] = Math.round(reservoir.bucketValue(i, decayingBucketsRef.decayBuckets) / rescaleFactor);
-            }
-
-            this.count = count();
-        }
-
-        @Override
-        public long[] getValues()
-        {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public int size()
-        {
-            return Ints.saturatedCast(count);
         }
     }
 
@@ -848,11 +884,50 @@ public class DecayingEstimatedHistogramReservoir implements SnapshottingReservoi
         {
             return Objects.hash(min, max);
         }
+    }
 
-        @Override
-        public String toString()
+    /**
+     * this is almost a copy-paste from DSE DecayingEstimatedHistogram::makeOffsets, except that it's been adjusted
+     * to the C*-specific ability of specifying the number of buckets.
+     * Please note, that DSE bucket offsets are inclusive lower bounds and C* bucket offsets are inclusive upper bounds.
+     * For simplicity, we use the same bucket offsets in both cases, but this means there might be a slight
+     * difference for any samples that are exactly on the bucket boundary. I think we can safely ignore that.
+     *
+     * @param size the number of regular buckets to create; the special bucket for overflow values is not included
+     *             in this count
+     * @param considerZeroes whether to include a separate bucket for zero values
+     * @return the offsets for the buckets; in that context offsets mean the upper inclusive bounds of each bucket
+     *         the name "offset" stays for historic reasons.
+     *
+     */
+    public static long[] newDseOffsets(int size, boolean considerZeroes)
+    {
+        ArrayList<Long> ret = new ArrayList<>();
+        if (considerZeroes)
+            ret.add(0L);
+
+        for (int i = 1; i <= subBucketCount && ret.size() < size; i++)
         {
-            return "[" + min + ',' + max + ']';
+            ret.add((long) i);
         }
+
+        long last = subBucketCount;
+        long unit = 1 << (unitMagnitude + 1);
+
+        while (ret.size() < size)
+        {
+            for (int i = 0; i < subBucketHalfCount; i++)
+            {
+                assert last + unit > last : "Overflow in DSE histogram bucket calculation; too big size requested: " + size;
+                last += unit;
+                ret.add(last);
+                if (ret.size() >= size)
+                    break;
+            }
+            unit *= 2;
+        }
+
+        assert ret.size() == size : "DSE histogram bucket count mismatch: " + ret.size() + " != " + size;
+        return ret.stream().mapToLong(i->i).toArray();
     }
 }

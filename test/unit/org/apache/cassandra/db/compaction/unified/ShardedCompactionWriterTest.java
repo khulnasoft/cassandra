@@ -1,13 +1,11 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Copyright KhulnaSoft, Ltd.
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -26,14 +24,13 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.junit.AfterClass;
-import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
-
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.db.compaction.AbstractCompactionStrategy;
+import org.apache.cassandra.db.SortedLocalRanges;
 import org.apache.cassandra.db.compaction.CompactionController;
 import org.apache.cassandra.db.compaction.CompactionIterator;
 import org.apache.cassandra.db.compaction.OperationType;
@@ -43,12 +40,12 @@ import org.apache.cassandra.db.compaction.ShardManagerNoDisks;
 import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.io.sstable.ScannerList;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.SSTableReaderWithFilter;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.UUIDGen;
 
-import static org.apache.cassandra.db.ColumnFamilyStore.RING_VERSION_IRRELEVANT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -59,12 +56,16 @@ public class ShardedCompactionWriterTest extends CQLTester
 
     private static final int ROW_PER_PARTITION = 10;
 
-    @Before
-    public void before()
+    @BeforeClass
+    public static void beforeClass()
     {
+        CQLTester.setUpClass();
+        CQLTester.prepareServer();
+        StorageService.instance.initServer();
+
         // Disabling durable write since we don't care
         schemaChange("CREATE KEYSPACE IF NOT EXISTS " + KEYSPACE + " WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'} AND durable_writes=false");
-        schemaChange(String.format("CREATE TABLE IF NOT EXISTS %s.%s (k int, t int, v blob, PRIMARY KEY (k, t))", KEYSPACE, TABLE));
+        schemaChange(String.format("CREATE TABLE %s.%s (k int, t int, v blob, PRIMARY KEY (k, t))", KEYSPACE, TABLE));
     }
 
     @AfterClass
@@ -106,7 +107,7 @@ public class ShardedCompactionWriterTest extends CQLTester
 
         LifecycleTransaction txn = cfs.getTracker().tryModify(cfs.getLiveSSTables(), OperationType.COMPACTION);
 
-        ShardManager boundaries = new ShardManagerNoDisks(ColumnFamilyStore.fullWeightedRange(RING_VERSION_IRRELEVANT, cfs.getPartitioner()));
+        ShardManager boundaries = new ShardManagerNoDisks(SortedLocalRanges.forTestingFull(cfs));
         ShardedCompactionWriter writer = new ShardedCompactionWriter(cfs, cfs.getDirectories(), txn, txn.originals(), false, boundaries.boundaries(numShards));
 
         int rows = compact(cfs, txn, writer);
@@ -114,24 +115,17 @@ public class ShardedCompactionWriterTest extends CQLTester
         assertEquals(rowCount, rows);
 
         long totalOnDiskLength = cfs.getLiveSSTables().stream().mapToLong(SSTableReader::onDiskLength).sum();
-        long totalBFSize = cfs.getLiveSSTables().stream().mapToLong(ShardedCompactionWriterTest::getFilterSize).sum();
+        long totalBFSize = cfs.getLiveSSTables().stream().mapToLong(SSTableReader::getBloomFilterSerializedSize).sum();
         assert totalBFSize > 16 * numOutputSSTables : "Bloom Filter is empty"; // 16 is the size of empty bloom filter
         for (SSTableReader rdr : cfs.getLiveSSTables())
         {
             assertEquals((double) rdr.onDiskLength() / totalOnDiskLength,
-                         (double) getFilterSize(rdr) / totalBFSize, 0.1);
+                         (double) rdr.getBloomFilterSerializedSize() / totalBFSize, 0.1);
             assertEquals(1.0 / numOutputSSTables, rdr.tokenSpaceCoverage(), 0.05);
         }
 
         validateData(cfs, rowCount);
         cfs.truncateBlocking();
-    }
-
-    static long getFilterSize(SSTableReader rdr)
-    {
-        if (!(rdr instanceof SSTableReaderWithFilter))
-            return 0;
-        return ((SSTableReaderWithFilter) rdr).getFilterSerializedSize();
     }
 
     @Test
@@ -145,8 +139,8 @@ public class ShardedCompactionWriterTest extends CQLTester
 
         populate(rowCount, false);
 
-        final ColumnFamilyStore.VersionedLocalRanges localRanges = cfs.localRangesWeighted();
-        final List<Token> diskBoundaries = cfs.getPartitioner().splitter().get().splitOwnedRanges(numDisks, localRanges, false);
+        final SortedLocalRanges localRanges = SortedLocalRanges.forTestingFull(cfs);
+        final List<Token> diskBoundaries = localRanges.split(numDisks);
         ShardManager shardManager = new ShardManagerDiskAware(localRanges, diskBoundaries);
         int rows = compact(1, cfs, shardManager, cfs.getLiveSSTables());
 
@@ -183,7 +177,7 @@ public class ShardedCompactionWriterTest extends CQLTester
 
 
         long totalOnDiskLength = compactedSelection.stream().mapToLong(SSTableReader::onDiskLength).sum();
-        long totalBFSize = compactedSelection.stream().mapToLong(ShardedCompactionWriterTest::getFilterSize).sum();
+        long totalBFSize = compactedSelection.stream().mapToLong(SSTableReader::getBloomFilterSerializedSize).sum();
         double expectedSize = totalOnDiskLength / (numShards * 2.0);
         double expectedTokenShare = 1.0 / (numDisks * numShards);
 
@@ -192,7 +186,7 @@ public class ShardedCompactionWriterTest extends CQLTester
             verifyNoSpannedBoundaries(diskBoundaries, rdr);
 
             assertEquals((double) rdr.onDiskLength() / totalOnDiskLength,
-                         (double) getFilterSize(rdr) / totalBFSize, 0.1);
+                         (double) rdr.getBloomFilterSerializedSize() / totalBFSize, 0.1);
             assertEquals(expectedTokenShare, rdr.tokenSpaceCoverage(), expectedTokenShare * 0.05);
             assertEquals(expectedSize, rdr.onDiskLength(), expectedSize * 0.1);
         }
@@ -232,10 +226,10 @@ public class ShardedCompactionWriterTest extends CQLTester
     {
         //assert txn.originals().size() == 1;
         int rowsWritten = 0;
-        long nowInSec = FBUtilities.nowInSeconds();
-        try (AbstractCompactionStrategy.ScannerList scanners = cfs.getCompactionStrategyManager().getScanners(txn.originals());
+        int nowInSec = FBUtilities.nowInSeconds();
+        try (ScannerList scanners = cfs.getCompactionStrategy().getScanners(txn.originals());
              CompactionController controller = new CompactionController(cfs, txn.originals(), cfs.gcBefore(nowInSec));
-             CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, scanners.scanners, controller, nowInSec, TimeUUID.minAtUnixMillis(System.currentTimeMillis())))
+             CompactionIterator ci = new CompactionIterator(OperationType.COMPACTION, scanners.scanners, controller, nowInSec, UUIDGen.getTimeUUID()))
         {
             while (ci.hasNext())
             {

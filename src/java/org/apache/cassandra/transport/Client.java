@@ -29,6 +29,7 @@ import com.google.common.base.Splitter;
 import org.apache.cassandra.auth.PasswordAuthenticator;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.EncryptionOptions;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.marshal.Int32Type;
@@ -37,9 +38,6 @@ import org.apache.cassandra.transport.messages.*;
 import org.apache.cassandra.utils.Hex;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.MD5Digest;
-
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
-import static org.apache.cassandra.utils.LocalizeString.toUpperCaseLocalized;
 
 public class Client extends SimpleClient
 {
@@ -103,7 +101,7 @@ public class Client extends SimpleClient
         Iterator<String> iter = splitter.split(line).iterator();
         if (!iter.hasNext())
             return null;
-        String msgType = toUpperCaseLocalized(iter.next());
+        String msgType = iter.next().toUpperCase();
         if (msgType.equals("STARTUP"))
         {
             Map<String, String> options = new HashMap<String, String>();
@@ -111,17 +109,17 @@ public class Client extends SimpleClient
             while (iter.hasNext())
             {
                String next = iter.next();
-               if (toLowerCaseLocalized(next).equals("snappy"))
+               if (next.toLowerCase().equals("snappy"))
                {
                    options.put(StartupMessage.COMPRESSION, "snappy");
                    connection.setCompressor(Compressor.SnappyCompressor.instance);
                }
-               if (toLowerCaseLocalized(next).equals("lz4"))
+               if (next.toLowerCase().equals("lz4"))
                {
                    options.put(StartupMessage.COMPRESSION, "lz4");
                    connection.setCompressor(Compressor.LZ4Compressor.instance);
                }
-               if (toLowerCaseLocalized(next).equals("throw_on_overload"))
+               if (next.toLowerCase().equals("throw_on_overload"))
                {
                    options.put(StartupMessage.THROW_ON_OVERLOAD, "1");
                    connection.setThrowOnOverload(true);
@@ -134,14 +132,14 @@ public class Client extends SimpleClient
             line = line.substring(6);
             // Ugly hack to allow setting a page size, but that's playground code anyway
             String query = line;
-            int pageSize = -1;
+            PageSize pageSize = PageSize.NONE;
             if (line.matches(".+ !\\d+$"))
             {
                 int idx = line.lastIndexOf('!');
                 query = line.substring(0, idx-1);
                 try
                 {
-                    pageSize = Integer.parseInt(line.substring(idx+1, line.length()));
+                    pageSize = PageSize.inRows(Integer.parseInt(line.substring(idx + 1, line.length())));
                 }
                 catch (NumberFormatException e)
                 {
@@ -201,7 +199,7 @@ public class Client extends SimpleClient
         }
         else if (msgType.equals("REGISTER"))
         {
-            String type = toUpperCaseLocalized(line.substring(9));
+            String type = line.substring(9).toUpperCase();
             try
             {
                 return new RegisterMessage(Collections.singletonList(Enum.valueOf(Event.Type.class, type)));
@@ -263,10 +261,7 @@ public class Client extends SimpleClient
         EncryptionOptions encryptionOptions = new EncryptionOptions().applyConfig();
         System.out.println("CQL binary protocol console " + host + "@" + port + " using native protocol version " + version);
 
-        try (Client client = new Client(host, port, version, encryptionOptions))
-        {
-            client.run();
-        }
+        new Client(host, port, version, encryptionOptions).run();
         System.exit(0);
     }
 }

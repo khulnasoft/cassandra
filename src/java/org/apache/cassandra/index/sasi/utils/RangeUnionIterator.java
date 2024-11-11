@@ -24,7 +24,7 @@ import java.util.stream.Collectors;
 import org.apache.cassandra.io.util.FileUtils;
 
 /**
- * Range Union Iterator is used to return sorted stream of elements from multiple RangeIterator instances.
+ * Range Union Iterator is used to return sorted stream of elements from multiple KeyRangeIterator instances.
  *
  * PriorityQueue is used as a sorting mechanism for the ranges, where each computeNext() operation would poll
  * from the queue (and push when done), which returns range that contains the smallest element, because
@@ -36,6 +36,7 @@ import org.apache.cassandra.io.util.FileUtils;
  * @param <K> The type used to sort ranges.
  * @param <D> The container type which is going to be returned by {@link Iterator#next()}.
  */
+@SuppressWarnings("resource")
 public class RangeUnionIterator<K extends Comparable<K>, D extends CombinedValue<K>> extends RangeIterator<K, D>
 {
     private final PriorityQueue<RangeIterator<K, D>> ranges;

@@ -25,7 +25,6 @@ import org.junit.Test;
 
 import com.google.common.collect.Iterators;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.ClusteringPrefix.Kind;
 import org.apache.cassandra.db.marshal.AbstractType;
@@ -51,7 +50,7 @@ public final class RTTransformationsTest
     private static final String KEYSPACE = "RTBoundCloserTest";
     private static final String TABLE = "table";
 
-    private final long nowInSec = FBUtilities.nowInSeconds();
+    private final int nowInSec = FBUtilities.nowInSeconds();
 
     private TableMetadata metadata;
     private DecoratedKey key;
@@ -59,7 +58,6 @@ public final class RTTransformationsTest
     @Before
     public void setUp()
     {
-        DatabaseDescriptor.daemonInitialization();
         metadata =
             TableMetadata.builder(KEYSPACE, TABLE)
                          .addPartitionKeyColumn("pk", UTF8Type.instance)
@@ -377,7 +375,7 @@ public final class RTTransformationsTest
         for (int i = 0; i < clusteringValues.length; i++)
             clusteringByteBuffers[i] = decompose(metadata.clusteringColumns().get(i).type, clusteringValues[i]);
 
-        return new RangeTombstoneBoundMarker(BufferClusteringBound.create(kind, clusteringByteBuffers), DeletionTime.build(timestamp, nowInSec));
+        return new RangeTombstoneBoundMarker(BufferClusteringBound.create(kind, clusteringByteBuffers), new DeletionTime(timestamp, nowInSec));
     }
 
     private RangeTombstoneBoundaryMarker boundary(ClusteringPrefix.Kind kind, long closeTimestamp, long openTimestamp, Object... clusteringValues)
@@ -387,8 +385,8 @@ public final class RTTransformationsTest
             clusteringByteBuffers[i] = decompose(metadata.clusteringColumns().get(i).type, clusteringValues[i]);
 
         return new RangeTombstoneBoundaryMarker(BufferClusteringBoundary.create(kind, clusteringByteBuffers),
-                                                DeletionTime.build(closeTimestamp, nowInSec),
-                                                DeletionTime.build(openTimestamp, nowInSec));
+                                                new DeletionTime(closeTimestamp, nowInSec),
+                                                new DeletionTime(openTimestamp, nowInSec));
     }
 
     private Row row(long timestamp, Object... clusteringValues)

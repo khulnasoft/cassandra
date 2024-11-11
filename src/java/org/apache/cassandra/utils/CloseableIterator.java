@@ -17,54 +17,85 @@
  */
 package org.apache.cassandra.utils;
 
+import java.io.Closeable;
+import java.util.Collections;
 import java.util.Iterator;
-import java.util.NoSuchElementException;
+
+import org.apache.cassandra.io.util.FileUtils;
+
 
 // so we can instantiate anonymous classes implementing both interfaces
 public interface CloseableIterator<T> extends Iterator<T>, AutoCloseable
 {
     public void close();
 
-    public static <T> CloseableIterator<T> wrap(Iterator<T> iter)
-    {
-        return new CloseableIterator<T>()
-        {
-            public void close()
-            {
-                // noop
-            }
+    CloseableIterator<Object> EMPTY = CloseableIterator.wrap(Collections.emptyIterator());
 
+    /**
+     * Returns an empty {@link CloseableIterator}.
+     */
+    @SuppressWarnings("unchecked")
+    static <T> CloseableIterator<T> emptyIterator()
+    {
+        return (CloseableIterator<T>) EMPTY;
+    }
+
+    /**
+     * Wraps an {@link Iterator} making it a {@link CloseableIterator}.
+     */
+    static <T> CloseableIterator<T> wrap(Iterator<T> iterator)
+    {
+        return new CloseableIterator<>()
+        {
             public boolean hasNext()
             {
-                return iter.hasNext();
+                return iterator.hasNext();
             }
 
             public T next()
             {
-                return iter.next();
+                return iterator.next();
+            }
+
+            public void remove()
+            {
+                iterator.remove();
+            }
+
+            public void close()
+            {
             }
         };
     }
 
-    public static <T> CloseableIterator<T> empty()
+    /**
+     * Pairs a {@link CloseableIterator} and an {@link AutoCloseable} so that the latter is closed when the former is
+     * closed.
+     */
+    static <T> CloseableIterator<T> withOnClose(CloseableIterator<T> iterator, Closeable onClose)
     {
-        return new CloseableIterator<T>()
+        return new CloseableIterator<>()
         {
-            public void close()
-            {
-                // noop
-            }
-
             public boolean hasNext()
             {
-                return false;
+                return iterator.hasNext();
             }
 
             public T next()
             {
-                throw new NoSuchElementException();
+                return iterator.next();
+            }
+
+            public void remove()
+            {
+                iterator.remove();
+            }
+
+            public void close()
+            {
+                iterator.close();
+                FileUtils.closeQuietly(onClose);
             }
         };
     }
-
 }

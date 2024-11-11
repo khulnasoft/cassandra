@@ -23,31 +23,22 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.utils.Pair;
 
 public class PermissionsCache extends AuthCache<Pair<AuthenticatedUser, IResource>, Set<Permission>>
-        implements PermissionsCacheMBean
 {
     public PermissionsCache(IAuthorizer authorizer)
     {
-        super(CACHE_NAME,
+        super("PermissionsCache",
               DatabaseDescriptor::setPermissionsValidity,
               DatabaseDescriptor::getPermissionsValidity,
               DatabaseDescriptor::setPermissionsUpdateInterval,
               DatabaseDescriptor::getPermissionsUpdateInterval,
               DatabaseDescriptor::setPermissionsCacheMaxEntries,
               DatabaseDescriptor::getPermissionsCacheMaxEntries,
-              DatabaseDescriptor::setPermissionsCacheActiveUpdate,
-              DatabaseDescriptor::getPermissionsCacheActiveUpdate,
               (p) -> authorizer.authorize(p.left, p.right),
-              authorizer.bulkLoader(),
-              authorizer::requireAuthorization);
+              () -> DatabaseDescriptor.getAuthorizer().requireAuthorization());
     }
 
     public Set<Permission> getPermissions(AuthenticatedUser user, IResource resource)
     {
         return get(Pair.create(user, resource));
-    }
-
-    public void invalidatePermissions(String roleName, String resourceName)
-    {
-        invalidate(Pair.create(new AuthenticatedUser(roleName), Resources.fromName(resourceName)));
     }
 }

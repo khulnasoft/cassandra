@@ -20,6 +20,7 @@ package org.apache.cassandra.repair.messages;
 
 import java.io.IOException;
 
+import com.google.common.collect.Sets;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -28,10 +29,7 @@ import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.MessagingService;
-
-import static com.google.common.collect.Sets.newHashSet;
-import static org.apache.cassandra.locator.InetAddressAndPort.getByName;
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
+import org.apache.cassandra.utils.UUIDGen;
 
 /**
  * verifies repair message serializers are working as advertised
@@ -66,7 +64,7 @@ public class RepairMessageSerializerTest
         InetAddressAndPort peer2 = InetAddressAndPort.getByName("10.0.0.3");
         InetAddressAndPort peer3 = InetAddressAndPort.getByName("10.0.0.4");
         PrepareConsistentRequest expected =
-            new PrepareConsistentRequest(nextTimeUUID(), coordinator, newHashSet(peer1, peer2, peer3));
+            new PrepareConsistentRequest(UUIDGen.getTimeUUID(), coordinator, Sets.newHashSet(peer1, peer2, peer3));
         PrepareConsistentRequest actual = serdes(PrepareConsistentRequest.serializer, expected);
         Assert.assertEquals(expected, actual);
     }
@@ -75,7 +73,7 @@ public class RepairMessageSerializerTest
     public void prepareConsistentResponse() throws Exception
     {
         PrepareConsistentResponse expected =
-            new PrepareConsistentResponse(nextTimeUUID(), getByName("10.0.0.2"), true);
+            new PrepareConsistentResponse(UUIDGen.getTimeUUID(), InetAddressAndPort.getByName("10.0.0.2"), true);
         PrepareConsistentResponse actual = serdes(PrepareConsistentResponse.serializer, expected);
         Assert.assertEquals(expected, actual);
     }
@@ -83,7 +81,7 @@ public class RepairMessageSerializerTest
     @Test
     public void failSession() throws Exception
     {
-        FailSession expected = new FailSession(nextTimeUUID());
+        FailSession expected = new FailSession(UUIDGen.getTimeUUID());
         FailSession actual = serdes(FailSession.serializer, expected);
         Assert.assertEquals(expected, actual);;
     }
@@ -91,7 +89,7 @@ public class RepairMessageSerializerTest
     @Test
     public void finalizeCommit() throws Exception
     {
-        FinalizeCommit expected = new FinalizeCommit(nextTimeUUID());
+        FinalizeCommit expected = new FinalizeCommit(UUIDGen.getTimeUUID());
         FinalizeCommit actual = serdes(FinalizeCommit.serializer, expected);
         Assert.assertEquals(expected, actual);;
     }
@@ -99,7 +97,7 @@ public class RepairMessageSerializerTest
     @Test
     public void finalizePromise() throws Exception
     {
-        FinalizePromise expected = new FinalizePromise(nextTimeUUID(), getByName("10.0.0.2"), true);
+        FinalizePromise expected = new FinalizePromise(UUIDGen.getTimeUUID(), InetAddressAndPort.getByName("10.0.0.2"), true);
         FinalizePromise actual = serdes(FinalizePromise.serializer, expected);
         Assert.assertEquals(expected, actual);
     }
@@ -107,7 +105,7 @@ public class RepairMessageSerializerTest
     @Test
     public void finalizePropose() throws Exception
     {
-        FinalizePropose expected = new FinalizePropose(nextTimeUUID());
+        FinalizePropose expected = new FinalizePropose(UUIDGen.getTimeUUID());
         FinalizePropose actual = serdes(FinalizePropose.serializer, expected);
         Assert.assertEquals(expected, actual);;
     }

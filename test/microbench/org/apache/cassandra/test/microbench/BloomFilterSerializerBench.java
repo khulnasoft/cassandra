@@ -24,12 +24,12 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.cassandra.db.BufferDecoratedKey;
 import org.apache.cassandra.dht.Murmur3Partitioner;
+import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileInputStreamPlus;
 import org.apache.cassandra.io.util.FileOutputStreamPlus;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.BloomFilter;
-import org.apache.cassandra.utils.BloomFilterSerializer;
 import org.apache.cassandra.utils.FilterFactory;
 import org.apache.cassandra.utils.IFilter;
 import org.apache.cassandra.utils.SerializationsTest;
@@ -52,6 +52,7 @@ import org.openjdk.jmh.annotations.Warmup;
 @State(Scope.Benchmark)
 public class BloomFilterSerializerBench
 {
+
     @Param({"1", "10", "100", "1024"})
     private long numElemsInK;
 
@@ -65,8 +66,6 @@ public class BloomFilterSerializerBench
 
     private ByteBuffer testVal = ByteBuffer.wrap(new byte[] { 0, 1});
 
-    private static final BloomFilterSerializer serializer = BloomFilterSerializer.forVersion(false);
-
     @Benchmark
     public void serializationTest() throws IOException
     {
@@ -75,16 +74,16 @@ public class BloomFilterSerializerBench
         {
             BloomFilter filter = (BloomFilter) FilterFactory.getFilter(numElemsInK * 1024, 0.01d);
             filter.add(wrap(testVal));
-            FileOutputStreamPlus out = new FileOutputStreamPlus(file);
+            DataOutputStreamPlus out = new FileOutputStreamPlus(file);
             if (oldBfFormat)
                 SerializationsTest.serializeOldBfFormat(filter, out);
             else
-                serializer.serialize(filter, out);
+                BloomFilter.serializer.serialize(filter, out);
             out.close();
             filter.close();
 
             FileInputStreamPlus in = new FileInputStreamPlus(file);
-            BloomFilter filter2 = BloomFilterSerializer.forVersion(oldBfFormat).deserialize(in);
+            IFilter filter2 = BloomFilter.serializer.deserialize(in, oldBfFormat);
             FileUtils.closeQuietly(in);
             filter2.close();
         }

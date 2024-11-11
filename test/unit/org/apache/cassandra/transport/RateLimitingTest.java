@@ -19,35 +19,30 @@
 package org.apache.cassandra.transport;
 
 import java.util.Collection;
-import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
-import com.codahale.metrics.Meter;
 import com.google.common.base.Ticker;
-import org.awaitility.Awaitility;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.service.StorageService;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.exceptions.OverloadedException;
-import org.apache.cassandra.metrics.CassandraMetricsRegistry;
-import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.transport.messages.QueryMessage;
 import org.apache.cassandra.utils.Throwables;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 import static org.apache.cassandra.Util.spinAssertEquals;
 import static org.apache.cassandra.transport.ProtocolVersion.V4;
@@ -60,8 +55,6 @@ public class RateLimitingTest extends CQLTester
     
     private static final int LARGE_PAYLOAD_THRESHOLD_BYTES = 1000;
     private static final int OVERLOAD_PERMITS_PER_SECOND = 1;
-
-    private static final long MAX_LONG_CONFIG_VALUE = Long.MAX_VALUE - 1;
 
     @Parameterized.Parameter
     public ProtocolVersion version;
@@ -83,8 +76,9 @@ public class RateLimitingTest extends CQLTester
         // If we don't exceed the queue capacity, we won't actually use the global/endpoint 
         // bytes-in-flight limits, and the assertions we make below around releasing them would be useless.
         DatabaseDescriptor.setNativeTransportReceiveQueueCapacityInBytes(1);
-
-        requireNetwork();
+        
+        // The driver control connections would send queries that might interfere with the tests.
+        requireNetworkWithoutDriver();
     }
 
     @Before
@@ -102,7 +96,7 @@ public class RateLimitingTest extends CQLTester
             }
         };
 
-        ClientResourceLimits.setGlobalLimit(MAX_LONG_CONFIG_VALUE);
+        ClientResourceLimits.setGlobalLimit(Long.MAX_VALUE);
     }
 
     @Test
@@ -170,7 +164,7 @@ public class RateLimitingTest extends CQLTester
         finally
         {
             // Sanity check bytes in flight limiter.
-            Awaitility.await().untilAsserted(() -> assertEquals(0, ClientResourceLimits.getCurrentGlobalUsage()));
+            assertEquals(0, ClientResourceLimits.getCurrentGlobalUsage());
             StorageService.instance.setNativeTransportRateLimitingEnabled(false);
         }
     }
@@ -196,7 +190,7 @@ public class RateLimitingTest extends CQLTester
         finally
         {
             // Sanity the check bytes in flight limiter.
-            Awaitility.await().untilAsserted(() -> assertEquals(0, ClientResourceLimits.getCurrentGlobalUsage()));
+            assertEquals(0, ClientResourceLimits.getCurrentGlobalUsage());
             StorageService.instance.setNativeTransportRateLimitingEnabled(false);
         }
     }
@@ -261,9 +255,7 @@ public class RateLimitingTest extends CQLTester
     private void testThrowOnOverload(int payloadSize, SimpleClient client)
     {
         // The first query takes the one available permit...
-        long dispatchedPrior = getRequestDispatchedMeter().getCount();
         client.execute(queryMessage(payloadSize));
-        assertEquals(dispatchedPrior + 1, getRequestDispatchedMeter().getCount());
         
         try
         {   
@@ -275,15 +267,10 @@ public class RateLimitingTest extends CQLTester
             assertTrue(Throwables.anyCauseMatches(e, cause -> cause instanceof OverloadedException));
         }
 
-        // The last request attempt was rejected and therefore not dispatched.
-        assertEquals(dispatchedPrior + 1, getRequestDispatchedMeter().getCount());
-
         // Advance the timeline and verify that we can take a permit again.
         // (Note that we don't take one when we throw on overload.)
         tick.addAndGet(ClientResourceLimits.GLOBAL_REQUEST_LIMITER.getIntervalNanos());
         client.execute(queryMessage(payloadSize));
-
-        assertEquals(dispatchedPrior + 2, getRequestDispatchedMeter().getCount());
     }
 
     private QueryMessage queryMessage(int length)
@@ -315,17 +302,8 @@ public class RateLimitingTest extends CQLTester
                                    QueryOptions.DEFAULT.skipMetadata(),
                                    QueryOptions.DEFAULT.getPageSize(),
                                    QueryOptions.DEFAULT.getPagingState(),
-                                   QueryOptions.DEFAULT.getSerialConsistency(),
+                                   QueryOptions.DEFAULT.getSerialConsistency(null),
                                    version,
                                    KEYSPACE);
-    }
-
-    protected static Meter getRequestDispatchedMeter()
-    {
-        String metricName = "org.apache.cassandra.metrics.Client.RequestDispatched";
-        Map<String, Meter> metrics = CassandraMetricsRegistry.Metrics.getMeters((name, metric) -> name.equals(metricName));
-        if (metrics.size() != 1)
-            fail(String.format("Expected a single registered metric for request dispatched, found %s",metrics.size()));
-        return metrics.get(metricName);
     }
 }

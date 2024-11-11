@@ -37,13 +37,13 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.datastax.driver.core.BoundStatement;
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.Host;
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.PreparedStatementHelper;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.exceptions.InvalidQueryException;
+import com.khulnasoft.driver.core.BoundStatement;
+import com.khulnasoft.driver.core.Cluster;
+import com.khulnasoft.driver.core.Host;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.PreparedStatementHelper;
+import com.khulnasoft.driver.core.Session;
+import com.khulnasoft.driver.core.exceptions.InvalidQueryException;
 import net.bytebuddy.ByteBuddy;
 import net.bytebuddy.dynamic.DynamicType;
 import net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
@@ -57,8 +57,6 @@ import org.apache.cassandra.distributed.api.ICluster;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.distributed.impl.RowUtil;
 import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.apache.cassandra.distributed.shared.ClusterUtils;
-import org.apache.cassandra.distributed.test.log.FuzzTestBase;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.utils.CassandraVersion;
@@ -72,7 +70,7 @@ import static org.apache.cassandra.distributed.api.Feature.GOSSIP;
 import static org.apache.cassandra.distributed.api.Feature.NATIVE_PROTOCOL;
 import static org.apache.cassandra.distributed.api.Feature.NETWORK;
 
-public class MixedModeFuzzTest extends FuzzTestBase
+public class MixedModeFuzzTest extends TestBaseImpl
 {
     private static final Logger logger = LoggerFactory.getLogger(ReprepareFuzzTest.class);
 
@@ -98,7 +96,6 @@ public class MixedModeFuzzTest extends FuzzTestBase
             {
                 c.schemaChange(withKeyspace("CREATE KEYSPACE ks" + i + " WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 2};"));
                 c.schemaChange(withKeyspace("CREATE TABLE ks" + i + ".tbl (pk int, ck int, PRIMARY KEY (pk, ck));"));
-                ClusterUtils.waitForCMSToQuiesce(c, c.get(1));
                 for (int j = 0; j < i; j++)
                     c.coordinator(1).execute("INSERT INTO ks" + i + ".tbl (pk, ck) VALUES (?, ?)", ConsistencyLevel.ALL, 1, j);
             }
@@ -114,14 +111,14 @@ public class MixedModeFuzzTest extends FuzzTestBase
             {
                 int seed = i;
                 threads.add(new Thread(() -> {
-                    com.datastax.driver.core.Cluster cluster = null;
+                    com.khulnasoft.driver.core.Cluster cluster = null;
                     Map<String, Session> sessions = new HashMap<>();
                     try
                     {
                         AtomicBoolean nodeWithFix = new AtomicBoolean(false);
 
                         Supplier<Cluster> clusterSupplier = () -> {
-                            return com.datastax.driver.core.Cluster.builder()
+                            return com.khulnasoft.driver.core.Cluster.builder()
                                                                    .addContactPoint("127.0.0.1")
                                                                    .addContactPoint("127.0.0.2")
                                                                    .build();

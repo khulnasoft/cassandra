@@ -34,13 +34,12 @@ import java.util.stream.Collectors;
 import com.google.common.base.Function;
 import com.google.common.util.concurrent.Uninterruptibles;
 
-import com.datastax.driver.core.*;
-import com.datastax.driver.core.exceptions.AlreadyExistsException;
+import com.khulnasoft.driver.core.*;
+import com.khulnasoft.driver.core.TableMetadata;
+import com.khulnasoft.driver.core.exceptions.AlreadyExistsException;
 import org.antlr.runtime.RecognitionException;
-import org.apache.cassandra.config.YamlConfigurationLoader;
 import org.apache.cassandra.cql3.CQLFragmentParser;
 import org.apache.cassandra.cql3.CqlParser;
-import org.apache.cassandra.cql3.conditions.ColumnCondition;
 import org.apache.cassandra.cql3.statements.ModificationStatement;
 import org.apache.cassandra.cql3.statements.schema.CreateTableStatement;
 import org.apache.cassandra.exceptions.RequestValidationException;
@@ -61,9 +60,6 @@ import org.apache.cassandra.stress.util.ResultLogger;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.Constructor;
 import org.yaml.snakeyaml.error.YAMLException;
-
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
-import static org.apache.cassandra.utils.LocalizeString.toUpperCaseLocalized;
 
 public class StressProfile implements Serializable
 {
@@ -309,7 +305,7 @@ public class StressProfile implements Serializable
                     throw new RuntimeException("Unable to find table " + keyspaceName + "." + tableName);
 
                 //Fill in missing column configs
-                for (com.datastax.driver.core.ColumnMetadata col : metadata.getColumns())
+                for (com.khulnasoft.driver.core.ColumnMetadata col : metadata.getColumns())
                 {
                     if (columnConfigs.containsKey(col.getName()))
                         continue;
@@ -360,7 +356,7 @@ public class StressProfile implements Serializable
                               StressSettings settings,
                               boolean isWarmup)
     {
-        name = toLowerCaseLocalized(name);
+        name = name.toLowerCase();
         if (!queries.containsKey(name))
             throw new IllegalArgumentException("No query defined with name " + name);
 
@@ -376,10 +372,10 @@ public class StressProfile implements Serializable
                     Map<String, SchemaStatement.ArgSelect> args = new HashMap<>();
                     for (Map.Entry<String, StressYaml.QueryDef> e : queries.entrySet())
                     {
-                        stmts.put(toLowerCaseLocalized(e.getKey()), jclient.prepare(e.getValue().cql));
-                        args.put(toLowerCaseLocalized(e.getKey()), e.getValue().fields == null
+                        stmts.put(e.getKey().toLowerCase(), jclient.prepare(e.getValue().cql));
+                        args.put(e.getKey().toLowerCase(), e.getValue().fields == null
                                 ? SchemaStatement.ArgSelect.MULTIROW
-                                : SchemaStatement.ArgSelect.valueOf(toUpperCaseLocalized(e.getValue().fields)));
+                                : SchemaStatement.ArgSelect.valueOf(e.getValue().fields.toUpperCase()));
                     }
                     queryStatements = stmts;
                     argSelects = args;
@@ -398,7 +394,7 @@ public class StressProfile implements Serializable
         if (statement == null)
             return false;
 
-        if (!toUpperCaseLocalized(statement.getQueryString()).startsWith("UPDATE"))
+        if (!statement.getQueryString().toUpperCase().startsWith("UPDATE"))
             return false;
 
         ModificationStatement.Parsed modificationStatement;
@@ -420,7 +416,7 @@ public class StressProfile implements Serializable
          *  for dynamic condition we have to read existing db value and then
          *  use current db values during the update.
          */
-        return modificationStatement.getConditions().stream().anyMatch(ColumnCondition.Raw::containsBindMarkers);
+        return modificationStatement.getConditions().stream().anyMatch(condition -> condition.right.getValue().getText().equals("?"));
     }
 
     public Operation getBulkReadQueries(String name, Timer timer, StressSettings settings, TokenRangeIterator tokenRangeIterator, boolean isWarmup)
@@ -480,7 +476,7 @@ public class StressProfile implements Serializable
         List<ColumnMetadata> allColumns = com.google.common.collect.Lists.newArrayList(metadata.allColumnsInSelectOrder());
 
         StringBuilder sb = new StringBuilder();
-        sb.append("INSERT INTO ").append(keyspaceName).append('.').append(quoteIdentifier(tableName)).append(" (");
+        sb.append("INSERT INTO ").append(quoteIdentifier(keyspaceName)).append(".").append(quoteIdentifier(tableName)).append(" (");
         StringBuilder value = new StringBuilder();
         for (ColumnMetadata c : allColumns)
         {
@@ -522,8 +518,8 @@ public class StressProfile implements Serializable
                 {
                     maybeLoadSchemaInfo(settings);
 
-                    Set<com.datastax.driver.core.ColumnMetadata> keyColumns = com.google.common.collect.Sets.newHashSet(tableMetaData.getPrimaryKey());
-                    Set<com.datastax.driver.core.ColumnMetadata> allColumns = com.google.common.collect.Sets.newHashSet(tableMetaData.getColumns());
+                    Set<com.khulnasoft.driver.core.ColumnMetadata> keyColumns = com.google.common.collect.Sets.newHashSet(tableMetaData.getPrimaryKey());
+                    Set<com.khulnasoft.driver.core.ColumnMetadata> allColumns = com.google.common.collect.Sets.newHashSet(tableMetaData.getColumns());
                     boolean isKeyOnlyTable = (keyColumns.size() == allColumns.size());
                     //With compact storage
                     if (!isKeyOnlyTable && (keyColumns.size() == (allColumns.size() - 1)))
@@ -531,7 +527,7 @@ public class StressProfile implements Serializable
                         com.google.common.collect.Sets.SetView diff = com.google.common.collect.Sets.difference(allColumns, keyColumns);
                         for (Object obj : diff)
                         {
-                            com.datastax.driver.core.ColumnMetadata col = (com.datastax.driver.core.ColumnMetadata)obj;
+                            com.khulnasoft.driver.core.ColumnMetadata col = (com.khulnasoft.driver.core.ColumnMetadata)obj;
                             isKeyOnlyTable = col.getName().isEmpty();
                             break;
                         }
@@ -545,14 +541,14 @@ public class StressProfile implements Serializable
                     StringBuilder sb = new StringBuilder();
                     if (!isKeyOnlyTable)
                     {
-                        sb.append("UPDATE ").append(keyspaceName).append('.').append(quoteIdentifier(tableName)).append(" SET ");
+                        sb.append("UPDATE ").append(quoteIdentifier(tableName)).append(" SET ");
                         //PK Columns
                         StringBuilder pred = new StringBuilder();
                         pred.append(" WHERE ");
 
                         boolean firstCol = true;
                         boolean firstPred = true;
-                        for (com.datastax.driver.core.ColumnMetadata c : tableMetaData.getColumns()) {
+                        for (com.khulnasoft.driver.core.ColumnMetadata c : tableMetaData.getColumns()) {
 
                             if (keyColumns.contains(c)) {
                                 if (firstPred)
@@ -598,9 +594,9 @@ public class StressProfile implements Serializable
                     }
                     else
                     {
-                        sb.append("INSERT INTO ").append(keyspaceName).append('.').append(quoteIdentifier(tableName)).append(" (");
+                        sb.append("INSERT INTO ").append(quoteIdentifier(tableName)).append(" (");
                         StringBuilder value = new StringBuilder();
-                        for (com.datastax.driver.core.ColumnMetadata c : tableMetaData.getPrimaryKey())
+                        for (com.khulnasoft.driver.core.ColumnMetadata c : tableMetaData.getPrimaryKey())
                         {
                             sb.append(quoteIdentifier(c.getName())).append(", ");
                             value.append("?, ");
@@ -708,17 +704,17 @@ public class StressProfile implements Serializable
 
         private GeneratorFactory()
         {
-            Set<com.datastax.driver.core.ColumnMetadata> keyColumns = com.google.common.collect.Sets.newHashSet(tableMetaData.getPrimaryKey());
+            Set<com.khulnasoft.driver.core.ColumnMetadata> keyColumns = com.google.common.collect.Sets.newHashSet(tableMetaData.getPrimaryKey());
 
-            for (com.datastax.driver.core.ColumnMetadata metadata : tableMetaData.getPartitionKey())
+            for (com.khulnasoft.driver.core.ColumnMetadata metadata : tableMetaData.getPartitionKey())
                 partitionKeys.add(new ColumnInfo(metadata.getName(), metadata.getType().getName().toString(),
                                                  metadata.getType().isCollection() ? metadata.getType().getTypeArguments().get(0).getName().toString() : "",
                                                  columnConfigs.get(metadata.getName())));
-            for (com.datastax.driver.core.ColumnMetadata metadata : tableMetaData.getClusteringColumns())
+            for (com.khulnasoft.driver.core.ColumnMetadata metadata : tableMetaData.getClusteringColumns())
                 clusteringColumns.add(new ColumnInfo(metadata.getName(), metadata.getType().getName().toString(),
                                                      metadata.getType().isCollection() ? metadata.getType().getTypeArguments().get(0).getName().toString() : "",
                                                      columnConfigs.get(metadata.getName())));
-            for (com.datastax.driver.core.ColumnMetadata metadata : tableMetaData.getColumns())
+            for (com.khulnasoft.driver.core.ColumnMetadata metadata : tableMetaData.getColumns())
                 if (!keyColumns.contains(metadata))
                     valueColumns.add(new ColumnInfo(metadata.getName(), metadata.getType().getName().toString(),
                                                     metadata.getType().isCollection() ? metadata.getType().getTypeArguments().get(0).getName().toString() : "",
@@ -761,7 +757,7 @@ public class StressProfile implements Serializable
 
         static Generator getGenerator(final String name, final String type, final String collectionType, GeneratorConfig config)
         {
-            switch (toUpperCaseLocalized(type))
+            switch (type.toUpperCase())
             {
                 case "ASCII":
                 case "TEXT":
@@ -814,7 +810,7 @@ public class StressProfile implements Serializable
     {
         try
         {
-            Constructor constructor = new Constructor(StressYaml.class, YamlConfigurationLoader.getDefaultLoaderOptions());
+            Constructor constructor = new Constructor(StressYaml.class);
 
             Yaml yaml = new Yaml(constructor);
 
@@ -851,7 +847,7 @@ public class StressProfile implements Serializable
             }
         }
         for (Map.Entry<String, V> e : reinsert)
-            map.put(toLowerCaseLocalized(e.getKey()), e.getValue());
+            map.put(e.getKey().toLowerCase(), e.getValue());
     }
 
     /* Quote a identifier if it contains uppercase letters */

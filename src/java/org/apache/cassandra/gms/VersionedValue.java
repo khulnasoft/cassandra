@@ -17,33 +17,29 @@
  */
 package org.apache.cassandra.gms;
 
-import java.io.ByteArrayOutputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
+import java.io.*;
 import java.net.InetAddress;
 import java.util.Collection;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
+import static java.nio.charset.StandardCharsets.ISO_8859_1;
+
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
-import org.apache.commons.lang3.StringUtils;
 
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.IVersionedSerializer;
-import org.apache.cassandra.io.sstable.format.Version;
+import org.apache.cassandra.io.sstable.format.VersionAndType;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.FBUtilities;
-
-import static java.nio.charset.StandardCharsets.ISO_8859_1;
+import org.apache.commons.lang3.StringUtils;
 
 
 /**
@@ -72,34 +68,21 @@ public class VersionedValue implements Comparable<VersionedValue>
     public final static String DELIMITER_STR = new String(new char[]{ DELIMITER });
 
     // values for ApplicationState.STATUS
-    @Deprecated(since = "CEP-21")
     public final static String STATUS_BOOTSTRAPPING = "BOOT";
-    @Deprecated(since = "CEP-21")
     public final static String STATUS_BOOTSTRAPPING_REPLACE = "BOOT_REPLACE";
-    @Deprecated(since = "CEP-21")
     public final static String STATUS_NORMAL = "NORMAL";
-    @Deprecated(since = "CEP-21")
     public final static String STATUS_LEAVING = "LEAVING";
-    @Deprecated(since = "CEP-21")
     public final static String STATUS_LEFT = "LEFT";
-    @Deprecated(since = "CEP-21")
     public final static String STATUS_MOVING = "MOVING";
 
-    @Deprecated(since = "CEP-21")
     public final static String REMOVING_TOKEN = "removing";
-    @Deprecated(since = "CEP-21")
     public final static String REMOVED_TOKEN = "removed";
 
-    @Deprecated(since = "CEP-21")
     public final static String HIBERNATE = "hibernate";
-    @Deprecated(since = "CEP-21")
     public final static String SHUTDOWN = "shutdown";
 
     // values for ApplicationState.REMOVAL_COORDINATOR
-    @Deprecated(since = "CEP-21")
     public final static String REMOVAL_COORDINATOR = "REMOVER";
-
-    public static Set<String> BOOTSTRAPPING_STATUS = ImmutableSet.of(STATUS_BOOTSTRAPPING, STATUS_BOOTSTRAPPING_REPLACE);
 
     public final int version;
     public final String value;
@@ -114,12 +97,6 @@ public class VersionedValue implements Comparable<VersionedValue>
     private VersionedValue(String value)
     {
         this(value, VersionGenerator.getNextVersion());
-    }
-
-    @VisibleForTesting
-    public VersionedValue withVersion(int version)
-    {
-        return new VersionedValue(value, version);
     }
 
     public static VersionedValue unsafeMakeVersionedValue(String value, int version)
@@ -151,17 +128,10 @@ public class VersionedValue implements Comparable<VersionedValue>
     public static class VersionedValueFactory
     {
         final IPartitioner partitioner;
-        private final Supplier<Integer> versionSupplier;
 
         public VersionedValueFactory(IPartitioner partitioner)
         {
-            this(partitioner, VersionGenerator::getNextVersion);
-        }
-
-        public VersionedValueFactory(IPartitioner partitioner, Supplier<Integer> versionSupplier)
-        {
             this.partitioner = partitioner;
-            this.versionSupplier = versionSupplier;
         }
         
         public VersionedValue cloneWithHigherVersion(VersionedValue value)
@@ -169,33 +139,27 @@ public class VersionedValue implements Comparable<VersionedValue>
             return new VersionedValue(value.value);
         }
 
-        /** @deprecated See CASSANDRA-7544 */
-        @Deprecated(since = "4.0")
+        @Deprecated
         public VersionedValue bootReplacing(InetAddress oldNode)
         {
-            return new VersionedValue(versionString(VersionedValue.STATUS_BOOTSTRAPPING_REPLACE, oldNode.getHostAddress()), versionSupplier.get());
+            return new VersionedValue(versionString(VersionedValue.STATUS_BOOTSTRAPPING_REPLACE, oldNode.getHostAddress()));
         }
 
-        @Deprecated(since = "CEP-21")
         public VersionedValue bootReplacingWithPort(InetAddressAndPort oldNode)
         {
-            return new VersionedValue(versionString(VersionedValue.STATUS_BOOTSTRAPPING_REPLACE, oldNode.getHostAddressAndPort()), versionSupplier.get());
+            return new VersionedValue(versionString(VersionedValue.STATUS_BOOTSTRAPPING_REPLACE, oldNode.getHostAddressAndPort()));
         }
 
-        @Deprecated(since = "CEP-21")
         public VersionedValue bootstrapping(Collection<Token> tokens)
         {
             return new VersionedValue(versionString(VersionedValue.STATUS_BOOTSTRAPPING,
-                                                    makeTokenString(tokens)),
-                                      versionSupplier.get());
+                                                    makeTokenString(tokens)));
         }
 
-        @Deprecated(since = "CEP-21")
         public VersionedValue normal(Collection<Token> tokens)
         {
             return new VersionedValue(versionString(VersionedValue.STATUS_NORMAL,
-                                                    makeTokenString(tokens)),
-                                      versionSupplier.get());
+                                                    makeTokenString(tokens)));
         }
 
         private String makeTokenString(Collection<Token> tokens)
@@ -205,8 +169,7 @@ public class VersionedValue implements Comparable<VersionedValue>
 
         public VersionedValue load(double load)
         {
-            return new VersionedValue(String.valueOf(load),
-                                      versionSupplier.get());
+            return new VersionedValue(String.valueOf(load));
         }
 
         public VersionedValue diskUsage(String state)
@@ -216,49 +179,32 @@ public class VersionedValue implements Comparable<VersionedValue>
 
         public VersionedValue schema(UUID newVersion)
         {
-            return new VersionedValue(newVersion.toString(), versionSupplier.get());
+            return new VersionedValue(newVersion.toString());
         }
 
-        @Deprecated(since = "CEP-21")
         public VersionedValue leaving(Collection<Token> tokens)
         {
             return new VersionedValue(versionString(VersionedValue.STATUS_LEAVING,
-                                                    makeTokenString(tokens)),
-                                      versionSupplier.get());
+                                                    makeTokenString(tokens)));
         }
 
-        @Deprecated(since = "CEP-21")
         public VersionedValue left(Collection<Token> tokens, long expireTime)
         {
             return new VersionedValue(versionString(VersionedValue.STATUS_LEFT,
                                                     makeTokenString(tokens),
-                                                    Long.toString(expireTime)),
-                                      versionSupplier.get());
+                                                    Long.toString(expireTime)));
         }
 
-        @Deprecated(since = "CEP-21")
-        @VisibleForTesting
-        public VersionedValue left(Collection<Token> tokens, long expireTime, int generation)
-        {
-            return new VersionedValue(versionString(VersionedValue.STATUS_LEFT,
-                                                    makeTokenString(tokens),
-                                                    Long.toString(expireTime)), generation);
-        }
-
-        @Deprecated(since = "CEP-21")
         public VersionedValue moving(Token token)
         {
-            return new VersionedValue(VersionedValue.STATUS_MOVING + VersionedValue.DELIMITER + partitioner.getTokenFactory().toString(token),
-                                      versionSupplier.get());
+            return new VersionedValue(VersionedValue.STATUS_MOVING + VersionedValue.DELIMITER + partitioner.getTokenFactory().toString(token));
         }
 
-        @Deprecated(since = "CEP-21")
         public VersionedValue hostId(UUID hostId)
         {
-            return new VersionedValue(hostId.toString(), versionSupplier.get());
+            return new VersionedValue(hostId.toString());
         }
 
-        @Deprecated(since = "CEP-21")
         public VersionedValue tokens(Collection<Token> tokens)
         {
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
@@ -271,40 +217,37 @@ public class VersionedValue implements Comparable<VersionedValue>
             {
                 throw new RuntimeException(e);
             }
-            return new VersionedValue(new String(bos.toByteArray(), ISO_8859_1), versionSupplier.get());
+            return new VersionedValue(new String(bos.toByteArray(), ISO_8859_1));
         }
 
-        @Deprecated(since = "CEP-21")
         public VersionedValue removingNonlocal(UUID hostId)
         {
-            return new VersionedValue(versionString(VersionedValue.REMOVING_TOKEN, hostId.toString()), versionSupplier.get());
+            return new VersionedValue(versionString(VersionedValue.REMOVING_TOKEN, hostId.toString()));
         }
 
-        @Deprecated(since = "CEP-21")
         public VersionedValue removedNonlocal(UUID hostId, long expireTime)
         {
-            return new VersionedValue(versionString(VersionedValue.REMOVED_TOKEN, hostId.toString(), Long.toString(expireTime)), versionSupplier.get());
+            return new VersionedValue(versionString(VersionedValue.REMOVED_TOKEN, hostId.toString(), Long.toString(expireTime)));
         }
 
-        @Deprecated(since = "CEP-21")
         public VersionedValue removalCoordinator(UUID hostId)
         {
-            return new VersionedValue(versionString(VersionedValue.REMOVAL_COORDINATOR, hostId.toString()), versionSupplier.get());
+            return new VersionedValue(versionString(VersionedValue.REMOVAL_COORDINATOR, hostId.toString()));
         }
 
         public VersionedValue hibernate(boolean value)
         {
-            return new VersionedValue(VersionedValue.HIBERNATE + VersionedValue.DELIMITER + value, versionSupplier.get());
+            return new VersionedValue(VersionedValue.HIBERNATE + VersionedValue.DELIMITER + value);
         }
 
         public VersionedValue rpcReady(boolean value)
         {
-            return new VersionedValue(String.valueOf(value), versionSupplier.get());
+            return new VersionedValue(String.valueOf(value));
         }
 
         public VersionedValue shutdown(boolean value)
         {
-            return new VersionedValue(VersionedValue.SHUTDOWN + VersionedValue.DELIMITER + value, versionSupplier.get());
+            return new VersionedValue(VersionedValue.SHUTDOWN + VersionedValue.DELIMITER + value);
         }
 
         public VersionedValue indexStatus(String status)
@@ -314,65 +257,65 @@ public class VersionedValue implements Comparable<VersionedValue>
 
         public VersionedValue datacenter(String dcId)
         {
-            return new VersionedValue(dcId, versionSupplier.get());
+            return new VersionedValue(dcId);
         }
 
         public VersionedValue rack(String rackId)
         {
-            return new VersionedValue(rackId, versionSupplier.get());
+            return new VersionedValue(rackId);
         }
 
         public VersionedValue rpcaddress(InetAddress endpoint)
         {
-            return new VersionedValue(endpoint.getHostAddress(), versionSupplier.get());
+            return new VersionedValue(endpoint.getHostAddress());
         }
 
         public VersionedValue nativeaddressAndPort(InetAddressAndPort address)
         {
-            return new VersionedValue(address.getHostAddressAndPort(), versionSupplier.get());
+            return new VersionedValue(address.getHostAddressAndPort());
         }
 
         public VersionedValue releaseVersion()
         {
-            return new VersionedValue(FBUtilities.getReleaseVersionString(), versionSupplier.get());
+            return new VersionedValue(FBUtilities.getReleaseVersionString());
         }
 
         @VisibleForTesting
         public VersionedValue releaseVersion(String version)
         {
-            return new VersionedValue(version, versionSupplier.get());
+            return new VersionedValue(version);
         }
 
         @VisibleForTesting
         public VersionedValue networkVersion(int version)
         {
-            return new VersionedValue(String.valueOf(version), versionSupplier.get());
+            return new VersionedValue(String.valueOf(version));
         }
 
         public VersionedValue networkVersion()
         {
-            return new VersionedValue(String.valueOf(MessagingService.current_version), versionSupplier.get());
+            return new VersionedValue(String.valueOf(MessagingService.current_version));
         }
 
         public VersionedValue internalIP(InetAddress private_ip)
         {
-            return new VersionedValue(private_ip.getHostAddress(), versionSupplier.get());
+            return new VersionedValue(private_ip.getHostAddress());
         }
 
         public VersionedValue internalAddressAndPort(InetAddressAndPort private_ip_and_port)
         {
-            return new VersionedValue(private_ip_and_port.getHostAddressAndPort(), versionSupplier.get());
+            return new VersionedValue(private_ip_and_port.getHostAddressAndPort());
         }
 
         public VersionedValue severity(double value)
         {
-            return new VersionedValue(String.valueOf(value), versionSupplier.get());
+            return new VersionedValue(String.valueOf(value));
         }
 
-        public VersionedValue sstableVersions(Set<Version> versions)
+        public VersionedValue sstableVersions(Set<VersionAndType> versions)
         {
             return new VersionedValue(versions.stream()
-                                              .map(Version::toFormatAndVersionString)
+                                              .map(VersionAndType::toString)
                                               .collect(Collectors.joining(",")));
         }
     }

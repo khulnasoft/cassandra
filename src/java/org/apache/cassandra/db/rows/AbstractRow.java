@@ -45,7 +45,7 @@ public abstract class AbstractRow implements Row
     }
 
     @Override
-    public boolean hasLiveData(long nowInSec, boolean enforceStrictLiveness)
+    public boolean hasLiveData(int nowInSec, boolean enforceStrictLiveness)
     {
         if (primaryKeyLivenessInfo().isLive(nowInSec))
             return true;

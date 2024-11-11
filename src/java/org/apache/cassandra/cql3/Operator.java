@@ -21,31 +21,12 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 import java.util.List;
-import java.util.Objects;
-import java.util.function.Function;
-import java.util.stream.Collectors;
+import java.util.Map;
+import java.util.Set;
 
-import com.google.common.collect.RangeSet;
-
-import org.apache.cassandra.cql3.restrictions.ClusteringElements;
-import org.apache.cassandra.cql3.terms.Terms;
-import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.marshal.CollectionType;
-import org.apache.cassandra.db.marshal.ListType;
-import org.apache.cassandra.db.marshal.MapType;
-import org.apache.cassandra.db.marshal.MultiElementType;
-import org.apache.cassandra.db.marshal.SetType;
-import org.apache.cassandra.db.rows.CellPath;
-import org.apache.cassandra.db.rows.ComplexColumnData;
-import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.serializers.ListSerializer;
+import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.utils.ByteBufferUtil;
-
-import static org.apache.cassandra.cql3.statements.RequestValidations.checkFalse;
-import static org.apache.cassandra.cql3.statements.RequestValidations.checkTrue;
-import static org.apache.cassandra.cql3.statements.RequestValidations.invalidRequest;
 
 public enum Operator
 {
@@ -60,53 +41,7 @@ public enum Operator
         @Override
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            // Legacy behavior of LWT conditions
-            if (leftOperand == null || rightOperand == null)
-                return leftOperand == rightOperand;
-
             return type.compareForCQL(leftOperand, rightOperand) == 0;
-        }
-
-        @Override
-        public boolean isSatisfiedBy(MultiElementType<?> type, ComplexColumnData leftOperand, ByteBuffer rightOperand)
-        {
-            // Legacy behavior of LWT conditions
-            if (rightOperand == null)
-                return leftOperand == null;
-
-            List<ByteBuffer> elements = type.unpack(rightOperand);
-
-            if (elements.isEmpty())
-                return leftOperand == null;
-
-            return leftOperand != null && type.compareCQL(leftOperand, elements) == 0;
-        }
-
-        @Override
-        public boolean requiresFilteringOrIndexingFor(ColumnMetadata.Kind columnKind)
-        {
-            return !columnKind.isPrimaryKeyKind();
-        }
-
-        @Override
-        public void restrict(RangeSet<ClusteringElements> rangeSet, List<ClusteringElements> args)
-        {
-            assert args.size() == 1 : this + " accept only one single value";
-            ClusteringElements arg = args.get(0);
-            rangeSet.removeAll(ClusteringElements.lessThan(arg));
-            rangeSet.removeAll(ClusteringElements.greaterThan(arg));
-        }
-
-        @Override
-        public Operator negate()
-        {
-            return NEQ;
-        }
-
-        @Override
-        public boolean isSupportedByRestrictionsOn(ColumnsExpression expression)
-        {
-            return true;
         }
     },
     LT(4)
@@ -120,47 +55,7 @@ public enum Operator
         @Override
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            checkTrue(rightOperand != null, "Invalid comparison with null for operator \"%s\"", this);
-            return leftOperand != null && type.compareForCQL(leftOperand, rightOperand) < 0;
-        }
-
-        @Override
-        public boolean isSatisfiedBy(MultiElementType<?> type, ComplexColumnData leftOperand, ByteBuffer rightOperand)
-        {
-            List<ByteBuffer> elements = unpackMultiCellElements(type, rightOperand);
-            return leftOperand != null && type.compareCQL(leftOperand, elements) < 0;
-        }
-
-        @Override
-        public boolean requiresFilteringOrIndexingFor(ColumnMetadata.Kind columnKind)
-        {
-            return columnKind != ColumnMetadata.Kind.CLUSTERING;
-        }
-
-        @Override
-        public void restrict(RangeSet<ClusteringElements> rangeSet, List<ClusteringElements> args)
-        {
-            assert args.size() == 1 : this + " accept only one single value";
-            rangeSet.removeAll(ClusteringElements.atLeast(args.get(0)));
-        }
-
-        @Override
-        public Operator negate()
-        {
-            return GTE;
-        }
-
-        @Override
-        public boolean isSlice()
-        {
-            return true;
-        }
-
-        @Override
-        public boolean isSupportedByRestrictionsOn(ColumnsExpression expression)
-        {
-            // this method is used only in restrictions, not in conditions where different rules apply for now
-            return expression.kind() != ColumnsExpression.Kind.ELEMENT;
+            return type.compareForCQL(leftOperand, rightOperand) < 0;
         }
     },
     LTE(3)
@@ -174,48 +69,8 @@ public enum Operator
         @Override
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            checkTrue(rightOperand != null, "Invalid comparison with null for operator \"%s\"", this);
-            return leftOperand != null && type.compareForCQL(leftOperand, rightOperand) <= 0;
+            return type.compareForCQL(leftOperand, rightOperand) <= 0;
         }
-
-        @Override
-        public boolean isSatisfiedBy(MultiElementType<?> type, ComplexColumnData leftOperand, ByteBuffer rightOperand)
-        {
-            List<ByteBuffer> elements = unpackMultiCellElements(type, rightOperand);
-            return leftOperand != null && type.compareCQL(leftOperand, elements) <= 0;
-        }
-
-        @Override
-        public boolean requiresFilteringOrIndexingFor(ColumnMetadata.Kind columnKind)
-        {
-            return columnKind != ColumnMetadata.Kind.CLUSTERING;
-        }
-
-        @Override
-        public void restrict(RangeSet<ClusteringElements> rangeSet, List<ClusteringElements> args)
-        {
-            assert args.size() == 1 : this + " accept only one single value";
-            rangeSet.removeAll(ClusteringElements.greaterThan(args.get(0)));
-        }
-
-        @Override
-        public Operator negate()
-        {
-            return GT;
-        }
-
-        @Override
-        public boolean isSlice()
-        {
-            return true;
-        }
-
-        @Override
-        public boolean isSupportedByRestrictionsOn(ColumnsExpression expression)
-        {
-            return expression.kind() != ColumnsExpression.Kind.ELEMENT;
-        }
-
     },
     GTE(1)
     {
@@ -228,46 +83,7 @@ public enum Operator
         @Override
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            checkTrue(rightOperand != null, "Invalid comparison with null for operator \"%s\"", this);
-            return leftOperand != null && type.compareForCQL(leftOperand, rightOperand) >= 0;
-        }
-
-        @Override
-        public boolean isSatisfiedBy(MultiElementType<?> type, ComplexColumnData leftOperand, ByteBuffer rightOperand)
-        {
-            List<ByteBuffer> elements = unpackMultiCellElements(type, rightOperand);
-            return leftOperand != null && type.compareCQL(leftOperand, elements) >= 0;
-        }
-
-        @Override
-        public boolean requiresFilteringOrIndexingFor(ColumnMetadata.Kind columnKind)
-        {
-            return columnKind != ColumnMetadata.Kind.CLUSTERING;
-        }
-
-        @Override
-        public void restrict(RangeSet<ClusteringElements> rangeSet, List<ClusteringElements> args)
-        {
-            assert args.size() == 1 : this + " accept only one single value";
-            rangeSet.removeAll(ClusteringElements.lessThan(args.get(0)));
-        }
-
-        @Override
-        public Operator negate()
-        {
-            return LT;
-        }
-
-        @Override
-        public boolean isSlice()
-        {
-            return true;
-        }
-
-        @Override
-        public boolean isSupportedByRestrictionsOn(ColumnsExpression expression)
-        {
-            return expression.kind() != ColumnsExpression.Kind.ELEMENT;
+            return type.compareForCQL(leftOperand, rightOperand) >= 0;
         }
     },
     GT(2)
@@ -281,139 +97,51 @@ public enum Operator
         @Override
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            checkTrue(rightOperand != null, "Invalid comparison with null for operator \"%s\"", this);
-            return leftOperand != null && type.compareForCQL(leftOperand, rightOperand) > 0;
-        }
-
-        @Override
-        public boolean isSatisfiedBy(MultiElementType<?> type, ComplexColumnData leftOperand, ByteBuffer rightOperand)
-        {
-            List<ByteBuffer> elements = unpackMultiCellElements(type, rightOperand);
-            return leftOperand != null && type.compareCQL(leftOperand, elements) > 0;
-        }
-
-        @Override
-        public boolean requiresFilteringOrIndexingFor(ColumnMetadata.Kind columnKind)
-        {
-            return columnKind != ColumnMetadata.Kind.CLUSTERING;
-        }
-
-        @Override
-        public void restrict(RangeSet<ClusteringElements> rangeSet, List<ClusteringElements> args)
-        {
-            assert args.size() == 1 : this + " accept only one single value";
-            rangeSet.removeAll(ClusteringElements.atMost(args.get(0)));
-        }
-
-        @Override
-        public Operator negate()
-        {
-            return LTE;
-        }
-
-        @Override
-        public boolean isSlice()
-        {
-            return true;
-        }
-
-        @Override
-        public boolean isSupportedByRestrictionsOn(ColumnsExpression expression)
-        {
-            return expression.kind() != ColumnsExpression.Kind.ELEMENT;
+            return type.compareForCQL(leftOperand, rightOperand) > 0;
         }
     },
     IN(7)
     {
         @Override
-        public Kind kind()
+        public String toString()
         {
-            return Kind.MULTI_VALUE;
+            return "IN";
         }
 
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            checkTrue(rightOperand != null, "Invalid comparison with null for operator \"%s\"", this);
-            ListSerializer<?> serializer = ListType.getInstance(type, false).getSerializer();
-
-            if (leftOperand == null)
-                return serializer.anyMatch(rightOperand, Objects::isNull);
-
-            return serializer.anyMatch(rightOperand, r -> r != null && type.compareForCQL(leftOperand, r) == 0);
-        }
-
-        @Override
-        public boolean isSatisfiedBy(MultiElementType<?> type, ComplexColumnData leftOperand, ByteBuffer rightOperand)
-        {
-            checkTrue(rightOperand != null, "Invalid comparison with null for operator \"%s\"", this);
-            ListSerializer<?> serializer = ListType.getInstance(type, false).getSerializer();
-
-            if (leftOperand == null)
-                return serializer.anyMatch(rightOperand, Objects::isNull);
-
-            return serializer.anyMatch(rightOperand, r -> r != null && type.compareCQL(leftOperand, type.unpack(r)) == 0);
-        }
-
-        @Override
-        public boolean requiresFilteringOrIndexingFor(ColumnMetadata.Kind columnKind)
-        {
-            return !columnKind.isPrimaryKeyKind();
-        }
-
-        @Override
-        public boolean isSupportedByRestrictionsOn(ColumnsExpression expression)
-        {
-            return expression.kind() == ColumnsExpression.Kind.SINGLE_COLUMN || expression.kind() == ColumnsExpression.Kind.MULTI_COLUMN;
+            List<?> inValues = ListType.getInstance(type, false).getSerializer().deserialize(rightOperand);
+            return inValues.contains(type.getSerializer().deserialize(leftOperand));
         }
     },
     CONTAINS(5)
     {
         @Override
+        public String toString()
+        {
+            return "CONTAINS";
+        }
+
+        @Override
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            checkTrue(rightOperand != null, "Invalid comparison with null for operator \"%s\"", this);
-
-            if (leftOperand == null)
-                return false;
-
             switch(((CollectionType<?>) type).kind)
             {
-                case LIST:
+                case LIST :
                     ListType<?> listType = (ListType<?>) type;
-                    return listType.compose(leftOperand).contains(listType.getElementsType().compose(rightOperand));
+                    List<?> list = listType.getSerializer().deserialize(leftOperand);
+                    return list.contains(listType.getElementsType().getSerializer().deserialize(rightOperand));
                 case SET:
                     SetType<?> setType = (SetType<?>) type;
-                    return setType.compose(leftOperand).contains(setType.getElementsType().compose(rightOperand));
+                    Set<?> set = setType.getSerializer().deserialize(leftOperand);
+                    return set.contains(setType.getElementsType().getSerializer().deserialize(rightOperand));
                 case MAP:
                     MapType<?, ?> mapType = (MapType<?, ?>) type;
-                    return mapType.compose(leftOperand).containsValue(mapType.getValuesType().compose(rightOperand));
+                    Map<?, ?> map = mapType.getSerializer().deserialize(leftOperand);
+                    return map.containsValue(mapType.getValuesType().getSerializer().deserialize(rightOperand));
+                default:
+                    throw new AssertionError();
             }
-            throw new AssertionError();
-        }
-
-        @Override
-        public boolean isSatisfiedBy(MultiElementType<?> type, ComplexColumnData leftOperand, ByteBuffer rightOperand)
-        {
-            checkTrue(rightOperand != null, "Invalid comparison with null for operator \"%s\"", this);
-            return leftOperand != null && ((CollectionType<?>) type).contains(leftOperand, rightOperand);
-        }
-
-        @Override
-        public boolean appliesToColumnValues()
-        {
-            return false;
-        }
-
-        @Override
-        public boolean appliesToCollectionElements()
-        {
-            return true;
-        }
-
-        @Override
-        public Operator negate()
-        {
-            return NOT_CONTAINS;
         }
     },
     CONTAINS_KEY(6)
@@ -427,36 +155,12 @@ public enum Operator
         @Override
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            checkTrue(rightOperand != null, "Invalid comparison with null for operator \"%s\"", this);
             MapType<?, ?> mapType = (MapType<?, ?>) type;
-            return leftOperand != null && mapType.compose(leftOperand).containsKey(mapType.getKeysType().compose(rightOperand));
-        }
-
-        @Override
-        public boolean isSatisfiedBy(MultiElementType<?> type, ComplexColumnData leftOperand, ByteBuffer rightOperand)
-        {
-            checkTrue(rightOperand != null, "Invalid comparison with null for operator \"%s\"", this);
-            return leftOperand != null && leftOperand.getCell(CellPath.create(rightOperand)) != null;
-        }
-
-        @Override
-        public boolean appliesToColumnValues()
-        {
-            return false;
-        }
-
-        @Override
-        public boolean appliesToMapKeys()
-        {
-            return true;
-        }
-
-        @Override
-        public Operator negate()
-        {
-            return NOT_CONTAINS_KEY;
+            Map<?, ?> map = mapType.getSerializer().deserialize(leftOperand);
+            return map.containsKey(mapType.getKeysType().getSerializer().deserialize(rightOperand));
         }
     },
+
     NEQ(8)
     {
         @Override
@@ -468,65 +172,8 @@ public enum Operator
         @Override
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            // Legacy behavior of LWT conditions
-            if (leftOperand == null || rightOperand == null)
-            {
-                return leftOperand != rightOperand;
-            }
-
             return type.compareForCQL(leftOperand, rightOperand) != 0;
-        }
 
-        @Override
-        public boolean isSatisfiedBy(MultiElementType<?> type, ComplexColumnData leftOperand, ByteBuffer rightOperand)
-        {
-            // Legacy behavior of LWT conditions
-            if (rightOperand == null)
-                return leftOperand != null;
-
-            List<ByteBuffer> elements = type.unpack(rightOperand);
-
-            if (elements.isEmpty())
-                return leftOperand != null;
-
-            return leftOperand == null || type.compareCQL(leftOperand, elements) != 0;
-        }
-
-        @Override
-        public void restrict(RangeSet<ClusteringElements> rangeSet, List<ClusteringElements> args)
-        {
-            assert args.size() == 1;
-            rangeSet.remove(ClusteringElements.notEqualTo(args.get(0)));
-        }
-
-        @Override
-        public boolean requiresFilteringOrIndexingFor(ColumnMetadata.Kind columnKind)
-        {
-            return columnKind != ColumnMetadata.Kind.CLUSTERING;
-        }
-
-        @Override
-        public Operator negate()
-        {
-            return EQ;
-        }
-
-        @Override
-        public boolean isSupportedByRestrictionsOn(ColumnsExpression expression)
-        {
-            return true;
-        }
-
-        @Override
-        protected boolean isSupportedByReadPath()
-        {
-            return false;
-        }
-
-        @Override
-        public boolean isSlice()
-        {
-            return true;
         }
     },
     IS_NOT(9)
@@ -542,12 +189,6 @@ public enum Operator
         {
             throw new UnsupportedOperationException();
         }
-
-        @Override
-        protected boolean isSupportedByReadPath()
-        {
-            return false;
-        }
     },
     LIKE_PREFIX(10)
     {
@@ -560,8 +201,7 @@ public enum Operator
         @Override
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            checkTrue(rightOperand != null, "Invalid comparison with null for operator \"%s\"", LIKE);
-            return leftOperand != null && ByteBufferUtil.startsWith(leftOperand, rightOperand);
+            return ByteBufferUtil.startsWith(leftOperand, rightOperand);
         }
     },
     LIKE_SUFFIX(11)
@@ -575,8 +215,7 @@ public enum Operator
         @Override
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            checkTrue(rightOperand != null, "Invalid comparison with null for operator \"%s\"", LIKE);
-            return leftOperand != null && ByteBufferUtil.endsWith(leftOperand, rightOperand);
+            return ByteBufferUtil.endsWith(leftOperand, rightOperand);
         }
     },
     LIKE_CONTAINS(12)
@@ -590,8 +229,7 @@ public enum Operator
         @Override
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            checkTrue(rightOperand != null, "Invalid comparison with null for operator \"%s\"", LIKE);
-            return leftOperand != null && ByteBufferUtil.contains(leftOperand, rightOperand);
+            return ByteBufferUtil.contains(leftOperand, rightOperand);
         }
     },
     LIKE_MATCHES(13)
@@ -604,36 +242,33 @@ public enum Operator
 
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            return leftOperand != null && ByteBufferUtil.contains(leftOperand, rightOperand);
+            return ByteBufferUtil.contains(leftOperand, rightOperand);
         }
     },
     LIKE(14)
     {
         @Override
-        public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
+        public String toString()
         {
-            throw new UnsupportedOperationException();
+            return "LIKE";
         }
 
         @Override
-        public boolean requiresIndexing()
+        public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            return true;
+            throw new UnsupportedOperationException();
         }
     },
     ANN(15)
     {
         @Override
-        public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
+        public String toString()
         {
-            // The ANN operator is only supported by the vector index so, normally, should never be called directly.
-            // In networked queries (non-local) the coordinator will end up calling the row filter directly. So, this
-            // needs to return true so that the returned values are allowed through to the VectorTopKProcessor
-            throw new UnsupportedOperationException();
+            return "ANN";
         }
 
         @Override
-        public boolean requiresIndexing()
+        public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
             return true;
         }
@@ -641,57 +276,14 @@ public enum Operator
     NOT_IN(16)
     {
         @Override
-        public Kind kind()
-        {
-            return Kind.MULTI_VALUE;
-        }
-
-        @Override
         public String toString()
         {
             return "NOT IN";
         }
-        @Override
+
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
             return !IN.isSatisfiedBy(type, leftOperand, rightOperand);
-        }
-
-        @Override
-        public boolean isSatisfiedBy(MultiElementType<?> type, ComplexColumnData leftOperand, ByteBuffer rightOperand)
-        {
-            return !IN.isSatisfiedBy(type, leftOperand, rightOperand);
-        }
-
-        @Override
-        public boolean requiresFilteringOrIndexingFor(ColumnMetadata.Kind columnKind)
-        {
-            return columnKind != ColumnMetadata.Kind.CLUSTERING;
-        }
-
-        @Override
-        public void restrict(RangeSet<ClusteringElements> rangeSet, List<ClusteringElements> args)
-        {
-            for (ClusteringElements clustering : args)
-                rangeSet.remove(ClusteringElements.notEqualTo(clustering));
-        }
-
-        @Override
-        public Operator negate()
-        {
-            return IN;
-        }
-
-        @Override
-        public boolean isSlice()
-        {
-            return true;
-        }
-
-        @Override
-        public boolean isSupportedByRestrictionsOn(ColumnsExpression expression)
-        {
-            return expression.kind() == ColumnsExpression.Kind.SINGLE_COLUMN || expression.kind() == ColumnsExpression.Kind.MULTI_COLUMN;
         }
     },
     NOT_CONTAINS(17)
@@ -708,29 +300,6 @@ public enum Operator
             return !CONTAINS.isSatisfiedBy(type, leftOperand, rightOperand);
         }
 
-        @Override
-        public boolean isSatisfiedBy(MultiElementType<?> type, ComplexColumnData leftOperand, ByteBuffer rightOperand)
-        {
-            return !CONTAINS.isSatisfiedBy(type, leftOperand, rightOperand);
-        }
-
-        @Override
-        public boolean appliesToColumnValues()
-        {
-            return false;
-        }
-
-        @Override
-        public boolean appliesToCollectionElements()
-        {
-            return true;
-        }
-
-        @Override
-        public Operator negate()
-        {
-            return CONTAINS;
-        }
     },
     NOT_CONTAINS_KEY(18)
     {
@@ -745,87 +314,147 @@ public enum Operator
         {
             return !CONTAINS_KEY.isSatisfiedBy(type, leftOperand, rightOperand);
         }
-
-        @Override
-        public boolean isSatisfiedBy(MultiElementType<?> type, ComplexColumnData leftOperand, ByteBuffer rightOperand)
-        {
-            return !CONTAINS_KEY.isSatisfiedBy(type, leftOperand, rightOperand);
-        }
-
-        @Override
-        public boolean appliesToColumnValues()
-        {
-            return false;
-        }
-
-        @Override
-        public boolean appliesToMapKeys()
-        {
-            return true;
-        }
-
-        @Override
-        public Operator negate()
-        {
-            return CONTAINS_KEY;
-        }
     },
-    BETWEEN(19)
+    NOT_LIKE_PREFIX(19)
     {
-        @Override
-        public Kind kind()
-        {
-            return Kind.TERNARY;
-        }
-
         @Override
         public String toString()
         {
-            return "BETWEEN";
+            return "NOT LIKE '<term>%'";
         }
 
         @Override
         public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            List<ByteBuffer> buffers = ListType.getInstance(type, false).unpack(rightOperand);
-            // We use compare instead of compareForCQL to deal properly with reversed clustering columns
-            return type.compare(leftOperand, buffers.get(0)) >= 0 && type.compare(leftOperand, buffers.get(1)) <= 0;
+            return !LIKE_PREFIX.isSatisfiedBy(type, leftOperand, rightOperand);
+        }
+    },
+    NOT_LIKE_SUFFIX(20)
+    {
+        @Override
+        public String toString()
+        {
+            return "NOT LIKE '%<term>'";
         }
 
         @Override
-        public boolean requiresFilteringOrIndexingFor(ColumnMetadata.Kind columnKind)
+        public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            return columnKind != ColumnMetadata.Kind.CLUSTERING;
+            return !LIKE_SUFFIX.isSatisfiedBy(type, leftOperand, rightOperand);
+        }
+    },
+    NOT_LIKE_CONTAINS(21)
+    {
+        @Override
+        public String toString()
+        {
+            return "NOT LIKE '%<term>%'";
         }
 
         @Override
-        public void restrict(RangeSet<ClusteringElements> rangeSet, List<ClusteringElements> args)
+        public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            assert args.size() == 2 : this + " accepts exactly two values";
-            args.sort(ClusteringElements.CQL_COMPARATOR);
-            rangeSet.removeAll(ClusteringElements.lessThan(args.get(0)));
-            rangeSet.removeAll(ClusteringElements.greaterThan(args.get(1)));
+            return !LIKE_CONTAINS.isSatisfiedBy(type, leftOperand, rightOperand);
+        }
+    },
+    NOT_LIKE_MATCHES(22)
+    {
+        @Override
+        public String toString()
+        {
+            return "NOT LIKE '<term>'";
+        }
+
+        public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
+        {
+            return !LIKE_MATCHES.isSatisfiedBy(type, leftOperand, rightOperand);
+        }
+    },
+    NOT_LIKE(23)
+    {
+        @Override
+        public String toString()
+        {
+            return "NOT LIKE";
         }
 
         @Override
-        public boolean isSlice()
+        public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
         {
-            return true;
+            return !LIKE.isSatisfiedBy(type, leftOperand, rightOperand);
         }
-
-        @Override
-        public boolean isSupportedByRestrictionsOn(ColumnsExpression expression)
-        {
-            return expression.kind() != ColumnsExpression.Kind.ELEMENT;
-        }
-    };
+    },
 
     /**
-     * The different kinds of operators
+     * An operator that only performs matching against analyzed columns.
      */
-    public enum Kind
+    ANALYZER_MATCHES(100)
     {
-        BINARY, TERNARY, MULTI_VALUE;
+        @Override
+        public String toString()
+        {
+            return ":";
+        }
+
+        /**
+         * This method is not supported for this operator. The operator itself does not have the context to know
+         * the correct result because an analyzed column can be analyzed in different ways. Therefore, this operator
+         * relies on the index implementation to perform to determine satisfaction.
+         */
+        public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
+        {
+            throw new UnsupportedOperationException(": operation can only be computed by an indexed column with a configured analyzer");
+        }
+    },
+    /**
+     * An operator that performs a distance bounded approximate nearest neighbor search against a vector column such
+     * that all result vectors are within a given distance of the query vector. The notable difference between this
+     * operator and {@link #ANN} is that it does not introduce an arbitrary limit on the number of results returned,
+     * and as a consequence, it can be logically combined with other predicates and even unioned with other
+     * {@link #BOUNDED_ANN} predicates.
+     */
+    BOUNDED_ANN(101)
+    {
+        @Override
+        public String toString()
+        {
+            return "BOUNDED_ANN";
+        }
+
+        @Override
+        public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
+        {
+            throw new UnsupportedOperationException();
+        }
+    },
+    // VSTODO find a way to break this out, but for now, we're doing this to get the poc running
+    ORDER_BY_ASC(102)
+    {
+        @Override
+        public String toString()
+        {
+            return "ASC";
+        }
+
+        @Override
+        public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
+        {
+            throw new UnsupportedOperationException();
+        }
+    },
+    ORDER_BY_DESC(103)
+    {
+        @Override
+        public String toString()
+        {
+            return "DESC";
+        }
+
+        @Override
+        public boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand)
+        {
+            throw new UnsupportedOperationException();
+        }
     };
 
     /**
@@ -834,10 +463,10 @@ public enum Operator
     private final int b;
 
     /**
-     * Creates a new {@code Operator} with the specified binary representation.
-     * @param b the binary representation of this {@code Enum} value
+     * Creates a new <code>Operator</code> with the specified binary representation.
+     * @param b the binary representation of this <code>Enum</code> value
      */
-    Operator(int b)
+    private Operator(int b)
     {
         this.b = b;
     }
@@ -850,30 +479,12 @@ public enum Operator
      */
     public void writeTo(DataOutput output) throws IOException
     {
-        output.writeInt(getValue());
+        output.writeInt(b);
     }
 
     public int getValue()
     {
         return b;
-    }
-
-    /**
-     * Returns the kind of this operator.
-     * @return the kind of this operator
-     */
-    public Kind kind()
-    {
-        return Kind.BINARY;
-    }
-
-    /**
-     * Checks if this operator is a ternary operator.
-     * @return {@code true} if this operator is a ternary operator, {@code false} otherwise.
-     */
-    public boolean isTernary()
-    {
-        return kind() == Kind.TERNARY;
     }
 
     /**
@@ -893,171 +504,32 @@ public enum Operator
           throw new IOException(String.format("Cannot resolve Relation.Type from binary representation: %s", b));
     }
 
-
     /**
      * Whether 2 values satisfy this operator (given the type they should be compared with).
      */
     public abstract boolean isSatisfiedBy(AbstractType<?> type, ByteBuffer leftOperand, ByteBuffer rightOperand);
 
-
-    public boolean isSatisfiedBy(MultiElementType<?> type, ComplexColumnData leftOperand, ByteBuffer rightOperand)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    /**
-     * Unpack multi-cell elements checking for null value and empty collections
-     *
-     * @param type the {@code MultiElementType}
-     * @param value the value to unpack
-     * @return the multi-cell elements
-     * @throws org.apache.cassandra.exceptions.InvalidRequestException if the value is null or an empty collection
-     */
-    List<ByteBuffer> unpackMultiCellElements(MultiElementType<?> type, ByteBuffer value)
-    {
-        checkTrue(value != null, "Invalid comparison with null for operator \"%s\"", this);
-        List<ByteBuffer> elements = type.unpack(value);
-        if (type.isCollection() && elements.isEmpty())
-            throw  invalidRequest("Invalid comparison with an empty %s for operator \"%s\"", ((CollectionType<?>) type).kind, this);
-        return elements;
-    }
-
-    public static int serializedSize()
+    public int serializedSize()
     {
         return 4;
     }
 
-    public void validateFor(ColumnsExpression expression)
-    {
-        // this method is used only in restrictions, not in conditions where different rules apply for now
-        if (!isSupportedByRestrictionsOn(expression))
-            throw invalidRequest("%s cannot be used with %s relations", this, expression);
-
-        switch (expression.kind())
-        {
-            case SINGLE_COLUMN:
-                ColumnMetadata firstColumn = expression.firstColumn();
-                AbstractType<?> columnType = firstColumn.type;
-                if (isSlice() && this != Operator.NEQ)
-                {
-                    if (columnType.referencesDuration())
-                    {
-                        checkFalse(columnType.isCollection(), "Slice restrictions are not supported on collections containing durations");
-                        checkFalse(columnType.isTuple(), "Slice restrictions are not supported on tuples containing durations");
-                        checkFalse(columnType.isUDT(), "Slice restrictions are not supported on UDTs containing durations");
-                        throw invalidRequest("Slice restrictions are not supported on duration columns");
-                    }
-                }
-                else
-                {
-                    checkFalse(appliesToMapKeys() && !(columnType instanceof MapType), "Cannot use %s on non-map column %s", this, firstColumn.name);
-                    checkFalse(appliesToCollectionElements() && !columnType.isCollection(), "Cannot use %s on non-collection column %s", this, firstColumn.name);
-                }
-
-            // intentional fallthrough - missing break statement
-            case ELEMENT:
-                ColumnMetadata column = expression.firstColumn();
-                AbstractType<?> type = column.type;
-                if (type.isMultiCell())
-                {
-                    // Non-frozen UDTs don't support any operator
-                    checkFalse(type.isUDT(),
-                               "Non-frozen UDT column '%s' (%s) cannot be restricted by any relation",
-                               column.name,
-                               type.asCQL3Type());
-
-                    // We don't support relations against entire collections (unless they're frozen), like "numbers = {1, 2, 3}"
-                    checkFalse(type.isCollection()
-                               && !this.appliesToMapKeys()
-                               && !this.appliesToCollectionElements()
-                               && !expression.isCollectionElementExpression(),
-                               "Collection column '%s' (%s) cannot be restricted by a '%s' relation",
-                               column.name,
-                               type.asCQL3Type(),
-                               this);
-                }
-            break;
-        }
-    }
-
     /**
-     * Checks if the specified expression kind can be used with this operator in relation.
-     * @param expression the column expression
-     * @return {@code true} if the specified expression kind can be used with this operator in a relation, {@code false} otherwise.
+     * Checks if this operator is a like operator.
+     * @return {@code true} if this operator is a like operator, {@code false} otherwise.
      */
-    public boolean isSupportedByRestrictionsOn(ColumnsExpression expression)
+    public boolean isLike()
     {
-        // All operators support single columns
-        return expression.kind() == ColumnsExpression.Kind.SINGLE_COLUMN;
+        return this == LIKE_PREFIX || this == LIKE_CONTAINS || this == LIKE_SUFFIX || this == LIKE_MATCHES;
     }
 
     /**
-     * Checks if this operator applies to non-multicell column values.
-     * @return {@code true} if this operator applies to column values, {@code false} otherwise.
-     */
-    public boolean appliesToColumnValues()
-    {
-        return true;
-    }
-
-    /**
-     * Checks if this operator applies to collection elements (from frozen and non-frozen collections).
-     * @return {@code true} if this operator applies to collection elements, {@code false} otherwise.
-     */
-    public boolean appliesToCollectionElements()
-    {
-        return false;
-    }
-
-    /**
-     * Checks if this operator applies to map keys.
-     * @return {@code true} if this operator applies to map keys, {@code false} otherwise.
-     */
-    public boolean appliesToMapKeys()
-    {
-        return false;
-    }
-
-    /**
-     * Restricts the specified range set based on the operator arguments (optional operation).
-     * @param rangeSet the range set to restrict
-     * @param args the operator arguments
-     */
-    public void restrict(RangeSet<ClusteringElements> rangeSet, List<ClusteringElements> args)
-    {
-        throw new UnsupportedOperationException(this + " is not a range operator");
-    }
-
-    /**
-     * Checks if this operator <b>requires</b> either filtering or indexing for the specified columns kinds.
-     * <p>An operator requires filtering or indexing only if it cannot be executed by other means.
-     * An equal operator on a clustering column for example will return {@code false} even if filtering might be used
-     * because the previous clustering column is not restricted.</p>
-     *
-     * @param columnKind the kind of column being restricted by the operator
-     * @return {@code true} if this operator requires either filtering or indexing, {@code false} otherwise.
-     */
-    public boolean requiresFilteringOrIndexingFor(ColumnMetadata.Kind columnKind)
-    {
-        return true;
-    }
-
-    /**
-     * Checks if this operator requires a secondary index.
-     * @return {@code true} if this operator requires a secondary index, {@code false} otherwise.
-     */
-    public boolean requiresIndexing()
-    {
-        return false;
-    }
-
-    /**
-     * Checks if this operator returning a slice of the data.
+     * Checks if this operator is a slice operator.
      * @return {@code true} if this operator is a slice operator, {@code false} otherwise.
      */
     public boolean isSlice()
     {
-        return false;
+        return this == LT || this == LTE || this == GT || this == GTE;
     }
 
     @Override
@@ -1073,80 +545,5 @@ public enum Operator
     public boolean isIN()
     {
         return this == IN;
-    }
-
-    /**
-     * Reverse this operator.
-     * @return the reverse operator from this operator.
-     */
-    public Operator negate()
-    {
-        throw new UnsupportedOperationException(this + " does not support negation");
-    }
-
-    /**
-     * Some operators are not supported by the read path because we never fully implemented support for them.
-     * It is the case for {@code IS_NOT} and {@code !=}
-     * @return {@code true} for the operators supported by the read path, {@code false} otherwise.
-     */
-    protected boolean isSupportedByReadPath()
-    {
-        return true;
-    }
-
-    /**
-     * The "LIKE_" operators are not real CQL operators and are simply an internal hack that should be removed at some point.
-     * Therefore, we want to ignore them in the error messages returned to the users.
-     * @return {@code true} for the "LIKE_" operators
-     */
-    private boolean isLikeVariant()
-    {
-        return this == LIKE_CONTAINS || this == LIKE_PREFIX || this == LIKE_MATCHES || this == LIKE_SUFFIX;
-    }
-
-    /**
-     * Returns the operators that require an index or filtering for the specified column kind
-     * @param columnKind the column kind
-     * @return the operators that require an index or filtering for the specified column kind
-     */
-    public static List<Operator> operatorsRequiringFilteringOrIndexingFor(ColumnMetadata.Kind columnKind)
-    {
-        return Arrays.stream(values())
-                     .filter(o -> o.isSupportedByReadPath() && !o.isLikeVariant() && o.requiresFilteringOrIndexingFor(columnKind))
-                     .collect(Collectors.toList());
-    }
-
-    /**
-     * Builds the CQL String representing the operation between the 2 specified operands.
-     *
-     * @param leftOperand the left operand
-     * @param rightOperand the right operand
-     * @return the CQL String representing the operation between the 2 specified operands.
-     */
-    public String buildCQLString(ColumnsExpression leftOperand, Terms rightOperand)
-    {
-        return buildCQLString(leftOperand.toCQLString(), rightOperand, Terms::asList);
-    }
-
-    /**
-     * Builds the CQL String representing the operation between the 2 specified operands.
-     *
-     * @param leftOperand the left operand
-     * @param rightOperand the right operand
-     * @return the CQL String representing the operation between the 2 specified operands.
-     */
-    public String buildCQLString(ColumnsExpression.Raw leftOperand, Terms.Raw rightOperand)
-    {
-        return buildCQLString(leftOperand.toCQLString(), rightOperand, Terms.Raw::asList);
-    }
-
-    private <T> String buildCQLString(String leftOperand, T rightOperand, Function<T, List<?>> asList)
-    {
-        if (isTernary())
-        {
-            List<?> terms = asList.apply(rightOperand);
-            return String.format("%s %s %s AND %s", leftOperand, this, terms.get(0), terms.get(1));
-        }
-        return String.format("%s %s %s", leftOperand, this, rightOperand);
     }
 }

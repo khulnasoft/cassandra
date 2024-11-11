@@ -21,7 +21,7 @@ import java.nio.ByteBuffer;
 import java.net.InetSocketAddress;
 import java.util.*;
 
-import com.datastax.driver.core.*;
+import com.khulnasoft.driver.core.*;
 
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.schema.*;
@@ -34,8 +34,6 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.dht.Token.TokenFactory;
 import org.apache.cassandra.io.sstable.SSTableLoader;
 import org.apache.cassandra.schema.TableMetadata;
-
-import static org.apache.cassandra.utils.LocalizeString.toUpperCaseLocalized;
 
 public class NativeSSTableLoaderClient extends SSTableLoader.Client
 {
@@ -205,7 +203,7 @@ public class NativeSSTableLoaderClient extends SSTableLoader.Client
 
     private static ColumnMetadata createDefinitionFromRow(Row row, String keyspace, String table, Types types)
     {
-        ClusteringOrder order = ClusteringOrder.valueOf(toUpperCaseLocalized(row.getString("clustering_order")));
+        ClusteringOrder order = ClusteringOrder.valueOf(row.getString("clustering_order").toUpperCase());
         AbstractType<?> type = CQLTypeParser.parse(keyspace, row.getString("type"), types);
         if (order == ClusteringOrder.DESC)
             type = ReversedType.getInstance(type);
@@ -213,16 +211,16 @@ public class NativeSSTableLoaderClient extends SSTableLoader.Client
         ColumnIdentifier name = new ColumnIdentifier(row.getBytes("column_name_bytes"), row.getString("column_name"));
 
         int position = row.getInt("position");
-        org.apache.cassandra.schema.ColumnMetadata.Kind kind = ColumnMetadata.Kind.valueOf(toUpperCaseLocalized(row.getString("kind")));
-        return new ColumnMetadata(keyspace, table, name, type, position, kind, null);
+        org.apache.cassandra.schema.ColumnMetadata.Kind kind = ColumnMetadata.Kind.valueOf(row.getString("kind").toUpperCase());
+        return new ColumnMetadata(keyspace, table, name, type, position, kind);
     }
 
     private static DroppedColumn createDroppedColumnFromRow(Row row, String keyspace, String table)
     {
         String name = row.getString("column_name");
         AbstractType<?> type = CQLTypeParser.parse(keyspace, row.getString("type"), Types.none());
-        ColumnMetadata.Kind kind = ColumnMetadata.Kind.valueOf(toUpperCaseLocalized(row.getString("kind")));
-        ColumnMetadata column = new ColumnMetadata(keyspace, table, ColumnIdentifier.getInterned(name, true), type, ColumnMetadata.NO_POSITION, kind, null);
+        ColumnMetadata.Kind kind = ColumnMetadata.Kind.valueOf(row.getString("kind").toUpperCase());
+        ColumnMetadata column = ColumnMetadata.droppedColumn(keyspace, table, ColumnIdentifier.getInterned(name, true), type, kind);
         long droppedTime = row.getTimestamp("dropped_time").getTime();
         return new DroppedColumn(column, droppedTime);
     }

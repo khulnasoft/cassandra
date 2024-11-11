@@ -31,8 +31,8 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
-import com.datastax.driver.core.Host;
-import com.datastax.driver.core.Session;
+import com.khulnasoft.driver.core.Host;
+import com.khulnasoft.driver.core.Session;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.distributed.impl.INodeProvisionStrategy.Strategy;
@@ -125,11 +125,11 @@ public class TopologyChangeTest extends TestBaseImpl
             events.add(new Event(Remove, host));
         }
 
-        public void onRegister(com.datastax.driver.core.Cluster cluster)
+        public void onRegister(com.khulnasoft.driver.core.Cluster cluster)
         {
         }
 
-        public void onUnregister(com.datastax.driver.core.Cluster cluster)
+        public void onUnregister(com.khulnasoft.driver.core.Cluster cluster)
         {
         }
     }
@@ -150,7 +150,7 @@ public class TopologyChangeTest extends TestBaseImpl
     {
         try (Cluster control = init(Cluster.build().withNodes(3).withNodeProvisionStrategy(strategy)
                                            .withConfig(config -> config.with(GOSSIP, NETWORK, NATIVE_PROTOCOL)).start());
-             com.datastax.driver.core.Cluster cluster = com.datastax.driver.core.Cluster.builder().addContactPoint("127.0.0.1").build();
+             com.khulnasoft.driver.core.Cluster cluster = com.khulnasoft.driver.core.Cluster.builder().addContactPoint("127.0.0.1").build();
              Session session = cluster.connect())
         {
             EventStateListener eventStateListener = new EventStateListener();
@@ -172,7 +172,7 @@ public class TopologyChangeTest extends TestBaseImpl
     {
         try (Cluster control = init(Cluster.build().withNodes(3).withNodeProvisionStrategy(strategy)
                                            .withConfig(config -> config.with(GOSSIP, NETWORK, NATIVE_PROTOCOL)).start());
-             com.datastax.driver.core.Cluster cluster = com.datastax.driver.core.Cluster.builder().addContactPoint("127.0.0.1").build();
+             com.khulnasoft.driver.core.Cluster cluster = com.khulnasoft.driver.core.Cluster.builder().addContactPoint("127.0.0.1").build();
              Session session = cluster.connect())
         {
             EventStateListener eventStateListener = new EventStateListener();

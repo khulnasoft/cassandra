@@ -33,6 +33,8 @@ interface LightweightRecyclerPoolHolder<T>
  * A simple thread local object reuse facility with limited capacity and no attempt at rebalancing pooling between
  * threads. This is meant to be put in place where churn is high, but single object allocation and footprint are not
  * so high to justify a more sophisticated approach.
+ * <p>
+ * <b>Internal use only</b>
  *
  * @param <T>
  * @see ThreadLocals#createLightweightRecycler(int)
@@ -48,6 +50,7 @@ public interface LightweightRecycler<T> extends LightweightRecyclerPoolHolder<T>
     }
 
     /**
+     * @param supplier
      * @return a reusable instance, or allocate one via the provided supplier
      */
     default T reuseOrAllocate(Supplier<T> supplier)
@@ -69,7 +72,7 @@ public interface LightweightRecycler<T> extends LightweightRecyclerPoolHolder<T>
         if (pool.size() < capacity())
         {
             if (t instanceof Collection)
-                ((Collection<?>) t).clear();
+                ((Collection) t).clear();
             pool.offerFirst(t);
             return true;
         }

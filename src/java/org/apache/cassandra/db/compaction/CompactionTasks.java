@@ -28,6 +28,7 @@ import org.apache.cassandra.utils.FBUtilities;
 
 public class CompactionTasks extends AbstractCollection<AbstractCompactionTask> implements AutoCloseable
 {
+    @SuppressWarnings("resource")
     private static final CompactionTasks EMPTY = new CompactionTasks(Collections.emptyList());
 
     private final Collection<AbstractCompactionTask> tasks;

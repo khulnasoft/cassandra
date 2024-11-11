@@ -29,7 +29,6 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.Keyspace;
@@ -38,18 +37,19 @@ import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.marshal.MapType;
-import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
+import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.io.sstable.SSTableReadsListener;
+import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.SSTableReadsListener;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.SchemaTestUtil;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.tools.SSTableExpiredBlockers;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.FBUtilities;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -62,7 +62,7 @@ public class TTLExpiryTest
     public static void defineSchema() throws ConfigurationException
     {
         // Disable tombstone histogram rounding for tests
-        CassandraRelevantProperties.STREAMING_HISTOGRAM_ROUND_SECONDS.setInt(1);
+        System.setProperty("cassandra.streaminghistogram.roundseconds", "1");
 
         SchemaLoader.prepareServer();
 
@@ -97,7 +97,7 @@ public class TTLExpiryTest
                     .add("col2", ByteBufferUtil.EMPTY_BYTE_BUFFER)
                     .build()
                     .applyUnsafe();
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         new RowUpdateBuilder(cfs.metadata(), 2L, 1, key)
                     .add("col1", ByteBufferUtil.EMPTY_BYTE_BUFFER)
                     .build()
@@ -108,7 +108,7 @@ public class TTLExpiryTest
                     .build()
                     .applyUnsafe();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         new RowUpdateBuilder(cfs.metadata(), 4L, 1, key)
                     .add("col1", ByteBufferUtil.EMPTY_BYTE_BUFFER)
@@ -120,7 +120,7 @@ public class TTLExpiryTest
                     .build()
                     .applyUnsafe();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
 
         new RowUpdateBuilder(cfs.metadata(), 6L, 3, key)
@@ -133,11 +133,11 @@ public class TTLExpiryTest
                     .build()
                     .applyUnsafe();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         Set<SSTableReader> sstables = Sets.newHashSet(cfs.getLiveSSTables());
-        long now = FBUtilities.nowInSeconds();
-        long gcBefore = now + 2;
+        int now = (int)(System.currentTimeMillis() / 1000);
+        int gcBefore = now + 2;
         Set<SSTableReader> expired = CompactionController.getFullyExpiredSSTables(
                 cfs,
                 sstables,
@@ -176,7 +176,7 @@ public class TTLExpiryTest
                         .build()
                         .applyUnsafe();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         new RowUpdateBuilder(cfs.metadata(), timestamp, 1, key)
             .add("col2", ByteBufferUtil.EMPTY_BYTE_BUFFER)
@@ -186,7 +186,7 @@ public class TTLExpiryTest
             .applyUnsafe();
 
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         // To reproduce #10944, we need to avoid the optimization that get rid of full sstable because everything
         // is known to be gcAble, so keep some data non-expiring in that case.
         new RowUpdateBuilder(cfs.metadata(), timestamp, force10944Bug ? 0 : 1, key)
@@ -195,14 +195,14 @@ public class TTLExpiryTest
                     .applyUnsafe();
 
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         new RowUpdateBuilder(cfs.metadata(), timestamp, 1, key)
                             .add("col311", ByteBufferUtil.EMPTY_BYTE_BUFFER)
                             .build()
                             .applyUnsafe();
 
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         Thread.sleep(2000); // wait for ttl to expire
         assertEquals(4, cfs.getLiveSSTables().size());
         cfs.enableAutoCompaction(true);
@@ -224,42 +224,39 @@ public class TTLExpiryTest
             .build()
             .applyUnsafe();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         new RowUpdateBuilder(cfs.metadata(), timestamp, 1, key)
             .add("col2", ByteBufferUtil.EMPTY_BYTE_BUFFER)
             .build()
             .applyUnsafe();
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         new RowUpdateBuilder(cfs.metadata(), timestamp, 1, key)
             .add("col3", ByteBufferUtil.EMPTY_BYTE_BUFFER)
             .build()
             .applyUnsafe();
-        Util.flush(cfs);
-        String noTTLKey = "nottl";
-        new RowUpdateBuilder(cfs.metadata(), timestamp, noTTLKey)
-            .add("col311", ByteBufferUtil.EMPTY_BYTE_BUFFER)
-            .build()
-            .applyUnsafe();
-        // also write to other key to ensure overlap for UCS
-        new RowUpdateBuilder(cfs.metadata(), timestamp, 1, key)
-            .add("col7", ByteBufferUtil.EMPTY_BYTE_BUFFER)
+        cfs.forceBlockingFlush(UNIT_TESTS);
+        final String noTTLColumn = "col311";
+        new RowUpdateBuilder(cfs.metadata(), timestamp, key)
+            .add(noTTLColumn, ByteBufferUtil.EMPTY_BYTE_BUFFER)
             .build()
             .applyUnsafe();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         Thread.sleep(2000); // wait for ttl to expire
         assertEquals(4, cfs.getLiveSSTables().size());
         cfs.enableAutoCompaction(true);
         assertEquals(1, cfs.getLiveSSTables().size());
         SSTableReader sstable = cfs.getLiveSSTables().iterator().next();
-        UnfilteredPartitionIterator scanner = sstable.partitionIterator(ColumnFilter.all(cfs.metadata()),
-                                                                        DataRange.allData(cfs.getPartitioner()),
-                                                                        SSTableReadsListener.NOOP_LISTENER);
+        ISSTableScanner scanner = sstable.getScanner(ColumnFilter.all(cfs.metadata()),
+                                                     DataRange.allData(cfs.getPartitioner()),
+                                                     SSTableReadsListener.NOOP_LISTENER);
         assertTrue(scanner.hasNext());
         while(scanner.hasNext())
         {
             UnfilteredRowIterator iter = scanner.next();
-            assertEquals(Util.dk(noTTLKey), iter.partitionKey());
+            assertEquals(Util.dk(key), iter.partitionKey());
+            Row row = (Row) iter.next();
+            assertEquals(noTTLColumn, row.cells().iterator().next().column().toString());
         }
         scanner.close();
     }
@@ -278,7 +275,7 @@ public class TTLExpiryTest
                 .build()
                 .applyUnsafe();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         SSTableReader blockingSSTable = cfs.getSSTables(SSTableSet.LIVE).iterator().next();
         for (int i = 0; i < 10; i++)
         {
@@ -287,7 +284,7 @@ public class TTLExpiryTest
                             .delete("col1")
                             .build()
                             .applyUnsafe();
-            Util.flush(cfs);
+            cfs.forceBlockingFlush(UNIT_TESTS);
         }
         Multimap<SSTableReader, SSTableReader> blockers = SSTableExpiredBlockers.checkForExpiredSSTableBlockers(cfs.getSSTables(SSTableSet.LIVE), (int) (System.currentTimeMillis() / 1000) + 100);
         assertEquals(1, blockers.keySet().size());

@@ -26,10 +26,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
-import com.datastax.driver.core.BatchStatement;
-import com.datastax.driver.core.BoundStatement;
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.Statement;
+import com.khulnasoft.driver.core.BatchStatement;
+import com.khulnasoft.driver.core.BoundStatement;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.Statement;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.io.sstable.StressCQLSSTableWriter;
@@ -151,7 +151,7 @@ public class SchemaInsert extends SchemaStatement
     {
         return StressCQLSSTableWriter.builder()
                                .withCfs(cfs)
-                               .withBufferSizeInMiB(bufferSize)
+                               .withBufferSizeInMB(bufferSize)
                                .forTable(tableSchema)
                                .using(insertStatement)
                                .rangeAware(makeRangeAware)

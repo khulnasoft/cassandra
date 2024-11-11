@@ -72,6 +72,7 @@ K_INSERT:      I N S E R T;
 K_UPDATE:      U P D A T E;
 K_WITH:        W I T H;
 K_LIMIT:       L I M I T;
+K_OFFSET:      O F F S E T;
 K_PER:         P E R;
 K_PARTITION:   P A R T I T I O N;
 K_USING:       U S I N G;
@@ -124,7 +125,6 @@ K_FILTERING:   F I L T E R I N G;
 K_IF:          I F;
 K_IS:          I S;
 K_CONTAINS:    C O N T A I N S;
-K_BETWEEN:     B E T W E E N;
 K_GROUP:       G R O U P;
 K_CLUSTER:     C L U S T E R;
 K_INTERNALS:   I N T E R N A L S;
@@ -148,19 +148,14 @@ K_USER:        U S E R;
 K_USERS:       U S E R S;
 K_ROLE:        R O L E;
 K_ROLES:       R O L E S;
-K_SUPERUSERS:  S U P E R U S E R S;
 K_SUPERUSER:   S U P E R U S E R;
 K_NOSUPERUSER: N O S U P E R U S E R;
-K_GENERATED:   G E N E R A T E D;
 K_PASSWORD:    P A S S W O R D;
-K_HASHED:      H A S H E D;
 K_LOGIN:       L O G I N;
 K_NOLOGIN:     N O L O G I N;
 K_OPTIONS:     O P T I O N S;
 K_ACCESS:      A C C E S S;
 K_DATACENTERS: D A T A C E N T E R S;
-K_CIDRS:       C I D R S;
-K_IDENTITY:    I D E N T I T Y;
 
 K_CLUSTERING:  C L U S T E R I N G;
 K_ASCII:       A S C I I;
@@ -183,9 +178,10 @@ K_VARINT:      V A R I N T;
 K_TIMEUUID:    T I M E U U I D;
 K_TOKEN:       T O K E N;
 K_WRITETIME:   W R I T E T I M E;
-K_MAXWRITETIME:M A X W R I T E T I M E;
 K_DATE:        D A T E;
 K_TIME:        T I M E;
+K_VECTOR:      V E C T O R;
+K_GEO_DISTANCE:G E O '_' D I S T A N C E;
 
 K_NULL:        N U L L;
 K_NOT:         N O T;
@@ -223,12 +219,14 @@ K_DEFAULT:     D E F A U L T;
 K_UNSET:       U N S E T;
 K_LIKE:        L I K E;
 
-K_MASKED:      M A S K E D;
-K_UNMASK:      U N M A S K;
-K_SELECT_MASKED: S E L E C T '_' M A S K E D;
+K_EDGE:        E D G E;
+K_VERTEX:      V E R T E X;
+K_LABEL:       L A B E L;
 
-K_VECTOR:      V E C T O R;
-K_ANN:         A N N;
+K_DROPPED:     D R O P P E D;
+K_COLUMN:      C O L U M N;
+K_RECORD:      R E C O R D;
+K_ANN_OF:      A N N WS+ O F;
 
 // Case-insensitive alpha characters
 fragment A: ('a'|'A');

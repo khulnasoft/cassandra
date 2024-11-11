@@ -20,8 +20,8 @@ package org.apache.cassandra.distributed.test;
 
 import org.junit.Test;
 
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.Session;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.Session;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.distributed.api.ICluster;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
@@ -58,7 +58,7 @@ public class ReprepareOldBehaviourTest extends ReprepareTestBase
             ForceHostLoadBalancingPolicy lbp = new ForceHostLoadBalancingPolicy();
             c.schemaChange(withKeyspace("CREATE TABLE %s.tbl (pk int, ck int, v int, PRIMARY KEY (pk, ck));"));
 
-            try (com.datastax.driver.core.Cluster cluster = com.datastax.driver.core.Cluster.builder()
+            try (com.khulnasoft.driver.core.Cluster cluster = com.khulnasoft.driver.core.Cluster.builder()
                                                                                             .addContactPoint("127.0.0.1")
                                                                                             .addContactPoint("127.0.0.2")
                                                                                             .withLoadBalancingPolicy(lbp)
@@ -95,7 +95,7 @@ public class ReprepareOldBehaviourTest extends ReprepareTestBase
                 {
                     for (boolean clearBetweenExecutions : new boolean[]{ true, false })
                     {
-                        try (com.datastax.driver.core.Cluster cluster = com.datastax.driver.core.Cluster.builder()
+                        try (com.khulnasoft.driver.core.Cluster cluster = com.khulnasoft.driver.core.Cluster.builder()
                                                                                                         .addContactPoint("127.0.0.1")
                                                                                                         .addContactPoint("127.0.0.2")
                                                                                                         .withLoadBalancingPolicy(lbp)

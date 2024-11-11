@@ -16,7 +16,7 @@
 
 import os
 
-from cqlshlib import cqlhandling, cql3handling
+from cqlshlib import cqlhandling
 
 # we want the cql parser to understand our cqlsh-specific commands too
 my_commands_ending_with_newline = (
@@ -33,13 +33,11 @@ my_commands_ending_with_newline = (
     'debug',
     'tracing',
     'expand',
-    'elapsed',
     'paging',
     'exit',
     'quit',
     'clear',
-    'cls',
-    'history'
+    'cls'
 )
 
 cqlsh_syntax_completers = []
@@ -72,11 +70,9 @@ cqlsh_special_cmd_command_syntax_rules = r'''
                    | <helpCommand>
                    | <tracingCommand>
                    | <expandCommand>
-                   | <elapsedCommand>
                    | <exitCommand>
                    | <pagingCommand>
                    | <clearCommand>
-                   | <historyCommand>
                    ;
 '''
 
@@ -135,7 +131,7 @@ cqlsh_serial_consistency_level_syntax_rules = r'''
 '''
 
 cqlsh_show_cmd_syntax_rules = r'''
-<showCommand> ::= "SHOW" what=( "VERSION" | "HOST" | "SESSION" sessionid=<uuid> | "REPLICAS" token=<integer> (keyspace=<keyspaceName>)? )
+<showCommand> ::= "SHOW" what=( "VERSION" | "HOST" | "SESSION" sessionid=<uuid> )
                 ;
 '''
 
@@ -145,7 +141,7 @@ cqlsh_source_cmd_syntax_rules = r'''
 '''
 
 cqlsh_capture_cmd_syntax_rules = r'''
-<captureCommand> ::= "CAPTURE" ( fname=( <stringLiteral>) | "OFF" )?
+<captureCommand> ::= "CAPTURE" ( fname=( <stringLiteral> | "OFF" ) )?
                    ;
 '''
 
@@ -182,7 +178,7 @@ cqlsh_help_cmd_syntax_rules = r'''
 '''
 
 cqlsh_tracing_cmd_syntax_rules = r'''
-<tracingCommand> ::= "TRACING" ( switch=( "ON" | "OFF" ) )?
+<tracingCommand> ::= "TRACING" ( switch=( "ON" | "OFF" | "FULL" | "COMPACT" ) )?
                    ;
 '''
 
@@ -192,12 +188,7 @@ cqlsh_expand_cmd_syntax_rules = r'''
 '''
 
 cqlsh_paging_cmd_syntax_rules = r'''
-<pagingCommand> ::= "PAGING" ( switch=( "ON" | "OFF" | <wholenumber>) )?
-                  ;
-'''
-
-cqlsh_elapsed_cmd_syntax_rules = r'''
-<elapsedCommand> ::= "ELAPSED" ( switch=( "ON" | "OFF" ) )?
+<pagingCommand> ::= "PAGING" ( switch=( "ON" | "OFF" | /[0-9]+/) )?
                   ;
 '''
 
@@ -214,11 +205,6 @@ cqlsh_exit_cmd_syntax_rules = r'''
 cqlsh_clear_cmd_syntax_rules = r'''
 <clearCommand> ::= "CLEAR" | "CLS"
                  ;
-'''
-
-cqlsh_history_cmd_syntax_rules = r'''
-<historyCommand> ::= "history" (n=<wholenumber>)?
-                    ;
 '''
 
 cqlsh_question_mark = r'''
@@ -243,24 +229,10 @@ cqlsh_extra_syntax_rules = cqlsh_cmd_syntax_rules + \
     cqlsh_tracing_cmd_syntax_rules + \
     cqlsh_expand_cmd_syntax_rules + \
     cqlsh_paging_cmd_syntax_rules + \
-    cqlsh_elapsed_cmd_syntax_rules + \
     cqlsh_login_cmd_syntax_rules + \
     cqlsh_exit_cmd_syntax_rules + \
     cqlsh_clear_cmd_syntax_rules + \
-    cqlsh_history_cmd_syntax_rules + \
     cqlsh_question_mark
-
-
-def get_cqlshruleset():
-    cqlruleset = cql3handling.CqlRuleSet
-    cqlruleset.append_rules(cqlsh_extra_syntax_rules)
-    for rulename, termname, func in cqlsh_syntax_completers:
-        cqlruleset.completer_for(rulename, termname)(func)
-    cqlruleset.commands_end_with_newline.update(my_commands_ending_with_newline)
-    return cqlruleset
-
-
-cqlshruleset = get_cqlshruleset()
 
 
 def complete_source_quoted_filename(ctxt, cqlsh):

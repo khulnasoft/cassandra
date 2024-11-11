@@ -26,20 +26,20 @@ import java.util.function.Consumer;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
-import org.junit.Ignore;
 import org.junit.Test;
+import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
-import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.RegularAndStaticColumns;
-
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.SetType;
 import org.apache.cassandra.db.rows.CellPath;
 import org.apache.cassandra.dht.Murmur3Partitioner;
+import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputBuffer;
@@ -52,10 +52,13 @@ import org.apache.cassandra.utils.Throwables;
 
 import static org.junit.Assert.assertEquals;
 
-@Ignore("TCM - rewrite test, nothing in this test is now depending on version")
+@RunWith(Parameterized.class)
 public class ColumnFilterTest
 {
     private static final ColumnFilter.Serializer serializer = new ColumnFilter.Serializer();
+
+    @Parameterized.Parameter
+    public String clusterMinVersion;
 
     private final TableMetadata metadata = TableMetadata.builder("ks", "table")
                                                         .partitioner(Murmur3Partitioner.instance)
@@ -79,30 +82,26 @@ public class ColumnFilterTest
     private final CellPath path3 = CellPath.create(ByteBufferUtil.bytes(3));
     private final CellPath path4 = CellPath.create(ByteBufferUtil.bytes(4));
 
+
     @Parameterized.Parameters(name = "{index}: clusterMinVersion={0}")
     public static Collection<Object[]> data()
     {
-        // [tcm] we will require upgrading from 4.1
-        return Arrays.asList(new Object[]{ "4.1" }, new Object[]{ "4.0" });
+        return Arrays.asList(new Object[]{ "3.0" }, new Object[]{ "3.11" }, new Object[]{ "4.0-rc1" }, new Object[]{ "4.0" });
     }
 
     @BeforeClass
     public static void beforeClass()
     {
-        // Gossiper touches StorageService which touches StreamManager which requires configs be setup
-        DatabaseDescriptor.daemonInitialization();
-        SchemaLoader.prepareServer();
+        DatabaseDescriptor.setConfig(new Config());
         DatabaseDescriptor.setSeedProvider(Arrays::asList);
         DatabaseDescriptor.setEndpointSnitch(new SimpleSnitch());
-        DatabaseDescriptor.setDefaultFailureDetector();
-        DatabaseDescriptor.setPartitionerUnsafe(new Murmur3Partitioner());
+        Gossiper.instance.start(0);
     }
 
     @Before
     public void before()
     {
-        Util.setUpgradeFromVersion("4.0");
-        // todo; nothing in this test is actually version dependent anymore
+        Util.setUpgradeFromVersion(clusterMinVersion);
     }
 
     // Select all
@@ -339,7 +338,15 @@ public class ColumnFilterTest
         Consumer<ColumnFilter> check = filter -> {
             testRoundTrips(filter);
             assertFetchedQueried(true, true, filter, v1);
-            if (returnStaticContentOnPartitionWithNoRows)
+            if ("3.0".equals(clusterMinVersion))
+            {
+                assertEquals("*/*", filter.toString());
+                assertEquals("*", filter.toCQLString());
+                assertFetchedQueried(true, true, filter, s1, s2, v2);
+                assertCellFetchedQueried(true, true, filter, v2, path0, path1, path2, path3, path4);
+                assertCellFetchedQueried(true, true, filter, s2, path0, path1, path2, path3, path4);
+            }
+            else if ("3.11".equals(clusterMinVersion) || (returnStaticContentOnPartitionWithNoRows && "4.0".equals(clusterMinVersion)))
             {
                 assertEquals("*/[v1]", filter.toString());
                 assertEquals("v1", filter.toCQLString());
@@ -379,7 +386,15 @@ public class ColumnFilterTest
         Consumer<ColumnFilter> check = filter -> {
             testRoundTrips(filter);
             assertFetchedQueried(true, true, filter, s1);
-            if (returnStaticContentOnPartitionWithNoRows)
+            if ("3.0".equals(clusterMinVersion))
+            {
+                assertEquals("*/*", filter.toString());
+                assertEquals("*", filter.toCQLString());
+                assertFetchedQueried(true, true, filter, v1, v2, s2);
+                assertCellFetchedQueried(true, true, filter, v2, path0, path1, path2, path3, path4);
+                assertCellFetchedQueried(true, true, filter, s2, path0, path1, path2, path3, path4);
+            }
+            else if ("3.11".equals(clusterMinVersion) || (returnStaticContentOnPartitionWithNoRows && "4.0".equals(clusterMinVersion)))
             {
                 assertEquals("*/[s1]", filter.toString());
                 assertEquals("s1", filter.toCQLString());
@@ -421,7 +436,15 @@ public class ColumnFilterTest
                                           .build();
         testRoundTrips(filter);
         assertFetchedQueried(true, true, filter, v2);
-        if (returnStaticContentOnPartitionWithNoRows)
+        if ("3.0".equals(clusterMinVersion))
+        {
+            assertEquals("*/*", filter.toString());
+            assertEquals("*", filter.toCQLString());
+            assertFetchedQueried(true, true, filter, s1, s2, v1);
+            assertCellFetchedQueried(true, true, filter, v2, path0, path1, path2, path3, path4);
+            assertCellFetchedQueried(true, true, filter, s2, path0, path1, path2, path3, path4);
+        }
+        else if ("3.11".equals(clusterMinVersion) || (returnStaticContentOnPartitionWithNoRows && "4.0".equals(clusterMinVersion)))
         {
             assertEquals("*/[v2[1]]", filter.toString());
             assertEquals("v2[1]", filter.toCQLString());
@@ -461,7 +484,15 @@ public class ColumnFilterTest
                                           .build();
         testRoundTrips(filter);
         assertFetchedQueried(true, true, filter, s2);
-        if (returnStaticContentOnPartitionWithNoRows)
+        if ("3.0".equals(clusterMinVersion))
+        {
+            assertEquals("*/*", filter.toString());
+            assertEquals("*", filter.toCQLString());
+            assertFetchedQueried(true, true, filter, v1, v2, s1);
+            assertCellFetchedQueried(true, true, filter, v2, path0, path1, path2, path3, path4);
+            assertCellFetchedQueried(true, true, filter, s2, path1, path0, path2, path3, path4);
+        }
+        else if ("3.11".equals(clusterMinVersion) || (returnStaticContentOnPartitionWithNoRows && "4.0".equals(clusterMinVersion)))
         {
             assertEquals("*/[s2[1]]", filter.toString());
             assertEquals("s2[1]", filter.toCQLString());
@@ -484,6 +515,8 @@ public class ColumnFilterTest
 
     private void testRoundTrips(ColumnFilter cf)
     {
+        testRoundTrip(cf, MessagingService.VERSION_30);
+        testRoundTrip(cf, MessagingService.VERSION_3014);
         testRoundTrip(cf, MessagingService.VERSION_40);
     }
 
@@ -497,7 +530,14 @@ public class ColumnFilterTest
             DataInputPlus input = new DataInputBuffer(output.buffer(), false);
             ColumnFilter deserialized = serializer.deserialize(input, version, metadata);
 
-            Assert.assertEquals(deserialized, columnFilter);
+            if (version == MessagingService.VERSION_30 && columnFilter.fetchesAllColumns(false))
+            {
+                Assert.assertEquals(metadata.regularAndStaticColumns(), deserialized.fetchedColumns());
+            }
+            else
+            {
+                Assert.assertEquals(deserialized, columnFilter);
+            }
         }
         catch (IOException e)
         {

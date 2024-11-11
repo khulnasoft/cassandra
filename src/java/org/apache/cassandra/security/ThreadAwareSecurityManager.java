@@ -34,6 +34,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.netty.util.concurrent.FastThreadLocal;
+
+import io.netty.util.concurrent.FastThreadLocal;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.utils.logging.LoggingSupportFactory;
 
@@ -42,7 +44,7 @@ import org.apache.cassandra.utils.logging.LoggingSupportFactory;
  * if explicitly enabled.
  * <p>
  * This implementation gives no measurable performance penalty
- * (see <a href="http://cstar.datastax.com/tests/id/1d461628-12ba-11e5-918f-42010af0688f">see cstar test</a>).
+ * (see <a href="http://cstar.khulnasoft.com/tests/id/1d461628-12ba-11e5-918f-42010af0688f">see cstar test</a>).
  * This is better than the penalty of 1 to 3 percent using a standard {@code SecurityManager} with an <i>allow all</i> policy.
  * </p>
  */
@@ -215,7 +217,7 @@ public final class ThreadAwareSecurityManager extends SecurityManager
             return;
 
         // required by JavaDriver 2.2.0-rc3 and 3.0.0-a2 or newer
-        // code in com.datastax.driver.core.CodecUtils uses Guava stuff, which in turns requires this permission
+        // code in com.khulnasoft.driver.core.CodecUtils uses Guava stuff, which in turns requires this permission
         if (CHECK_MEMBER_ACCESS_PERMISSION.equals(perm))
             return;
 

@@ -18,127 +18,181 @@
 
 package org.apache.cassandra.config;
 
-import org.junit.Before;
+import org.junit.After;
 import org.junit.Test;
 
-import org.apache.cassandra.distributed.shared.WithProperties;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.assertj.core.api.Assertions;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_CASSANDRA_RELEVANT_PROPERTIES;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-
-// checkstyle: suppress below 'blockSystemPropertyUsage'
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
 
 public class CassandraRelevantPropertiesTest
 {
-    @Before
-    public void setup()
+    private static final CassandraRelevantProperties TEST_PROP = CassandraRelevantProperties.ORG_APACHE_CASSANDRA_CONF_CASSANDRA_RELEVANT_PROPERTIES_TEST;
+
+    @After
+    public void after()
     {
-        System.clearProperty(TEST_CASSANDRA_RELEVANT_PROPERTIES.getKey());
+        System.clearProperty(TEST_PROP.getKey());
     }
 
     @Test
-    public void testSystemPropertyisSet() {
-        try (WithProperties properties = new WithProperties().set(TEST_CASSANDRA_RELEVANT_PROPERTIES, "test"))
-        {
-            Assertions.assertThat(System.getProperty(TEST_CASSANDRA_RELEVANT_PROPERTIES.getKey())).isEqualTo("test"); // checkstyle: suppress nearby 'blockSystemPropertyUsage'
-        }
+    public void testIsPresent()
+    {
+        assertThat(TEST_PROP.isPresent()).isFalse();
+        System.setProperty(TEST_PROP.getKey(), "some-string");
+        assertThat(TEST_PROP.isPresent()).isTrue();
     }
 
     @Test
     public void testString()
     {
-        try (WithProperties properties = new WithProperties().set(TEST_CASSANDRA_RELEVANT_PROPERTIES, "some-string"))
-        {
-            Assertions.assertThat(TEST_CASSANDRA_RELEVANT_PROPERTIES.getString()).isEqualTo("some-string");
-        }
+        System.setProperty(TEST_PROP.getKey(), "some-string");
+        assertThat(TEST_PROP.getString()).isEqualTo("some-string");
+    }
+
+    @Test
+    public void testString_null()
+    {
+        assertThat(TEST_PROP.getString()).isNull();
+    }
+
+    @Test
+    public void testString_override_default()
+    {
+        assertThat(TEST_PROP.getString("other-string")).isEqualTo("other-string");
+        TEST_PROP.setString("this-string");
+        assertThat(TEST_PROP.getString("other-string")).isEqualTo("this-string");
     }
 
     @Test
     public void testBoolean()
     {
-        try
-        {
-            System.setProperty(TEST_CASSANDRA_RELEVANT_PROPERTIES.getKey(), "true");
-            Assertions.assertThat(TEST_CASSANDRA_RELEVANT_PROPERTIES.getBoolean()).isEqualTo(true);
-            System.setProperty(TEST_CASSANDRA_RELEVANT_PROPERTIES.getKey(), "false");
-            Assertions.assertThat(TEST_CASSANDRA_RELEVANT_PROPERTIES.getBoolean()).isEqualTo(false);
-            System.setProperty(TEST_CASSANDRA_RELEVANT_PROPERTIES.getKey(), "junk");
-            Assertions.assertThat(TEST_CASSANDRA_RELEVANT_PROPERTIES.getBoolean()).isEqualTo(false);
-            System.setProperty(TEST_CASSANDRA_RELEVANT_PROPERTIES.getKey(), "");
-            Assertions.assertThat(TEST_CASSANDRA_RELEVANT_PROPERTIES.getBoolean()).isEqualTo(false);
-        }
-        finally
-        {
-            System.clearProperty(TEST_CASSANDRA_RELEVANT_PROPERTIES.getKey());
-        }
+        System.setProperty(TEST_PROP.getKey(), "true");
+        assertThat(TEST_PROP.getBoolean()).isTrue();
+        System.setProperty(TEST_PROP.getKey(), "false");
+        assertThat(TEST_PROP.getBoolean()).isFalse();
+        System.setProperty(TEST_PROP.getKey(), "junk");
+        assertThat(TEST_PROP.getBoolean()).isFalse();
+        System.setProperty(TEST_PROP.getKey(), "");
+        assertThat(TEST_PROP.getBoolean()).isFalse();
     }
 
     @Test
     public void testBoolean_null()
     {
-        try (WithProperties properties = new WithProperties())
-        {
-            TEST_CASSANDRA_RELEVANT_PROPERTIES.getBoolean();
-            Assertions.assertThat(TEST_CASSANDRA_RELEVANT_PROPERTIES.getBoolean()).isFalse();
-        }
+        assertThat(TEST_PROP.getBoolean()).isFalse();
+    }
+
+    @Test
+    public void testBoolean_override_default()
+    {
+        assertThat(TEST_PROP.getBoolean(true)).isTrue();
+        TEST_PROP.setBoolean(false);
+        assertThat(TEST_PROP.getBoolean(true)).isFalse();
     }
 
     @Test
     public void testDecimal()
     {
-        try (WithProperties properties = new WithProperties().set(TEST_CASSANDRA_RELEVANT_PROPERTIES, "123456789"))
-        {
-            Assertions.assertThat(TEST_CASSANDRA_RELEVANT_PROPERTIES.getInt()).isEqualTo(123456789);
-        }
+        System.setProperty(TEST_PROP.getKey(), "123456789");
+        assertThat(TEST_PROP.getInt()).isEqualTo(123456789);
     }
 
     @Test
     public void testHexadecimal()
     {
-        try (WithProperties properties = new WithProperties().set(TEST_CASSANDRA_RELEVANT_PROPERTIES, "0x1234567a"))
-        {
-            Assertions.assertThat(TEST_CASSANDRA_RELEVANT_PROPERTIES.getInt()).isEqualTo(305419898);
-        }
+        System.setProperty(TEST_PROP.getKey(), "0x1234567a");
+        assertThat(TEST_PROP.getInt()).isEqualTo(305419898);
     }
 
     @Test
     public void testOctal()
     {
-        try (WithProperties properties = new WithProperties().set(TEST_CASSANDRA_RELEVANT_PROPERTIES, "01234567"))
-        {
-            Assertions.assertThat(TEST_CASSANDRA_RELEVANT_PROPERTIES.getInt()).isEqualTo(342391);
-        }
+        System.setProperty(TEST_PROP.getKey(), "01234567");
+        assertThat(TEST_PROP.getInt()).isEqualTo(342391);
     }
 
     @Test(expected = ConfigurationException.class)
     public void testInteger_empty()
     {
-        try (WithProperties properties = new WithProperties().set(TEST_CASSANDRA_RELEVANT_PROPERTIES, ""))
-        {
-            Assertions.assertThat(TEST_CASSANDRA_RELEVANT_PROPERTIES.getInt()).isEqualTo(342391);
-        }
+        System.setProperty(TEST_PROP.getKey(), "");
+        TEST_PROP.getInt();
+        fail("Expected ConfigurationException");
     }
 
-    @Test(expected = ConfigurationException.class)
+    @Test(expected = NullPointerException.class)
     public void testInteger_null()
     {
-        try (WithProperties properties = new WithProperties())
-        {
-            TEST_CASSANDRA_RELEVANT_PROPERTIES.getInt();
-        }
+        TEST_PROP.getInt();
+        fail("Expected NullPointerException");
     }
 
     @Test
-    public void testClearProperty()
+    public void testInteger_override_default()
     {
-        assertNull(TEST_CASSANDRA_RELEVANT_PROPERTIES.getString());
-        try (WithProperties properties = new WithProperties().set(TEST_CASSANDRA_RELEVANT_PROPERTIES, "test"))
-        {
-            assertEquals("test", TEST_CASSANDRA_RELEVANT_PROPERTIES.getString());
-        }
-        assertNull(TEST_CASSANDRA_RELEVANT_PROPERTIES.getString());
+        assertThat(TEST_PROP.getInt(2345)).isEqualTo(2345);
+        TEST_PROP.setInt(1234);
+        assertThat(TEST_PROP.getInt(2345)).isEqualTo(1234);
+    }
+
+    @Test
+    public void testLong()
+    {
+        System.setProperty(TEST_PROP.getKey(), "1234");
+        assertThat(TEST_PROP.getLong()).isEqualTo(1234);
+    }
+
+    @Test(expected = ConfigurationException.class)
+    public void testLong_empty()
+    {
+        System.setProperty(TEST_PROP.getKey(), "");
+        TEST_PROP.getLong();
+        fail("Expected ConfigurationException");
+    }
+
+    @Test(expected = NullPointerException.class)
+    public void testLong_null()
+    {
+        TEST_PROP.getLong();
+        fail("Expected NullPointerException");
+    }
+
+    @Test
+    public void testLong_override_default()
+    {
+        assertThat(TEST_PROP.getLong(2345)).isEqualTo(2345);
+        TEST_PROP.setLong(1234);
+        assertThat(TEST_PROP.getLong(2345)).isEqualTo(1234);
+    }
+
+    @Test
+    public void testDouble()
+    {
+        System.setProperty(TEST_PROP.getKey(), "1.567");
+        assertThat(TEST_PROP.getDouble()).isEqualTo(1.567);
+    }
+
+    @Test(expected = ConfigurationException.class)
+    public void testDouble_empty()
+    {
+        System.setProperty(TEST_PROP.getKey(), "");
+        TEST_PROP.getDouble();
+        fail("Expected ConfigurationException");
+    }
+
+    @Test(expected = NullPointerException.class)
+    public void testDouble_null()
+    {
+        TEST_PROP.getDouble();
+        fail("Expected NullPointerException");
+    }
+
+    @Test
+    public void testDouble_override_default()
+    {
+        assertThat(TEST_PROP.getDouble(2.345)).isEqualTo(2.345);
+        TEST_PROP.setDouble(1.234);
+        assertThat(TEST_PROP.getDouble(2.345)).isEqualTo(1.234);
     }
 }

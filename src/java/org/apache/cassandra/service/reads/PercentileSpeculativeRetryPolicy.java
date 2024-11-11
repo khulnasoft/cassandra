@@ -27,7 +27,6 @@ import com.google.common.base.Objects;
 
 import com.codahale.metrics.Snapshot;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.metrics.SnapshottingTimer;
 import org.apache.cassandra.schema.TableParams;
 
 public class PercentileSpeculativeRetryPolicy implements SpeculativeRetryPolicy
@@ -48,17 +47,11 @@ public class PercentileSpeculativeRetryPolicy implements SpeculativeRetryPolicy
     }
 
     @Override
-    public long calculateThreshold(SnapshottingTimer latency, long existingValue)
+    public long calculateThreshold(Snapshot latency, long existingValue)
     {
-        return calculateThreshold(latency.getPercentileSnapshot(), existingValue);
-    }
-
-    public long calculateThreshold(Snapshot snapshot, long existingValue)
-    {
-        if (snapshot.size() <= 0)
+        if (latency.size() <= 0)
             return existingValue;
-        // latency snapshot uses a default timer so is in microseconds, so just return percentile
-        return (long) snapshot.getValue(percentile / 100);
+        return (long) latency.getValue(percentile / 100);
     }
 
     @Override

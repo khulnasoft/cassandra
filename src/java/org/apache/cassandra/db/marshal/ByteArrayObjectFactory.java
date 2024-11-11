@@ -35,27 +35,6 @@ class ByteArrayObjectFactory implements ValueAccessor.ObjectFactory<byte[]>
         }
     };
 
-    public static final Clustering<byte[]> STATIC_CLUSTERING = new ArrayClustering(AbstractArrayClusteringPrefix.EMPTY_VALUES_ARRAY)
-    {
-        @Override
-        public Kind kind()
-        {
-            return Kind.STATIC_CLUSTERING;
-        }
-
-        @Override
-        public String toString()
-        {
-            return "STATIC";
-        }
-
-        @Override
-        public String toString(TableMetadata metadata)
-        {
-            return toString();
-        }
-    };
-
     static final ValueAccessor.ObjectFactory<byte[]> instance = new ByteArrayObjectFactory();
 
     private ByteArrayObjectFactory() {}
@@ -74,7 +53,7 @@ class ByteArrayObjectFactory implements ValueAccessor.ObjectFactory<byte[]>
     private static final ArrayClusteringBound MIN_END_BOUND = new ArrayClusteringBound(ClusteringPrefix.Kind.EXCL_END_BOUND,
                                                                                    AbstractArrayClusteringPrefix.EMPTY_VALUES_ARRAY);
 
-    public Cell<byte[]> cell(ColumnMetadata column, long timestamp, int ttl, long localDeletionTime, byte[] value, CellPath path)
+    public Cell<byte[]> cell(ColumnMetadata column, long timestamp, int ttl, int localDeletionTime, byte[] value, CellPath path)
     {
         return new ArrayCell(column, timestamp, ttl, localDeletionTime, value, path);
     }
@@ -87,11 +66,6 @@ class ByteArrayObjectFactory implements ValueAccessor.ObjectFactory<byte[]>
     public Clustering<byte[]> clustering()
     {
         return EMPTY_CLUSTERING;
-    }
-
-    public Clustering<byte[]> staticClustering()
-    {
-        return STATIC_CLUSTERING;
     }
 
     public ClusteringBound<byte[]> bound(ClusteringPrefix.Kind kind, byte[]... values)

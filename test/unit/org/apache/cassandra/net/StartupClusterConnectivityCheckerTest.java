@@ -32,12 +32,10 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
 import org.apache.cassandra.gms.EndpointState;
 import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.gms.HeartBeatState;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.utils.FBUtilities;
 
 public class StartupClusterConnectivityCheckerTest
@@ -70,7 +68,6 @@ public class StartupClusterConnectivityCheckerTest
     public static void before()
     {
         DatabaseDescriptor.daemonInitialization();
-        ClusterMetadataTestHelper.setInstanceForTest();
     }
 
     @Before
@@ -237,7 +234,6 @@ public class StartupClusterConnectivityCheckerTest
             if (processConnectAck)
             {
                 Message msgIn = Message.builder(Verb.REQUEST_RSP, message.payload)
-                                       .withEpoch(Epoch.EMPTY)
                                        .from(to)
                                        .build();
                 MessagingService.instance().callbacks.get(message.id(), to).callback.onResponse(msgIn);

@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.cql3.selection;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -25,20 +24,16 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
 
-import com.google.common.base.Objects;
-
 import org.apache.cassandra.cql3.ColumnSpecification;
-import org.apache.cassandra.cql3.terms.Maps;
+import org.apache.cassandra.cql3.Maps;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.functions.Function;
-import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.filter.ColumnFilter.Builder;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.MapType;
-import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.serializers.CollectionSerializer;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.Pair;
 
@@ -48,23 +43,6 @@ import org.apache.cassandra.utils.Pair;
  */
 final class MapSelector extends Selector
 {
-    protected static final SelectorDeserializer deserializer = new SelectorDeserializer()
-    {
-        protected Selector deserialize(DataInputPlus in, int version, TableMetadata metadata) throws IOException
-        {
-            MapType<?, ?> type = (MapType<?, ?>) readType(metadata, in);
-            int size = in.readUnsignedVInt32();
-            List<Pair<Selector, Selector>> entries = new ArrayList<>(size);
-            for (int i = 0; i < size; i++)
-            {
-                Pair<Selector, Selector> entry = Pair.create(serializer.deserialize(in, version, metadata),
-                                                             serializer.deserialize(in, version, metadata));
-                entries.add(entry);
-            }
-            return new MapSelector(type, entries);
-        }
-    };
-
     /**
      * The map type.
      */
@@ -192,17 +170,17 @@ final class MapSelector extends Selector
         }
     }
 
-    public void addInput(InputRow input)
+    public void addInput(ResultSetBuilder rs) throws InvalidRequestException
     {
         for (int i = 0, m = elements.size(); i < m; i++)
         {
             Pair<Selector, Selector> pair = elements.get(i);
-            pair.left.addInput(input);
-            pair.right.addInput(input);
+            pair.left.addInput(rs);
+            pair.right.addInput(rs);
         }
     }
 
-    public ByteBuffer getOutput(ProtocolVersion protocolVersion)
+    public ByteBuffer getOutput(ProtocolVersion protocolVersion) throws InvalidRequestException
     {
         Map<ByteBuffer, ByteBuffer> map = new TreeMap<>(type.getKeysType());
         for (int i = 0, m = elements.size(); i < m; i++)
@@ -217,7 +195,7 @@ final class MapSelector extends Selector
             buffers.add(entry.getKey());
             buffers.add(entry.getValue());
         }
-        return type.pack(buffers);
+        return CollectionSerializer.pack(buffers, elements.size(), protocolVersion);
     }
 
     public void reset()
@@ -228,18 +206,6 @@ final class MapSelector extends Selector
             pair.left.reset();
             pair.right.reset();
         }
-    }
-
-    @Override
-    public boolean isTerminal()
-    {
-        for (int i = 0, m = elements.size(); i < m; i++)
-        {
-            Pair<Selector, Selector> pair = elements.get(i);
-            if (!pair.left.isTerminal() || !pair.right.isTerminal())
-                return false;
-        }
-        return true;
     }
 
     public AbstractType<?> getType()
@@ -255,58 +221,7 @@ final class MapSelector extends Selector
 
     private MapSelector(AbstractType<?> type, List<Pair<Selector, Selector>> elements)
     {
-        super(Kind.MAP_SELECTOR);
         this.type = (MapType<?, ?>) type;
         this.elements = elements;
-    }
-    
-
-    @Override
-    public boolean equals(Object o)
-    {
-        if (this == o)
-            return true;
-
-        if (!(o instanceof MapSelector))
-            return false;
-
-        MapSelector s = (MapSelector) o;
-
-        return Objects.equal(type, s.type)
-            && Objects.equal(elements, s.elements);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hashCode(type, elements);
-    }
-
-    @Override
-    protected int serializedSize(int version)
-    {
-        int size = sizeOf(type) + TypeSizes.sizeofUnsignedVInt(elements.size());
-
-        for (int i = 0, m = elements.size(); i < m; i++)
-        {
-            Pair<Selector, Selector> entry = elements.get(i);
-            size += serializer.serializedSize(entry.left, version) + serializer.serializedSize(entry.right, version);
-        }
-
-        return size;
-    }
-
-    @Override
-    protected void serialize(DataOutputPlus out, int version) throws IOException
-    {
-        writeType(out, type);
-        out.writeUnsignedVInt32(elements.size());
-
-        for (int i = 0, m = elements.size(); i < m; i++)
-        {
-            Pair<Selector, Selector> entry = elements.get(i);
-            serializer.serialize(entry.left, out, version);
-            serializer.serialize(entry.right, out, version);
-        }
     }
 }

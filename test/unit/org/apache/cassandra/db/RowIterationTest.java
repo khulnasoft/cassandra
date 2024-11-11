@@ -23,6 +23,7 @@ import org.junit.Test;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.Util;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 
@@ -36,7 +37,7 @@ public class RowIterationTest extends CQLTester
         ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
         for (int i = 0; i < 10; i++)
             execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?) USING TIMESTAMP ?", i, 0, i, i, (long)i);
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         assertEquals(10, execute("SELECT * FROM %s").size());
     }
 
@@ -49,15 +50,15 @@ public class RowIterationTest extends CQLTester
         execute("INSERT INTO %s (a, b) VALUES (?, ?) USING TIMESTAMP ?", 0, 0, 0L);
         execute("DELETE FROM %s USING TIMESTAMP ? WHERE a = ?", 0L, 0);
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         // Delete row in second sstable with higher timestamp
         execute("INSERT INTO %s (a, b) VALUES (?, ?) USING TIMESTAMP ?", 0, 0, 1L);
         execute("DELETE FROM %s USING TIMESTAMP ? WHERE a = ?", 1L, 0);
 
-        long localDeletionTime = Util.getOnlyPartitionUnfiltered(Util.cmd(cfs).build()).partitionLevelDeletion().localDeletionTime();
+        int localDeletionTime = Util.getOnlyPartitionUnfiltered(Util.cmd(cfs).build()).partitionLevelDeletion().localDeletionTime();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         DeletionTime dt = Util.getOnlyPartitionUnfiltered(Util.cmd(cfs).build()).partitionLevelDeletion();
         assertEquals(1L, dt.markedForDeleteAt());
@@ -72,7 +73,7 @@ public class RowIterationTest extends CQLTester
 
         // Delete a row in first sstable
         execute("DELETE FROM %s USING TIMESTAMP ? WHERE a = ?", 0L, 0);
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         assertFalse(Util.getOnlyPartitionUnfiltered(Util.cmd(cfs).build()).isEmpty());
     }

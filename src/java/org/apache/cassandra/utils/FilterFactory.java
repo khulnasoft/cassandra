@@ -17,19 +17,29 @@
  */
 package org.apache.cassandra.utils;
 
-import java.io.IOException;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.io.util.DataOutputStreamPlus;
-import org.apache.cassandra.utils.concurrent.Ref;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tags;
+import org.apache.cassandra.metrics.DefaultNameFactory;
+import org.apache.cassandra.metrics.MetricNameFactory;
+import org.apache.cassandra.metrics.MicrometerMetrics;
 import org.apache.cassandra.utils.obs.IBitSet;
+import org.apache.cassandra.utils.obs.MemoryLimiter;
 import org.apache.cassandra.utils.obs.OffHeapBitSet;
+
+import static org.apache.cassandra.config.CassandraRelevantProperties.USE_MICROMETER;
+import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
 
 public class FilterFactory
 {
-    public static final IFilter AlwaysPresent = AlwaysPresentFilter.instance;
+    public static final IFilter AlwaysPresent = new AlwaysPresentFilter();
+    // marker for lazy bloom filter
+    public static final IFilter AlwaysPresentForLazyLoading = new AlwaysPresentFilter();
+
+    public static final FilterFactoryMetrics metrics = FilterFactoryMetrics.create();
 
     private static final Logger logger = LoggerFactory.getLogger(FilterFactory.class);
     private static final long BITSET_EXCESS = 20;
@@ -40,6 +50,11 @@ public class FilterFactory
      */
     public static IFilter getFilter(long numElements, int targetBucketsPerElem)
     {
+        return getFilter(numElements, targetBucketsPerElem, BloomFilter.memoryLimiter);
+    }
+
+    public static IFilter getFilter(long numElements, int targetBucketsPerElem, MemoryLimiter memoryLimiter)
+    {
         int maxBucketsPerElement = Math.max(1, BloomCalculations.maxBucketsPerElement(numElements));
         int bucketsPerElement = Math.min(targetBucketsPerElem, maxBucketsPerElement);
         if (bucketsPerElement < targetBucketsPerElem)
@@ -47,82 +62,115 @@ public class FilterFactory
             logger.warn("Cannot provide an optimal BloomFilter for {} elements ({}/{} buckets per element).", numElements, bucketsPerElement, targetBucketsPerElem);
         }
         BloomCalculations.BloomSpecification spec = BloomCalculations.computeBloomSpec(bucketsPerElement);
-        return createFilter(spec.K, numElements, spec.bucketsPerElement);
+        return createFilter(spec.K, numElements, spec.bucketsPerElement, memoryLimiter);
     }
 
     /**
      * @return The smallest BloomFilter that can provide the given false
-     *         positive probability rate for the given number of elements.
-     *
-     *         Asserts that the given probability can be satisfied using this
-     *         filter.
+     * positive probability rate for the given number of elements.
+     * <p>
+     * Asserts that the given probability can be satisfied using this
+     * filter.
      */
     public static IFilter getFilter(long numElements, double maxFalsePosProbability)
     {
+        return getFilter(numElements, maxFalsePosProbability, BloomFilter.memoryLimiter);
+    }
+
+    public static IFilter getFilter(long numElements, double maxFalsePosProbability, MemoryLimiter memoryLimiter)
+    {
         assert maxFalsePosProbability <= 1.0 : "Invalid probability";
         if (maxFalsePosProbability == 1.0)
-            return FilterFactory.AlwaysPresent;
+            return AlwaysPresent;
         int bucketsPerElement = BloomCalculations.maxBucketsPerElement(numElements);
         BloomCalculations.BloomSpecification spec = BloomCalculations.computeBloomSpec(bucketsPerElement, maxFalsePosProbability);
-        return createFilter(spec.K, numElements, spec.bucketsPerElement);
+        return createFilter(spec.K, numElements, spec.bucketsPerElement, memoryLimiter);
     }
 
-    private static IFilter createFilter(int hash, long numElements, int bucketsPer)
+    @SuppressWarnings("resource")
+    private static IFilter createFilter(int hash, long numElements, int bucketsPer, MemoryLimiter memoryLimiter)
     {
-        long numBits = (numElements * bucketsPer) + BITSET_EXCESS;
-        IBitSet bitset = new OffHeapBitSet(numBits);
-        return new BloomFilter(hash, bitset);
+        try
+        {
+            long numBits = (numElements * bucketsPer) + BITSET_EXCESS;
+            IBitSet bitset = new OffHeapBitSet(numBits, memoryLimiter);
+            return new BloomFilter(hash, bitset);
+        }
+        catch (MemoryLimiter.ReachedMemoryLimitException | OutOfMemoryError e)
+        {
+            logger.error("Failed to create new Bloom filter with {} elements: ({}) - " +
+                         "continuing but this will have severe performance implications. Consider increasing FP chance " +
+                         "(bloom_filter_fp_chance) or increasing system ram space or" +
+                         "lowering number of sstables through compaction", numElements, e.getMessage());
+            metrics.incrementOOMError();
+            return AlwaysPresent;
+        }
     }
 
-    private static class AlwaysPresentFilter implements IFilter
+    public interface FilterFactoryMetrics
     {
-        public static final AlwaysPresentFilter instance = new AlwaysPresentFilter();
-
-        private AlwaysPresentFilter() { }
-
-        public boolean isPresent(FilterKey key)
+        static FilterFactoryMetrics create()
         {
-            return true;
+            return USE_MICROMETER.getBoolean() ? new FilterFactoryMicormeterMetrics()
+                                                : new FilterFactoryCodahaleMetrics();
         }
 
-        public void add(FilterKey key) { }
+        void incrementOOMError();
 
-        public void clear() { }
+        long oomErrors();
+    }
 
-        public void close() { }
-
-        public IFilter sharedCopy()
+    /**
+     * Metrics exposed in Prometheus friendly format
+     */
+    public static final class FilterFactoryMicormeterMetrics extends MicrometerMetrics implements FilterFactoryMetrics
+    {
+        public static final String METRICS_PREFIX = "bloom_filter";
+        public static final String OOM_ERRORS = METRICS_PREFIX + "_oom_errors";
+        private volatile Counter oomCounter;
+        public FilterFactoryMicormeterMetrics()
         {
-            return this;
-        }
-
-        public Throwable close(Throwable accumulate)
-        {
-            return accumulate;
-        }
-
-        public void addTo(Ref.IdentityCollection identities)
-        {
-        }
-
-        public long serializedSize(boolean oldSerializationFormat) { return 0; }
-
-        @Override
-        public void serialize(DataOutputStreamPlus out, boolean oldSerializationFormat) throws IOException
-        {
-            // no-op
+            this.oomCounter = counter(OOM_ERRORS);
         }
 
         @Override
-        public long offHeapSize()
+        public synchronized void register(MeterRegistry newRegistry, Tags newTags)
         {
-            return 0;
+            super.register(newRegistry, newTags);
+            this.oomCounter = counter(OOM_ERRORS);
         }
 
         @Override
-        public boolean isInformative()
+        public void incrementOOMError()
         {
-            return false;
+            oomCounter.increment();
+        }
+
+        @Override
+        public long oomErrors()
+        {
+            return (long) oomCounter.count();
+        }
+    }
+
+    /**
+     * Metrics exposed in Codahale format
+     */
+    public static final class FilterFactoryCodahaleMetrics implements FilterFactoryMetrics
+    {
+        private static final MetricNameFactory metricNameFactory = new DefaultNameFactory("BloomFilter");
+        private static final com.codahale.metrics.Counter oomCounter = Metrics.counter(metricNameFactory.createMetricName("OutOfMemory"));
+
+        @Override
+        public void incrementOOMError()
+        {
+            oomCounter.inc();
+        }
+
+        @Override
+        public long oomErrors()
+        {
+            return oomCounter.getCount();
         }
     }
 }

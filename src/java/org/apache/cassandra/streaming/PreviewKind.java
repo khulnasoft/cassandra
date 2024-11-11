@@ -18,6 +18,8 @@
 
 package org.apache.cassandra.streaming;
 
+import java.util.UUID;
+
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
 
@@ -27,7 +29,6 @@ import org.apache.cassandra.repair.PreviewRepairConflictWithIncrementalRepairExc
 import org.apache.cassandra.repair.consistent.ConsistentSession;
 import org.apache.cassandra.repair.consistent.LocalSession;
 import org.apache.cassandra.service.ActiveRepairService;
-import org.apache.cassandra.utils.TimeUUID;
 
 public enum PreviewKind
 {
@@ -68,7 +69,7 @@ public enum PreviewKind
         return isPreview() ? "preview repair" : "repair";
     }
 
-    public String logPrefix(TimeUUID sessionId)
+    public String logPrefix(UUID sessionId)
     {
         return '[' + logPrefix() + " #" + sessionId.toString() + ']';
     }
@@ -86,7 +87,7 @@ public enum PreviewKind
             StatsMetadata sstableMetadata = sstable.getSSTableMetadata();
             if (sstableMetadata.pendingRepair != null)
             {
-                LocalSession session = ActiveRepairService.instance().consistent.local.getSession(sstableMetadata.pendingRepair);
+                LocalSession session = ActiveRepairService.instance.consistent.local.getSession(sstableMetadata.pendingRepair);
                 if (session == null)
                     return false;
                 else if (session.getState() == ConsistentSession.State.FINALIZED)

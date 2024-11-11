@@ -22,13 +22,16 @@ import java.util.concurrent.TimeUnit;
 
 import com.google.common.annotations.VisibleForTesting;
 
+import com.codahale.metrics.Histogram;
 import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.index.Index;
+import org.apache.cassandra.metrics.DecayingEstimatedHistogramReservoir;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.MonotonicClock;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 
-import static org.apache.cassandra.utils.MonotonicClock.Global.preciseTime;
+import static org.apache.cassandra.utils.MonotonicClock.preciseTime;
 
 public class ReadExecutionController implements AutoCloseable
 {
@@ -47,7 +50,9 @@ public class ReadExecutionController implements AutoCloseable
     private final long createdAtNanos; // Only used while sampling
 
     private final RepairedDataInfo repairedDataInfo;
-    private long oldestUnrepairedTombstone = Long.MAX_VALUE;
+    private int oldestUnrepairedTombstone = Integer.MAX_VALUE;
+
+    public final Histogram sstablesScannedPerRowRead;
 
     ReadExecutionController(ReadCommand command,
                             OpOrder.Group baseOp,
@@ -67,6 +72,8 @@ public class ReadExecutionController implements AutoCloseable
         this.command = command;
         this.createdAtNanos = createdAtNanos;
 
+        this.sstablesScannedPerRowRead = new Histogram(new DecayingEstimatedHistogramReservoir(true));
+
         if (trackRepairedStatus)
         {
             DataLimits.Counter repairedReadCount = command.limits().newCounter(command.nowInSec(),
@@ -79,6 +86,9 @@ public class ReadExecutionController implements AutoCloseable
         {
             repairedDataInfo = RepairedDataInfo.NO_OP_REPAIRED_DATA_INFO;
         }
+
+        if (Tracing.isTracing())
+            Tracing.instance.setRangeQuery(isRangeCommand());
     }
 
     public boolean isRangeCommand()
@@ -96,12 +106,12 @@ public class ReadExecutionController implements AutoCloseable
         return writeContext;
     }
 
-    long oldestUnrepairedTombstone()
+    int oldestUnrepairedTombstone()
     {
         return oldestUnrepairedTombstone;
     }
     
-    void updateMinOldestUnrepairedTombstone(long candidate)
+    void updateMinOldestUnrepairedTombstone(int candidate)
     {
         oldestUnrepairedTombstone = Math.min(oldestUnrepairedTombstone, candidate);
     }
@@ -209,7 +219,17 @@ public class ReadExecutionController implements AutoCloseable
 
         if (createdAtNanos != NO_SAMPLING)
             addSample();
-    }
+
+        if (Tracing.traceSinglePartitions())
+        {
+            var sstablesHistogram = sstablesScannedPerRowRead.getSnapshot();
+            Tracing.trace("Scanned {} rows; average {} sstables scanned per row with stdev {} and max {}",
+                          sstablesScannedPerRowRead.getCount(),
+                          sstablesHistogram.getMean(),
+                          sstablesHistogram.getStdDev(),
+                          sstablesHistogram.getMax());
+        }
+}
 
     public boolean isTrackingRepairedStatus()
     {
@@ -240,5 +260,10 @@ public class ReadExecutionController implements AutoCloseable
         ColumnFamilyStore cfs = ColumnFamilyStore.getIfExists(baseMetadata.id);
         if (cfs != null)
             cfs.metric.topLocalReadQueryTime.addSample(cql, timeMicros);
+    }
+
+    public void updateSstablesIteratedPerRow(int mergedSSTablesIterated)
+    {
+        sstablesScannedPerRowRead.update(mergedSSTablesIterated);
     }
 }

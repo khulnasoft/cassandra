@@ -19,17 +19,14 @@
 package org.apache.cassandra.tools;
 
 import java.io.IOException;
-import java.net.InetSocketAddress;
 
+import io.netty.channel.Channel;
 import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.net.OutboundConnectionSettings;
-import org.apache.cassandra.streaming.StreamingChannel;
-import org.apache.cassandra.streaming.async.NettyStreamingConnectionFactory;
-import org.apache.cassandra.streaming.async.NettyStreamingChannel;
+import org.apache.cassandra.streaming.DefaultConnectionFactory;
+import org.apache.cassandra.streaming.StreamConnectionFactory;
 
-import static org.apache.cassandra.locator.InetAddressAndPort.getByAddress;
-
-public class BulkLoadConnectionFactory extends NettyStreamingConnectionFactory
+public class BulkLoadConnectionFactory extends DefaultConnectionFactory implements StreamConnectionFactory
 {
     private final int storagePort;
     private final EncryptionOptions.ServerEncryptionOptions encryptionOptions;
@@ -40,26 +37,7 @@ public class BulkLoadConnectionFactory extends NettyStreamingConnectionFactory
         this.encryptionOptions = encryptionOptions;
     }
 
-    @Override
-    public NettyStreamingChannel create(InetSocketAddress to, int messagingVersion, StreamingChannel.Kind kind) throws IOException
-    {
-        OutboundConnectionSettings template = new OutboundConnectionSettings(getByAddress(to));
-        return create(template, messagingVersion, kind);
-    }
-
-    @Override
-    public StreamingChannel create(InetSocketAddress to,
-                                   InetSocketAddress preferred,
-                                   int messagingVersion,
-                                   StreamingChannel.Kind kind) throws IOException
-    {
-        // The preferred address is always overwritten in create(). This method override only exists so we can avoid
-        // falling back to the NettyStreamingConnectionFactory implementation.
-        OutboundConnectionSettings template = new OutboundConnectionSettings(getByAddress(to), getByAddress(preferred));
-        return create(template, messagingVersion, kind);
-    }
-
-    private NettyStreamingChannel create(OutboundConnectionSettings template, int messagingVersion, StreamingChannel.Kind kind) throws IOException
+    public Channel createConnection(OutboundConnectionSettings template, int messagingVersion) throws IOException
     {
         // storage port can handle both encrypted and unencrypted traffic from 4.0
         // so from sstableloader's point of view we can use just storage port for both cases
@@ -69,8 +47,9 @@ public class BulkLoadConnectionFactory extends NettyStreamingConnectionFactory
         if (encryptionOptions != null && encryptionOptions.internode_encryption != EncryptionOptions.ServerEncryptionOptions.InternodeEncryption.none)
             template = template.withEncryption(encryptionOptions);
 
-        return connect(template, messagingVersion, kind);
+        return super.createConnection(template, messagingVersion);
     }
+
     @Override
     public boolean supportsPreferredIp()
     {

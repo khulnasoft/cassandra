@@ -18,7 +18,6 @@
 package org.apache.cassandra.tools.nodetool;
 
 import io.airlift.airline.Command;
-import io.airlift.airline.Option;
 
 import org.apache.cassandra.tools.NodeProbe;
 import org.apache.cassandra.tools.NodeTool.NodeToolCmd;
@@ -26,12 +25,9 @@ import org.apache.cassandra.tools.NodeTool.NodeToolCmd;
 @Command(name = "gossipinfo", description = "Shows the gossip information for the cluster")
 public class GossipInfo extends NodeToolCmd
 {
-    @Option(title = "resolve_ip", name = {"-r", "--resolve-ip"}, description = "Show node domain names instead of IPs")
-    private boolean resolveIp = false;
-
     @Override
     public void execute(NodeProbe probe)
     {
-        probe.output().out.println(probe.getGossipInfo(printPort, resolveIp));
+        probe.output().out.println(probe.getGossipInfo(printPort));
     }
 }

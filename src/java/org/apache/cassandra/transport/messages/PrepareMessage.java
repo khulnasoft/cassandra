@@ -31,13 +31,10 @@ import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.transport.CBUtil;
-import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.Message;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.NoSpamLogger;
-
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 
 public class PrepareMessage extends Message.Request
 {
@@ -115,7 +112,7 @@ public class PrepareMessage extends Message.Request
     }
 
     @Override
-    protected Message.Response execute(QueryState state, Dispatcher.RequestTime requestTime, boolean traceRequest)
+    protected Message.Response execute(QueryState state, long queryStartNanoTime, boolean traceRequest)
     {
         try
         {
@@ -124,7 +121,7 @@ public class PrepareMessage extends Message.Request
 
             ClientState clientState = state.getClientState().cloneWithKeyspaceIfSet(keyspace);
             QueryHandler queryHandler = ClientState.getCQLQueryHandler();
-            long queryTime = currentTimeMillis();
+            long queryTime = System.currentTimeMillis();
             ResultMessage.Prepared response = queryHandler.prepare(query, clientState, getCustomPayload());
             QueryEvents.instance.notifyPrepareSuccess(() -> queryHandler.getPrepared(response.statementId), query, state, queryTime, response);
             return response;

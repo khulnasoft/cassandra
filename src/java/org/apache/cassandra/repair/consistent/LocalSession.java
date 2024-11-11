@@ -18,19 +18,17 @@
 
 package org.apache.cassandra.repair.consistent;
 
-import java.util.Objects;
-
 import com.google.common.base.Preconditions;
 
-import org.apache.cassandra.repair.SharedContext;
+import org.apache.cassandra.utils.FBUtilities;
 
 /**
  * Basically just a record of a local session. All of the local session logic is implemented in {@link LocalSessions}
  */
 public class LocalSession extends ConsistentSession
 {
-    public final long startedAt;
-    private volatile long lastUpdate;
+    public final int startedAt;
+    private volatile int lastUpdate;
 
     public LocalSession(Builder builder)
     {
@@ -39,19 +37,25 @@ public class LocalSession extends ConsistentSession
         this.lastUpdate = builder.lastUpdate;
     }
 
-    public long getStartedAt()
+    public boolean isCompleted()
+    {
+        State s = getState();
+        return s == State.FINALIZED || s == State.FAILED;
+    }
+
+    public int getStartedAt()
     {
         return startedAt;
     }
 
-    public long getLastUpdate()
+    public int getLastUpdate()
     {
         return lastUpdate;
     }
 
     public void setLastUpdate()
     {
-        lastUpdate = ctx.clock().nowInSeconds();
+        lastUpdate = FBUtilities.nowInSeconds();
     }
 
     public boolean equals(Object o)
@@ -68,7 +72,10 @@ public class LocalSession extends ConsistentSession
 
     public int hashCode()
     {
-        return Objects.hash(super.hashCode(), startedAt, lastUpdate);
+        int result = super.hashCode();
+        result = 31 * result + startedAt;
+        result = 31 * result + lastUpdate;
+        return result;
     }
 
     public String toString()
@@ -88,21 +95,16 @@ public class LocalSession extends ConsistentSession
 
     public static class Builder extends AbstractBuilder
     {
-        private long startedAt;
-        private long lastUpdate;
+        private int startedAt;
+        private int lastUpdate;
 
-        public Builder(SharedContext ctx)
-        {
-            super(ctx);
-        }
-
-        public Builder withStartedAt(long startedAt)
+        public Builder withStartedAt(int startedAt)
         {
             this.startedAt = startedAt;
             return this;
         }
 
-        public Builder withLastUpdate(long lastUpdate)
+        public Builder withLastUpdate(int lastUpdate)
         {
             this.lastUpdate = lastUpdate;
             return this;
@@ -122,8 +124,8 @@ public class LocalSession extends ConsistentSession
         }
     }
 
-    public static Builder builder(SharedContext ctx)
+    public static Builder builder()
     {
-        return new Builder(ctx);
+        return new Builder();
     }
 }

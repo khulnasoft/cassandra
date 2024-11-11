@@ -29,41 +29,44 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 
-import org.apache.cassandra.index.sai.disk.format.IndexComponent;
+import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.index.sai.IndexContext;
+import org.apache.cassandra.index.sai.SAITester;
+import org.apache.cassandra.index.sai.disk.format.IndexComponents;
+import org.apache.cassandra.index.sai.disk.format.IndexComponentType;
 import org.apache.cassandra.index.sai.disk.format.IndexDescriptor;
-import org.apache.cassandra.index.sai.utils.IndexIdentifier;
+import org.apache.cassandra.index.sai.disk.io.IndexOutput;
 import org.apache.cassandra.index.sai.disk.io.IndexOutputWriter;
-import org.apache.cassandra.index.sai.utils.SAIRandomizedTester;
+import org.apache.cassandra.index.sai.utils.SaiRandomizedTest;
 import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.index.CorruptIndexException;
-import org.apache.lucene.store.DataInput;
+import org.apache.lucene.store.IndexInput;
 
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
-
-public class MetadataTest extends SAIRandomizedTester
+public class MetadataTest extends SaiRandomizedTest
 {
     @Rule
     public final ExpectedException expectedException = ExpectedException.none();
 
     private IndexDescriptor indexDescriptor;
-    private IndexIdentifier indexIdentifier;
+    private String index;
+    private IndexContext indexContext;
 
     @Before
     public void setup() throws Throwable
     {
         indexDescriptor = newIndexDescriptor();
-        indexIdentifier = createIndexIdentifier("test", "test", newIndex());
+        index = newIndex();
+        indexContext = SAITester.createIndexContext(index, UTF8Type.instance);
     }
 
     @Test
     public void shouldReadWrittenMetadata() throws Exception
     {
         final Map<String, byte[]> data = new HashMap<>();
-        try (MetadataWriter writer = new MetadataWriter(indexDescriptor.openPerIndexOutput(IndexComponent.META, indexIdentifier)))
+        IndexComponents.ForWrite components = indexDescriptor.newPerIndexComponentsForWrite(indexContext);
+        try (MetadataWriter writer = new MetadataWriter(components))
         {
             int num = nextInt(1, 50);
             for (int x = 0; x < num; x++)
@@ -73,19 +76,22 @@ public class MetadataTest extends SAIRandomizedTester
                 String name = UUID.randomUUID().toString();
 
                 data.put(name, bytes);
-                try (MetadataWriter.Builder builder = writer.builder(name))
+                try (IndexOutput builder = writer.builder(name))
                 {
                     builder.writeBytes(bytes, 0, bytes.length);
                 }
             }
         }
-        MetadataSource reader = MetadataSource.loadColumnMetadata(indexDescriptor, indexIdentifier);
+        components.markComplete();
+
+        MetadataSource reader = MetadataSource.loadMetadata(indexDescriptor.perIndexComponents(indexContext));
 
         for (Map.Entry<String, byte[]> entry : data.entrySet())
         {
-            final DataInput input = reader.get(entry.getKey());
+            final IndexInput input = reader.get(entry.getKey());
             assertNotNull(input);
             final byte[] expectedBytes = entry.getValue();
+            assertEquals(expectedBytes.length, input.length());
             final byte[] actualBytes = new byte[expectedBytes.length];
             input.readBytes(actualBytes, 0, expectedBytes.length);
             assertArrayEquals(expectedBytes, actualBytes);
@@ -95,7 +101,8 @@ public class MetadataTest extends SAIRandomizedTester
     @Test
     public void shouldFailWhenFileHasNoHeader() throws IOException
     {
-        try (IndexOutputWriter out = indexDescriptor.openPerIndexOutput(IndexComponent.META, indexIdentifier))
+        IndexComponents.ForWrite components = indexDescriptor.newPerIndexComponentsForWrite(indexContext);
+        try (IndexOutputWriter out = components.addOrGet(IndexComponentType.META).openOutput())
         {
             final byte[] bytes = nextBytes(13, 29);
             out.writeBytes(bytes, bytes.length);
@@ -103,82 +110,81 @@ public class MetadataTest extends SAIRandomizedTester
 
         expectedException.expect(CorruptIndexException.class);
         expectedException.expectMessage("codec header mismatch");
-        MetadataSource.loadColumnMetadata(indexDescriptor, indexIdentifier);
+        MetadataSource.loadMetadata(components);
     }
 
     @Test
     public void shouldFailCrcCheckWhenFileIsTruncated() throws IOException
     {
-        try (IndexOutputWriter output = writeRandomBytes())
+        IndexComponents.ForWrite components = indexDescriptor.newPerIndexComponentsForWrite(indexContext);
+        final IndexOutputWriter output = writeRandomBytes(components);
+
+        final File indexFile = output.getFile();
+        final long length = indexFile.length();
+        assertTrue(length > 0);
+        final File renamed = new File(temporaryFolder.newFile());
+        indexFile.move(renamed);
+        assertFalse(output.getFile().exists());
+
+        try (FileOutputStream outputStream = new FileOutputStream(output.getFile().toJavaIOFile());
+             RandomAccessFile input = new RandomAccessFile(renamed.toJavaIOFile(), "r"))
         {
-            File indexFile = output.getFile();
-            long length = indexFile.length();
-            assertTrue(length > 0);
-            File renamed = new File(temporaryFolder.newFile());
-            indexFile.move(renamed);
-            assertFalse(output.getFile().exists());
-
-            try (FileOutputStream outputStream = new FileOutputStream(output.getFile().toJavaIOFile());
-                 RandomAccessFile input = new RandomAccessFile(renamed.toJavaIOFile(), "r"))
-            {
-                // skip last byte when copying
-                copyTo(input, outputStream, Math.toIntExact(length - 1));
-            }
-
-            expectedException.expect(CorruptIndexException.class);
-            expectedException.expectMessage("misplaced codec footer (file truncated?)");
-            MetadataSource.loadColumnMetadata(indexDescriptor, indexIdentifier);
+            // skip last byte when copying
+            FileUtils.copyTo(input, outputStream, Math.toIntExact(length - 1));
         }
+
+        expectedException.expect(CorruptIndexException.class);
+        expectedException.expectMessage("misplaced codec footer (file truncated?)");
+        MetadataSource.loadMetadata(components);
     }
 
     @Test
     public void shouldFailCrcCheckWhenFileIsCorrupted() throws IOException
     {
-        try (IndexOutputWriter output = writeRandomBytes())
+        IndexComponents.ForWrite components = indexDescriptor.newPerIndexComponentsForWrite(indexContext);
+        final IndexOutputWriter output = writeRandomBytes(components);
+
+        final File indexFile = output.getFile();
+        final long length = indexFile.length();
+        assertTrue(length > 0);
+        final File renamed = new File(temporaryFolder.newFile());
+        indexFile.move(renamed);
+        assertFalse(output.getFile().exists());
+
+        try (FileOutputStream outputStream = new FileOutputStream(output.getFile().toJavaIOFile());
+             RandomAccessFile file = new RandomAccessFile(renamed.toJavaIOFile(), "r"))
         {
-            File indexFile = output.getFile();
-            long length = indexFile.length();
-            assertTrue(length > 0);
-            File renamed = new File(temporaryFolder.newFile());
-            indexFile.move(renamed);
-            assertFalse(output.getFile().exists());
+            // copy most of the file untouched
+            final byte[] buffer = new byte[Math.toIntExact(length - 1 - CodecUtil.footerLength())];
+            file.read(buffer);
+            outputStream.write(buffer);
 
-            try (FileOutputStream outputStream = new FileOutputStream(output.getFile().toJavaIOFile());
-                 RandomAccessFile file = new RandomAccessFile(renamed.toJavaIOFile(), "r"))
-            {
-                // copy most of the file untouched
-                final byte[] buffer = new byte[Math.toIntExact(length - 1 - CodecUtil.footerLength())];
-                file.read(buffer);
-                outputStream.write(buffer);
+            // corrupt a single byte at the end
+            final byte last = (byte) file.read();
+            outputStream.write(~last);
 
-                // corrupt a single byte at the end
-                final byte last = (byte) file.read();
-                outputStream.write(~last);
-
-                // copy footer
-                final byte[] footer = new byte[CodecUtil.footerLength()];
-                file.read(footer);
-                outputStream.write(footer);
-            }
-
-            expectedException.expect(CorruptIndexException.class);
-            expectedException.expectMessage("checksum failed");
-            MetadataSource.loadColumnMetadata(indexDescriptor, indexIdentifier);
+            // copy footer
+            final byte[] footer = new byte[CodecUtil.footerLength()];
+            file.read(footer);
+            outputStream.write(footer);
         }
+
+        expectedException.expect(CorruptIndexException.class);
+        expectedException.expectMessage("checksum failed");
+        MetadataSource.loadMetadata(components);
     }
 
-    private IndexOutputWriter writeRandomBytes() throws IOException
+    private IndexOutputWriter writeRandomBytes(IndexComponents.ForWrite components) throws IOException
     {
-        final IndexOutputWriter output = indexDescriptor.openPerIndexOutput(IndexComponent.META, indexIdentifier);
-        try (MetadataWriter writer = new MetadataWriter(output))
+        try (MetadataWriter writer = new MetadataWriter(components))
         {
             byte[] bytes = nextBytes(11, 1024);
 
-            try (MetadataWriter.Builder builder = writer.builder("name"))
+            try (IndexOutput builder = writer.builder("name"))
             {
                 builder.writeBytes(bytes, 0, bytes.length);
             }
         }
-        return output;
+        return components.addOrGet(components.metadataComponent()).openOutput();
     }
 }

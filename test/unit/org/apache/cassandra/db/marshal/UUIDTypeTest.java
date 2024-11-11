@@ -21,7 +21,6 @@ package org.apache.cassandra.db.marshal;
  *
  */
 
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 import static org.junit.Assert.assertEquals;
 
 import java.nio.ByteBuffer;
@@ -56,8 +55,8 @@ public class UUIDTypeTest
     public void testRandomCompare()
     {
 
-        UUID t1 = nextTimeUUID().asUUID();
-        UUID t2 = nextTimeUUID().asUUID();
+        UUID t1 = UUIDGen.getTimeUUID();
+        UUID t2 = UUIDGen.getTimeUUID();
 
         testCompare(null, t2, -1);
         testCompare(t1, null, 1);
@@ -180,7 +179,7 @@ public class UUIDTypeTest
     @Test
     public void testTimeEquality()
     {
-        UUID a = nextTimeUUID().asUUID();
+        UUID a = UUIDGen.getTimeUUID();
         UUID b = new UUID(a.getMostSignificantBits(),
                 a.getLeastSignificantBits());
 
@@ -190,9 +189,9 @@ public class UUIDTypeTest
     @Test
     public void testTimeSmaller()
     {
-        UUID a = nextTimeUUID().asUUID();
-        UUID b = nextTimeUUID().asUUID();
-        UUID c = nextTimeUUID().asUUID();
+        UUID a = UUIDGen.getTimeUUID();
+        UUID b = UUIDGen.getTimeUUID();
+        UUID c = UUIDGen.getTimeUUID();
 
         assert uuidType.compare(bytebuffer(a), bytebuffer(b)) < 0;
         assert uuidType.compare(bytebuffer(b), bytebuffer(c)) < 0;
@@ -202,9 +201,9 @@ public class UUIDTypeTest
     @Test
     public void testTimeBigger()
     {
-        UUID a = nextTimeUUID().asUUID();
-        UUID b = nextTimeUUID().asUUID();
-        UUID c = nextTimeUUID().asUUID();
+        UUID a = UUIDGen.getTimeUUID();
+        UUID b = UUIDGen.getTimeUUID();
+        UUID c = UUIDGen.getTimeUUID();
 
         assert uuidType.compare(bytebuffer(c), bytebuffer(b)) > 0;
         assert uuidType.compare(bytebuffer(b), bytebuffer(a)) > 0;

@@ -17,8 +17,8 @@
 #
 
 %define __jar_repack %{nil}
-# Turn off the brp-python-bytecompile script and mangling shebangs for Python scripts
-%global __os_install_post %(echo '%{__os_install_post}' | sed -e 's!/usr/lib[^[:space:]]*/brp-python-bytecompile[[:space:]].*$!!g' -e 's!/usr/lib[^[:space:]]*/brp-mangle-shebangs[[:space:]].*$!!g')
+# Turn off the brp-python-bytecompile script
+%global __os_install_post %(echo '%{__os_install_post}' | sed -e 's!/usr/lib[^[:space:]]*/brp-python-bytecompile[[:space:]].*$!!g')
 
 # rpmbuild should not barf when it spots we ship
 # binary executable files in our 'noarch' package
@@ -31,9 +31,6 @@
 # input of ~alphaN, ~betaN, ~rcN package versions need to retain upstream '-alphaN, etc' version for sources
 %define upstream_version %(echo %{version} | sed -r 's/~/-/g')
 %define relname apache-cassandra-%{upstream_version}
-
-# default DIST_DIR to build
-%global _get_dist_dir %(echo "${DIST_DIR:-build}")
 
 Name:          cassandra
 Version:       %{version}
@@ -49,7 +46,7 @@ BuildRoot:     %{_tmppath}/%{relname}root-%(%{__id_u} -n)
 BuildRequires: ant >= 1.9
 BuildRequires: ant-junit >= 1.9
 
-Requires:      (java-11-headless or java-17-headless)
+Requires:      (jre-1.8.0 or jre-11)
 Requires:      python(abi) >= 3.6
 Requires:      procps-ng >= 3.3
 Requires(pre): user(cassandra)
@@ -72,7 +69,7 @@ Cassandra is a distributed (peer-to-peer) system for the management and storage 
 %build
 export LANG=en_US.UTF-8
 export JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"
-ant jar -Dversion=%{upstream_version} -Dno-checkstyle=true -Drat.skip=true -Dant.gen-doc.skip=true
+ant clean jar -Dversion=%{upstream_version}
 
 %install
 %{__rm} -rf %{buildroot}
@@ -85,7 +82,10 @@ mkdir -p %{buildroot}/%{_sysconfdir}/security/limits.d
 mkdir -p %{buildroot}/%{_sysconfdir}/default
 mkdir -p %{buildroot}/usr/sbin
 mkdir -p %{buildroot}/usr/bin
-mkdir -p %{buildroot}/var/lib/%{username}
+mkdir -p %{buildroot}/var/lib/%{username}/commitlog
+mkdir -p %{buildroot}/var/lib/%{username}/data
+mkdir -p %{buildroot}/var/lib/%{username}/saved_caches
+mkdir -p %{buildroot}/var/lib/%{username}/hints
 mkdir -p %{buildroot}/var/run/%{username}
 mkdir -p %{buildroot}/var/log/%{username}
 ( cd pylib && %{__python} setup.py install --no-compile --root %{buildroot}; )
@@ -97,9 +97,9 @@ patch -p1 < debian/patches/cassandra_logdir_fix.diff
 sed -i 's/^# hints_directory:/hints_directory:/' conf/cassandra.yaml
 
 # remove other files not being installed
-rm -f bin/stop-server
 rm -f bin/*.orig
 rm -f bin/cassandra.in.sh
+rm -f lib/sigar-bin/*winnt*  # strip segfaults on dll..
 rm -f tools/bin/cassandra.in.sh
 
 # copy default configs
@@ -115,10 +115,10 @@ cp -p redhat/default %{buildroot}/%{_sysconfdir}/default/%{username}
 cp -pr lib/* %{buildroot}/usr/share/%{username}/lib/
 
 # copy stress jar
-cp -p %{_get_dist_dir}/tools/lib/stress.jar %{buildroot}/usr/share/%{username}/
+cp -p build/tools/lib/stress.jar %{buildroot}/usr/share/%{username}/
 
 # copy fqltool jar
-cp -p %{_get_dist_dir}/tools/lib/fqltool.jar %{buildroot}/usr/share/%{username}/
+cp -p build/tools/lib/fqltool.jar %{buildroot}/usr/share/%{username}/
 
 # copy binaries
 mv bin/cassandra %{buildroot}/usr/sbin/
@@ -126,7 +126,7 @@ cp -p bin/* %{buildroot}/usr/bin/
 cp -p tools/bin/* %{buildroot}/usr/bin/
 
 # copy cassandra jar
-cp %{_get_dist_dir}/apache-cassandra-%{upstream_version}.jar %{buildroot}/usr/share/%{username}/
+cp build/apache-cassandra-%{upstream_version}.jar %{buildroot}/usr/share/%{username}/
 
 %clean
 %{__rm} -rf %{buildroot}
@@ -154,13 +154,14 @@ exit 0
 %attr(755,root,root) %{_bindir}/sstableupgrade
 %attr(755,root,root) %{_bindir}/sstableutil
 %attr(755,root,root) %{_bindir}/sstableverify
+%attr(755,root,root) %{_bindir}/stop-server
 %attr(755,root,root) %{_sbindir}/cassandra
 %attr(755,root,root) /%{_sysconfdir}/rc.d/init.d/%{username}
 %{_sysconfdir}/default/%{username}
 %{_sysconfdir}/security/limits.d/%{username}.conf
 /usr/share/%{username}*
 %config(noreplace) /%{_sysconfdir}/%{username}
-%attr(755,%{username},%{username}) %config(noreplace) /var/lib/%{username}
+%attr(755,%{username},%{username}) %config(noreplace) /var/lib/%{username}/*
 %attr(755,%{username},%{username}) /var/log/%{username}*
 %attr(755,%{username},%{username}) /var/run/%{username}*
 %{python_sitelib}/cqlshlib/
@@ -190,6 +191,7 @@ This package contains extra tools for working with Cassandra clusters.
 
 %files tools
 %attr(755,root,root) %{_bindir}/sstabledump
+%attr(755,root,root) %{_bindir}/cassandra-stressd
 %attr(755,root,root) %{_bindir}/compaction-stress
 %attr(755,root,root) %{_bindir}/sstableexpiredblockers
 %attr(755,root,root) %{_bindir}/sstablelevelreset
@@ -197,20 +199,13 @@ This package contains extra tools for working with Cassandra clusters.
 %attr(755,root,root) %{_bindir}/sstableofflinerelevel
 %attr(755,root,root) %{_bindir}/sstablerepairedset
 %attr(755,root,root) %{_bindir}/sstablesplit
-%attr(755,root,root) %{_bindir}/sstablepartitions
 %attr(755,root,root) %{_bindir}/auditlogviewer
 %attr(755,root,root) %{_bindir}/jmxtool
 %attr(755,root,root) %{_bindir}/fqltool
 %attr(755,root,root) %{_bindir}/generatetokens
-%attr(755,root,root) %{_bindir}/hash_password
-%attr(755,root,root) %{_bindir}/addtocmstool
 
 
 %changelog
-# packaging changes, not software changes
-* Thu May 04 2023 Mick Semb Wever <mck@apache.org>
-- 5.0
-- RPM packaging brought in-tree. CASSANDRA-18133
 * Mon Dec 05 2016 Michael Shuler <mshuler@apache.org>
 - 2.1.17, 2.2.9, 3.0.11, 3.10
 - Reintroduce RPM packaging

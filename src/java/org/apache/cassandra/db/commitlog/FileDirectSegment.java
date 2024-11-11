@@ -19,10 +19,7 @@ package org.apache.cassandra.db.commitlog;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
-import java.nio.file.Path;
 
-import net.openhft.chronicle.core.util.ThrowingFunction;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.utils.SyncUtil;
 
@@ -34,9 +31,9 @@ public abstract class FileDirectSegment extends CommitLogSegment
 {
     volatile long lastWrittenPos = 0;
 
-    FileDirectSegment(AbstractCommitLogSegmentManager manager, ThrowingFunction<Path, FileChannel, IOException> channelFactory)
+    FileDirectSegment(CommitLog commitLog, AbstractCommitLogSegmentManager manager)
     {
-        super(manager, channelFactory);
+        super(commitLog, manager);
     }
 
     @Override

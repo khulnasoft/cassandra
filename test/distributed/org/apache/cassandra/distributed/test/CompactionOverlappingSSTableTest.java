@@ -18,13 +18,10 @@
 
 package org.apache.cassandra.distributed.test;
 
-import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
@@ -50,7 +47,7 @@ import static org.junit.Assert.assertEquals;
 public class CompactionOverlappingSSTableTest extends TestBaseImpl
 {
     @Test
-    public void partialCompactionOverlappingTest() throws IOException, TimeoutException
+    public void partialCompactionOverlappingTest() throws IOException
     {
 
         try (Cluster cluster = init(builder().withNodes(1)
@@ -98,13 +95,13 @@ public class CompactionOverlappingSSTableTest extends TestBaseImpl
         public static void install(ClassLoader cl, Integer i)
         {
             new ByteBuddy().rebase(Directories.class)
-                           .method(named("hasDiskSpaceForCompactionsAndStreams").and(takesArguments(2)))
+                           .method(named("hasAvailableDiskSpace").and(takesArguments(2)))
                            .intercept(MethodDelegation.to(BB.class))
                            .make()
                            .load(cl, ClassLoadingStrategy.Default.INJECTION);
         }
 
-        public static boolean hasDiskSpaceForCompactionsAndStreams(Map<File,Long> ignore1, Map<File,Long> ignore2)
+        public static boolean hasAvailableDiskSpace(long ignore1, long ignore2)
         {
             if (enabled.get())
             {

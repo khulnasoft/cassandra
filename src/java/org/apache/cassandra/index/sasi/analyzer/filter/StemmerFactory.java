@@ -22,29 +22,18 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.google.common.util.concurrent.MoreExecutors;
+
+import org.tartarus.snowball.SnowballProgram;
+import org.tartarus.snowball.SnowballStemmer;
+import org.tartarus.snowball.ext.*;
 
 import com.github.benmanes.caffeine.cache.CacheLoader;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
-import org.apache.cassandra.concurrent.ImmediateExecutor;
-import org.tartarus.snowball.SnowballStemmer;
-import org.tartarus.snowball.ext.DanishStemmer;
-import org.tartarus.snowball.ext.DutchStemmer;
-import org.tartarus.snowball.ext.EnglishStemmer;
-import org.tartarus.snowball.ext.FinnishStemmer;
-import org.tartarus.snowball.ext.FrenchStemmer;
-import org.tartarus.snowball.ext.GermanStemmer;
-import org.tartarus.snowball.ext.HungarianStemmer;
-import org.tartarus.snowball.ext.ItalianStemmer;
-import org.tartarus.snowball.ext.NorwegianStemmer;
-import org.tartarus.snowball.ext.PortugueseStemmer;
-import org.tartarus.snowball.ext.RomanianStemmer;
-import org.tartarus.snowball.ext.RussianStemmer;
-import org.tartarus.snowball.ext.SpanishStemmer;
-import org.tartarus.snowball.ext.SwedishStemmer;
-import org.tartarus.snowball.ext.TurkishStemmer;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Returns a SnowballStemmer instance appropriate for
@@ -54,7 +43,7 @@ public class StemmerFactory
 {
     private static final Logger logger = LoggerFactory.getLogger(StemmerFactory.class);
     private static final LoadingCache<Class, Constructor<?>> STEMMER_CONSTRUCTOR_CACHE = Caffeine.newBuilder()
-            .executor(ImmediateExecutor.INSTANCE)
+            .executor(MoreExecutors.directExecutor())
             .build(new CacheLoader<Class, Constructor<?>>()
             {
                 public Constructor<?> load(Class aClass) throws Exception

@@ -37,8 +37,7 @@ public class StreamingMetrics
 
     private static final ConcurrentMap<InetAddressAndPort, StreamingMetrics> instances = new NonBlockingHashMap<>();
 
-    /** @deprecated See CASSANDRA-11174 */
-    @Deprecated(since = "4.0")
+    @Deprecated
     public static final Counter activeStreamsOutbound = Metrics.counter(DefaultNameFactory.createMetricName(TYPE_NAME, "ActiveOutboundStreams", null));
     public static final Counter totalIncomingBytes = Metrics.counter(DefaultNameFactory.createMetricName(TYPE_NAME, "TotalIncomingBytes", null));
     public static final Counter totalOutgoingBytes = Metrics.counter(DefaultNameFactory.createMetricName(TYPE_NAME, "TotalOutgoingBytes", null));
@@ -48,8 +47,6 @@ public class StreamingMetrics
     public final Counter outgoingBytes;
     /* Measures the time taken for processing the incoming stream message after being deserialized, including the time to flush to disk. */
     public final Timer incomingProcessTime;
-    private final Counter entireSSTablesStreamedIn;
-    private final Counter partialSSTablesStreamedIn;
 
     public static StreamingMetrics get(InetAddressAndPort ip)
     {
@@ -78,17 +75,9 @@ public class StreamingMetrics
 
     public StreamingMetrics(final InetAddressAndPort peer)
     {
-        MetricNameFactory factory = new DefaultNameFactory(TYPE_NAME, peer.toString().replace(':', '.'));
+        MetricNameFactory factory = new DefaultNameFactory("Streaming", peer.toString().replace(':', '.'));
         incomingBytes = Metrics.counter(factory.createMetricName("IncomingBytes"));
         outgoingBytes= Metrics.counter(factory.createMetricName("OutgoingBytes"));
         incomingProcessTime = Metrics.timer(factory.createMetricName("IncomingProcessTime"));
-
-        entireSSTablesStreamedIn = Metrics.counter(factory.createMetricName("EntireSSTablesStreamedIn"));
-        partialSSTablesStreamedIn = Metrics.counter(factory.createMetricName("PartialSSTablesStreamedIn"));
-    }
-
-    public void countStreamedIn(boolean isEntireSSTable)
-    {
-        (isEntireSSTable ? entireSSTablesStreamedIn : partialSSTablesStreamedIn).inc();
     }
 }

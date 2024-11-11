@@ -17,136 +17,98 @@
  */
 package org.apache.cassandra.index.sai.iterators;
 
+import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 
-import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Iterables;
 
 import org.apache.cassandra.index.sai.utils.PrimaryKey;
 import org.apache.cassandra.io.util.FileUtils;
 
 /**
- * Range Union Iterator is used to return sorted stream of elements from multiple RangeIterator instances.
+ * Range Union Iterator is used to return sorted stream of elements from multiple KeyRangeIterator instances.
  */
+@SuppressWarnings("resource")
 public class KeyRangeUnionIterator extends KeyRangeIterator
 {
-    private final List<KeyRangeIterator> ranges;
-    private final List<KeyRangeIterator> candidates;
+    public final List<KeyRangeIterator> ranges;
 
-    private KeyRangeUnionIterator(Builder.Statistics statistics, List<KeyRangeIterator> ranges, Runnable onClose)
+    private KeyRangeUnionIterator(Builder.Statistics statistics, List<KeyRangeIterator> ranges)
     {
-        super(statistics, onClose);
-        this.ranges = ranges;
-        this.candidates = new ArrayList<>(ranges.size());
+        super(statistics);
+        this.ranges = new ArrayList<>(ranges);
     }
 
-    @Override
     public PrimaryKey computeNext()
     {
-        // the design is to find the next best value from all the ranges,
-        // and then advance all the ranges that have the same value.
-        candidates.clear();
-        PrimaryKey candidateKey = null;
+        // Keep track of the next best candidate. If another candidate has the same value, advance it to prevent
+        // duplicate results. This design avoids unnecessary list operations.
+        KeyRangeIterator candidate = null;
         for (KeyRangeIterator range : ranges)
         {
             if (!range.hasNext())
                 continue;
 
-            if (candidateKey == null)
+            if (candidate == null)
             {
-                candidateKey = range.peek();
-                candidates.add(range);
+                candidate = range;
             }
             else
             {
-                PrimaryKey peeked = range.peek();
-    
-                int cmp = candidateKey.compareTo(peeked);
-
+                int cmp = candidate.peek().compareTo(range.peek());
                 if (cmp == 0)
-                {
-                    // Replace any existing candidate key if this one is STATIC:
-                    if (peeked.kind() == PrimaryKey.Kind.STATIC)
-                        candidateKey = peeked;
-
-                    candidates.add(range);
-                }
+                    range.next();
                 else if (cmp > 0)
-                {
-                    // we found a new best candidate, throw away the old ones
-                    candidates.clear();
-                    candidateKey = peeked;
-                    candidates.add(range);
-                }
-                // else, existing candidate is less than the next in this range
+                    candidate = range;
             }
         }
-        if (candidates.isEmpty())
+        if (candidate == null)
             return endOfData();
-
-        for (KeyRangeIterator candidate : candidates)
-        {
-            do
-            {
-                // Consume the remaining values equal to the candidate key:
-                candidate.next();
-            }
-            while (candidate.hasNext() && candidate.peek().compareTo(candidateKey) == 0);
-        }
-
-        return candidateKey;
+        return candidate.next();
     }
 
-    @Override
     protected void performSkipTo(PrimaryKey nextKey)
     {
+        // Resist the temptation to call range.hasNext before skipTo: this is a pessimisation, hasNext will invoke
+        // computeNext under the hood, which is an expensive operation to produce a value that we plan to throw away.
+        // Instead, it is the responsibility of the child iterators to make skipTo fast when the iterator is exhausted.
         for (KeyRangeIterator range : ranges)
-        {
-            if (range.hasNext())
-                range.skipTo(nextKey);
-        }
+            range.skipTo(nextKey);
     }
 
-    @Override
-    public void close()
+    public void close() throws IOException
     {
-        super.close();
-
         // Due to lazy key fetching, we cannot close iterator immediately
-        FileUtils.closeQuietly(ranges);
+        ranges.forEach(FileUtils::closeQuietly);
     }
 
     public static Builder builder(int size)
     {
-        return builder(size, () -> {});
+        return new Builder(size);
     }
 
-    public static Builder builder(int size, Runnable onClose)
+    public static Builder builder()
     {
-        return new Builder(size, onClose);
+        return builder(10);
     }
 
-    public static KeyRangeIterator build(List<KeyRangeIterator> keys, Runnable onClose)
+    public static KeyRangeIterator build(Iterable<KeyRangeIterator> tokens)
     {
-        return new Builder(keys.size(), onClose).add(keys).build();
-    }
-    public static KeyRangeIterator build(List<KeyRangeIterator> keys)
-    {
-        return build(keys, () -> {});
+        return KeyRangeUnionIterator.builder(Iterables.size(tokens)).add(tokens).build();
     }
 
-    @VisibleForTesting
     public static class Builder extends KeyRangeIterator.Builder
     {
-        protected final List<KeyRangeIterator> rangeIterators;
+        protected List<KeyRangeIterator> rangeIterators;
 
-        Builder(int size, Runnable onClose)
+        public Builder(int size)
         {
-            super(new UnionStatistics(), onClose);
+            super(IteratorType.UNION);
             this.rangeIterators = new ArrayList<>(size);
         }
 
-        @Override
         public KeyRangeIterator.Builder add(KeyRangeIterator range)
         {
             if (range == null)
@@ -158,48 +120,52 @@ public class KeyRangeUnionIterator extends KeyRangeIterator
                 statistics.update(range);
             }
             else
-            {
                 FileUtils.closeQuietly(range);
-            }
 
             return this;
         }
 
         @Override
+        public KeyRangeIterator.Builder add(List<KeyRangeIterator> ranges)
+        {
+            if (ranges == null || ranges.isEmpty())
+                return this;
+
+            ranges.forEach(this::add);
+            return this;
+        }
+
+        public KeyRangeIterator.Builder add(Iterable<KeyRangeIterator> ranges)
+        {
+            if (ranges == null || Iterables.isEmpty(ranges))
+                return this;
+
+            ranges.forEach(this::add);
+            return this;
+        }
+
         public int rangeCount()
         {
             return rangeIterators.size();
         }
 
         @Override
-        public void cleanup()
+        public Collection<KeyRangeIterator> ranges()
         {
-            super.cleanup();
-            FileUtils.closeQuietly(rangeIterators);
+            return rangeIterators;
         }
 
-        @Override
         protected KeyRangeIterator buildIterator()
         {
-            if (rangeCount() == 1)
+            switch (rangeCount())
             {
-                KeyRangeIterator single = rangeIterators.get(0);
-                single.setOnClose(onClose);
-                return single;
+                case 1:
+                    return rangeIterators.get(0);
+
+                default:
+                    //TODO Need to test whether an initial sort improves things
+                    return new KeyRangeUnionIterator(statistics, rangeIterators);
             }
-
-            return new KeyRangeUnionIterator(statistics, rangeIterators, onClose);
-        }
-    }
-
-    private static class UnionStatistics extends KeyRangeIterator.Builder.Statistics
-    {
-        @Override
-        public void update(KeyRangeIterator range)
-        {
-            min = nullSafeMin(min, range.getMinimum());
-            max = nullSafeMax(max, range.getMaximum());
-            count += range.getMaxKeys();
         }
     }
 }

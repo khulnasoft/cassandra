@@ -46,7 +46,7 @@ import org.apache.cassandra.db.marshal.CompositeType;
 public class ViewUpdateGenerator
 {
     private final View view;
-    private final long nowInSec;
+    private final int nowInSec;
 
     private final TableMetadata baseMetadata;
     private final DecoratedKey baseDecoratedKey;
@@ -84,7 +84,7 @@ public class ViewUpdateGenerator
      * @param nowInSec the current time in seconds. Used to decide if data are live or not
      * and as base reference for new deletions.
      */
-    public ViewUpdateGenerator(View view, DecoratedKey basePartitionKey, long nowInSec)
+    public ViewUpdateGenerator(View view, DecoratedKey basePartitionKey, int nowInSec)
     {
         this.view = view;
         this.nowInSec = nowInSec;
@@ -566,14 +566,20 @@ public class ViewUpdateGenerator
             return;
 
         DecoratedKey partitionKey = makeCurrentPartitionKey();
+        PartitionUpdate.Builder update = updates.computeIfAbsent(partitionKey,
+                                                                 k -> builderFor(viewMetadata, partitionKey));
+        update.add(row);
+    }
+
+    private static PartitionUpdate.Builder builderFor(TableMetadata viewMetadata,
+                                                      DecoratedKey partitionKey)
+    {
         // We can't really know which columns of the view will be updated nor how many row will be updated for this key
         // so we rely on hopefully sane defaults.
-        PartitionUpdate.Builder update = updates.computeIfAbsent(partitionKey,
-                                                                 k -> new PartitionUpdate.Builder(viewMetadata,
-                                                                                                  partitionKey,
-                                                                                                  viewMetadata.regularAndStaticColumns(),
-                                                                                                  4));
-        update.add(row);
+        return viewMetadata.params.memtable.factory.partitionUpdateFactory().builder(viewMetadata,
+                                                                                     partitionKey,
+                                                                                     viewMetadata.regularAndStaticColumns(),
+                                                                                     4);
     }
 
     private DecoratedKey makeCurrentPartitionKey()

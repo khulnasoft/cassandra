@@ -19,30 +19,28 @@
 package org.apache.cassandra.db.marshal;
 
 import java.nio.ByteBuffer;
+import java.nio.FloatBuffer;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
-import javax.annotation.Nullable;
-
+import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.cql3.CQL3Type;
-import org.apache.cassandra.cql3.terms.MultiElements;
-import org.apache.cassandra.cql3.terms.Term;
+import org.apache.cassandra.cql3.Json;
+import org.apache.cassandra.cql3.Term;
+import org.apache.cassandra.cql3.Vectors;
 import org.apache.cassandra.db.TypeSizes;
-import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.serializers.TypeSerializer;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.JsonUtils;
+import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 import org.apache.cassandra.utils.bytecomparable.ByteSource;
 
-public final class VectorType<T> extends MultiElementType<List<T>>
+public final class VectorType<T> extends AbstractType<List<T>>
 {
     private static class Key
     {
@@ -75,7 +73,7 @@ public final class VectorType<T> extends MultiElementType<List<T>>
             return Objects.hash(type, dimension);
         }
     }
-    @SuppressWarnings("rawtypes")
+
     private static final ConcurrentHashMap<Key, VectorType> instances = new ConcurrentHashMap<>();
 
     public final AbstractType<T> elementType;
@@ -84,9 +82,16 @@ public final class VectorType<T> extends MultiElementType<List<T>>
     private final int valueLengthIfFixed;
     private final VectorSerializer serializer;
 
+    private static final boolean isVectorTypeAllowed = CassandraRelevantProperties.VECTOR_TYPE_ALLOWED.getBoolean();
+    private static final boolean isVectorTypeFloatOnly = CassandraRelevantProperties.VECTOR_FLOAT_ONLY.getBoolean();
+
     private VectorType(AbstractType<T> elementType, int dimension)
     {
         super(ComparisonType.CUSTOM);
+        if (!isVectorTypeAllowed)
+            throw new InvalidRequestException("vector type is not allowed");
+        if (isVectorTypeFloatOnly && !(elementType instanceof FloatType))
+            throw new InvalidRequestException(String.format("vectors may only use float. given %s", elementType.asCQL3Type()));
         if (dimension <= 0)
             throw new InvalidRequestException(String.format("vectors may only have positive dimensions; given %d", dimension));
         this.elementType = elementType;
@@ -100,17 +105,18 @@ public final class VectorType<T> extends MultiElementType<List<T>>
                           new VariableLengthSerializer();
     }
 
-    @SuppressWarnings("unchecked")
     public static <T> VectorType<T> getInstance(AbstractType<T> elements, int dimension)
     {
         Key key = new Key(elements, dimension);
         return instances.computeIfAbsent(key, Key::create);
     }
 
-    public static VectorType<?> getInstance(TypeParser parser)
+    public static <T> VectorType<T> getInstance(TypeParser parser)
     {
-        TypeParser.Vector v = parser.getVectorParameters();
-        return getInstance(v.type.freeze(), v.dimension);
+        Pair<AbstractType<?>, Integer> v = parser.getVectorParameters();
+
+        Key key = new Key(v.left, v.right);
+        return instances.computeIfAbsent(key, Key::create);
     }
 
     @Override
@@ -137,15 +143,14 @@ public final class VectorType<T> extends MultiElementType<List<T>>
         return serializer;
     }
 
-    @Override
-    public List<ByteBuffer> unpack(ByteBuffer buffer)
+    public List<ByteBuffer> split(ByteBuffer buffer)
     {
-        return unpack(buffer, ByteBufferAccessor.instance);
+        return split(buffer, ByteBufferAccessor.instance);
     }
 
-    public <V> List<V> unpack(V buffer, ValueAccessor<V> accessor)
+    public <V> List<V> split(V buffer, ValueAccessor<V> accessor)
     {
-        return getSerializer().unpack(buffer, accessor);
+        return getSerializer().split(buffer, accessor);
     }
 
     public float[] composeAsFloat(ByteBuffer input)
@@ -160,67 +165,24 @@ public final class VectorType<T> extends MultiElementType<List<T>>
 
         if (isNull(input, accessor))
             return null;
-
-        return accessor.toFloatArray(input, dimension);
-    }
-
-    public ByteBuffer decompose(T... values)
-    {
-        return decompose(Arrays.asList(values));
-    }
-
-    public ByteBuffer decomposeAsFloat(float[] value)
-    {
-        return decomposeAsFloat(ByteBufferAccessor.instance, value);
-    }
-
-    public <V> V decomposeAsFloat(ValueAccessor<V> accessor, float[] value)
-    {
-        if (value == null)
-            rejectNullOrEmptyValue();
-        if (!(elementType instanceof FloatType))
-            throw new IllegalStateException("Attempted to read as float, but element type is " + elementType.asCQL3Type());
-        if (value.length != dimension)
-            throw new IllegalArgumentException(String.format("Attempted to add float vector of dimension %d to %s", value.length, asCQL3Type()));
-        // TODO : should we use TypeSizes to be consistent with other code?  Its the same value at the end of the day...
-        V buffer = accessor.allocate(Float.BYTES * dimension);
+        float[] array = new float[dimension];
         int offset = 0;
         for (int i = 0; i < dimension; i++)
         {
-            accessor.putFloat(buffer, offset, value[i]);
-            offset+= Float.BYTES;
+            array[i] = accessor.getFloat(input, offset);
+            offset += Float.BYTES;
         }
-        return buffer;
+        return array;
     }
 
-    public ByteBuffer pack(List<ByteBuffer> elements)
+    public ByteBuffer decomposeRaw(List<ByteBuffer> elements)
     {
-        return pack(elements, ByteBufferAccessor.instance);
+        return decomposeRaw(elements, ByteBufferAccessor.instance);
     }
 
-    public <V> V pack(List<V> elements, ValueAccessor<V> accessor)
+    public <V> V decomposeRaw(List<V> elements, ValueAccessor<V> accessor)
     {
-        return getSerializer().pack(elements, accessor);
-    }
-
-    @Override
-    public List<ByteBuffer> filterSortAndValidateElements(List<ByteBuffer> buffers)
-    {
-        // We only filter and validate for this type.
-        if (buffers == null)
-            return null;
-
-        for (ByteBuffer buffer: buffers)
-        {
-            if (buffer == null || elementType.isNull(buffer))
-                throw new MarshalException("null is not supported inside vectors");
-
-            if (buffer == ByteBufferUtil.UNSET_BYTE_BUFFER )
-                throw new InvalidRequestException("unset is not supported inside vectors");
-
-            elementType.validate(buffer);
-        }
-        return buffers;
+        return getSerializer().serializeRaw(elements, accessor);
     }
 
     @Override
@@ -229,10 +191,10 @@ public final class VectorType<T> extends MultiElementType<List<T>>
         if (isNull(value, accessor))
             return null;
         ByteSource[] srcs = new ByteSource[dimension];
-        List<V> split = unpack(value, accessor);
+        List<V> split = split(value, accessor);
         for (int i = 0; i < dimension; i++)
             srcs[i] = elementType.asComparableBytes(accessor, split.get(i), version);
-        return ByteSource.withTerminatorMaybeLegacy(version, 0x00, srcs);
+        return ByteSource.withTerminator(version == ByteComparable.Version.LEGACY ? 0x00 : ByteSource.TERMINATOR, srcs);
     }
 
     @Override
@@ -250,7 +212,7 @@ public final class VectorType<T> extends MultiElementType<List<T>>
             buffers.add(elementType.fromComparableBytes(accessor, comparableBytes, version));
             separator = comparableBytes.next();
         }
-        return pack(buffers, accessor);
+        return decomposeRaw(buffers, accessor);
     }
 
     @Override
@@ -285,12 +247,6 @@ public final class VectorType<T> extends MultiElementType<List<T>>
     }
 
     @Override
-    public List<AbstractType<?>> subTypes()
-    {
-        return Collections.singletonList(elementType);
-    }
-
-    @Override
     public String toJSONString(ByteBuffer buffer, ProtocolVersion protocolVersion)
     {
         return toJSONString(buffer, ByteBufferAccessor.instance, protocolVersion);
@@ -301,7 +257,7 @@ public final class VectorType<T> extends MultiElementType<List<T>>
     {
         StringBuilder sb = new StringBuilder();
         sb.append('[');
-        List<V> split = unpack(value, accessor);
+        List<V> split = split(value, accessor);
         for (int i = 0; i < dimension; i++)
         {
             if (i > 0)
@@ -316,7 +272,7 @@ public final class VectorType<T> extends MultiElementType<List<T>>
     public Term fromJSONObject(Object parsed) throws MarshalException
     {
         if (parsed instanceof String)
-            parsed = JsonUtils.decodeJson((String) parsed);
+            parsed = Json.decodeJson((String) parsed);
 
         if (!(parsed instanceof List))
             throw new MarshalException(String.format(
@@ -333,7 +289,7 @@ public final class VectorType<T> extends MultiElementType<List<T>>
             terms.add(elementType.fromJSONObject(element));
         }
 
-        return new MultiElements.DelayedValue(this, terms);
+        return new Vectors.DelayedValue<>(this, terms);
     }
 
     @Override
@@ -352,15 +308,16 @@ public final class VectorType<T> extends MultiElementType<List<T>>
     }
 
     @Override
-    public String toString()
-    {
-        return toString(false);
-    }
-
-    @Override
     public String toString(boolean ignoreFreezing)
     {
-        return getClass().getName() + TypeParser.stringifyVectorParameters(elementType, ignoreFreezing, dimension);
+        StringBuilder sb = new StringBuilder();
+        sb.append(getClass().getName());
+        sb.append('(');
+        sb.append(elementType);
+        sb.append(", ");
+        sb.append(dimension);
+        sb.append(')');
+        return sb.toString();
     }
 
     private void check(List<?> values)
@@ -383,25 +340,20 @@ public final class VectorType<T> extends MultiElementType<List<T>>
         if (remaining > 0)
             throw new MarshalException("Unexpected " + remaining + " extraneous bytes after " + asCQL3Type() + " value");
     }
-    
+
     private static void rejectNullOrEmptyValue()
     {
         throw new MarshalException("Invalid empty vector value");
-    }
-
-    @Override
-    public ByteBuffer getMaskedValue()
-    {
-        List<ByteBuffer> values = Collections.nCopies(dimension, elementType.getMaskedValue());
-        return serializer.pack(values, ByteBufferAccessor.instance);
     }
 
     public abstract class VectorSerializer extends TypeSerializer<List<T>>
     {
         public abstract <VL, VR> int compareCustom(VL left, ValueAccessor<VL> accessorL, VR right, ValueAccessor<VR> accessorR);
 
-        public abstract <V> List<V> unpack(V buffer, ValueAccessor<V> accessor);
-        public abstract <V> V pack(List<V> elements, ValueAccessor<V> accessor);
+        public abstract <V> List<V> split(V buffer, ValueAccessor<V> accessor);
+        public abstract <V> V serializeRaw(List<V> elements, ValueAccessor<V> accessor);
+        public abstract float[] deserializeFloatArray(ByteBuffer input);
+        public abstract ByteBuffer serializeFloatArray(float[] value);
 
         @Override
         public String toString(List<T> value)
@@ -427,13 +379,6 @@ public final class VectorType<T> extends MultiElementType<List<T>>
         {
             return (Class) List.class;
         }
-
-        @Override
-        public <V> boolean isNull(@Nullable V buffer, ValueAccessor<V> accessor)
-        {
-            // we don't allow empty vectors, so we can just check for null
-            return buffer == null;
-        }
     }
 
     private class FixedLengthSerializer extends VectorSerializer
@@ -448,6 +393,8 @@ public final class VectorType<T> extends MultiElementType<List<T>>
         {
             if (elementType.isByteOrderComparable)
                 return ValueAccessor.compare(left, accessorL, right, accessorR);
+            if (accessorL.isEmpty(left) || accessorR.isEmpty(right))
+                return Boolean.compare(accessorR.isEmpty(right), accessorL.isEmpty(left));
             int offset = 0;
             int elementLength = elementType.valueLengthIfFixed();
             for (int i = 0; i < dimension; i++)
@@ -464,18 +411,13 @@ public final class VectorType<T> extends MultiElementType<List<T>>
         }
 
         @Override
-        public <V> List<V> unpack(V buffer, ValueAccessor<V> accessor)
+        public <V> List<V> split(V buffer, ValueAccessor<V> accessor)
         {
-            if (isNull(buffer, accessor))
-                return null;
             List<V> result = new ArrayList<>(dimension);
             int offset = 0;
             int elementLength = elementType.valueLengthIfFixed();
             for (int i = 0; i < dimension; i++)
             {
-                if (accessor.sizeFromOffset(buffer, offset) < elementLength)
-                    throw new MarshalException(String.format("Not enough bytes to read a vector<%s, %d>", elementType.asCQL3Type(), dimension));
-
                 V bb = accessor.slice(buffer, offset, elementLength);
                 offset += elementLength;
                 elementSerializer.validate(bb, accessor);
@@ -487,7 +429,7 @@ public final class VectorType<T> extends MultiElementType<List<T>>
         }
 
         @Override
-        public <V> V pack(List<V> value, ValueAccessor<V> accessor)
+        public <V> V serializeRaw(List<V> value, ValueAccessor<V> accessor)
         {
             if (value == null)
                 rejectNullOrEmptyValue();
@@ -538,6 +480,34 @@ public final class VectorType<T> extends MultiElementType<List<T>>
         }
 
         @Override
+        public float[] deserializeFloatArray(ByteBuffer input)
+        {
+            if (input == null || input.remaining() == 0)
+                return null;
+
+            FloatBuffer floatBuffer = input.asFloatBuffer();
+            float[] floatArray = new float[floatBuffer.remaining()];
+            floatBuffer.get(floatArray);
+
+            return floatArray;
+        }
+
+        @Override
+        public ByteBuffer serializeFloatArray(float[] value)
+        {
+            if (elementType != FloatType.instance)
+                throw new UnsupportedOperationException();
+
+            if (value.length != dimension)
+                throw new MarshalException(String.format("Required %d elements, but saw %d", dimension, value.length));
+
+            var fb = FloatBuffer.wrap(value);
+            var bb = ByteBuffer.allocate(fb.capacity() * Float.BYTES);
+            bb.asFloatBuffer().put(fb);
+            return bb;
+        }
+
+        @Override
         public <V> void validate(V input, ValueAccessor<V> accessor) throws MarshalException
         {
             if (accessor.isEmpty(input))
@@ -570,6 +540,9 @@ public final class VectorType<T> extends MultiElementType<List<T>>
         public <VL, VR> int compareCustom(VL left, ValueAccessor<VL> accessorL,
                                           VR right, ValueAccessor<VR> accessorR)
         {
+            if (accessorL.isEmpty(left) || accessorR.isEmpty(right))
+                return Boolean.compare(accessorR.isEmpty(right), accessorL.isEmpty(left));
+
             int leftOffset = 0;
             int rightOffset = 0;
             for (int i = 0; i < dimension; i++)
@@ -591,7 +564,7 @@ public final class VectorType<T> extends MultiElementType<List<T>>
         {
             int size = accessor.getUnsignedVInt32(input, offset);
             if (size < 0)
-                throw new MarshalException(String.format("Not enough bytes to read a vector<%s, %d>", elementType.asCQL3Type(), dimension));
+                throw new AssertionError("Invalidate data at offset " + offset + "; saw size of " + size + " but only >= 0 is expected");
 
             return accessor.slice(input, offset + TypeSizes.sizeofUnsignedVInt(size), size);
         }
@@ -611,10 +584,8 @@ public final class VectorType<T> extends MultiElementType<List<T>>
         }
 
         @Override
-        public <V> List<V> unpack(V buffer, ValueAccessor<V> accessor)
+        public <V> List<V> split(V buffer, ValueAccessor<V> accessor)
         {
-            if (isNull(buffer, accessor))
-                return null;
             List<V> result = new ArrayList<>(dimension);
             int offset = 0;
             for (int i = 0; i < dimension; i++)
@@ -630,7 +601,7 @@ public final class VectorType<T> extends MultiElementType<List<T>>
         }
 
         @Override
-        public <V> V pack(List<V> value, ValueAccessor<V> accessor)
+        public <V> V serializeRaw(List<V> value, ValueAccessor<V> accessor)
         {
             if (value == null)
                 rejectNullOrEmptyValue();
@@ -655,7 +626,7 @@ public final class VectorType<T> extends MultiElementType<List<T>>
             List<ByteBuffer> bbs = new ArrayList<>(dimension);
             for (int i = 0; i < dimension; i++)
                 bbs.add(elementSerializer.serialize(value.get(i)));
-            return pack(bbs, ByteBufferAccessor.instance);
+            return serializeRaw(bbs, ByteBufferAccessor.instance);
         }
 
         @Override
@@ -677,6 +648,17 @@ public final class VectorType<T> extends MultiElementType<List<T>>
             return result;
         }
 
+        public float[] deserializeFloatArray(ByteBuffer input)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ByteBuffer serializeFloatArray(float[] value)
+        {
+            throw new UnsupportedOperationException();
+        }
+
         @Override
         public <V> void validate(V input, ValueAccessor<V> accessor) throws MarshalException
         {
@@ -695,11 +677,5 @@ public final class VectorType<T> extends MultiElementType<List<T>>
             }
             checkConsumedFully(input, accessor, offset);
         }
-    }
-
-    @Override
-    public int compareCQL(ComplexColumnData columnData, List<ByteBuffer> elements)
-    {
-        throw new UnsupportedOperationException();
     }
 }

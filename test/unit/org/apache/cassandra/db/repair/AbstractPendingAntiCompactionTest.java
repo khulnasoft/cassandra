@@ -20,6 +20,7 @@ package org.apache.cassandra.db.repair;
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.UUID;
 
 import com.google.common.collect.Sets;
 import org.junit.Assert;
@@ -28,23 +29,25 @@ import org.junit.BeforeClass;
 import org.junit.Ignore;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.statements.schema.CreateTableStatement;
+import org.apache.cassandra.cql3.statements.schema.IndexTarget;
 import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.index.internal.CassandraIndex;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.repair.AbstractRepairTest;
 import org.apache.cassandra.repair.consistent.LocalSessionAccessor;
+import org.apache.cassandra.schema.IndexMetadata;
+import org.apache.cassandra.schema.Indexes;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ActiveRepairService;
-import org.apache.cassandra.utils.TimeUUID;
+
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 
 @Ignore
 public abstract class AbstractPendingAntiCompactionTest
@@ -74,7 +77,7 @@ public abstract class AbstractPendingAntiCompactionTest
     {
         SchemaLoader.prepareServer();
         local = InetAddressAndPort.getByName("127.0.0.1");
-        ActiveRepairService.instance().consistent.local.start();
+        ActiveRepairService.instance.consistent.local.start();
     }
 
     @Before
@@ -83,14 +86,17 @@ public abstract class AbstractPendingAntiCompactionTest
         ks = "ks_" + System.currentTimeMillis();
         cfm = CreateTableStatement.parse(String.format("CREATE TABLE %s.%s (k INT PRIMARY KEY, v INT)", ks, tbl), ks).build();
 
-        TableMetadata cfm2 = CreateTableStatement.parse(String.format("CREATE TABLE %s.%s (k INT PRIMARY KEY, v INT)", ks, tbl2), ks).build();
+        Indexes.Builder indexes = Indexes.builder();
+        indexes.add(IndexMetadata.fromIndexTargets(Collections.singletonList(new IndexTarget(new ColumnIdentifier("v", true),
+                                                                                             IndexTarget.Type.VALUES)),
+                                                   tbl2 + "_idx",
+                                                   IndexMetadata.Kind.COMPOSITES, Collections.emptyMap()));
+
+        TableMetadata cfm2 = CreateTableStatement.parse(String.format("CREATE TABLE %s.%s (k INT PRIMARY KEY, v INT)", ks, tbl2), ks).indexes(indexes.build()).build();
 
         SchemaLoader.createKeyspace(ks, KeyspaceParams.simple(1), cfm, cfm2);
         cfs = Schema.instance.getColumnFamilyStoreInstance(cfm.id);
         cfs2 = Schema.instance.getColumnFamilyStoreInstance(cfm2.id);
-        // Do additional index CFS testing for legacy secondary indexes.
-        if (DatabaseDescriptor.getDefaultSecondaryIndex().equals(CassandraIndex.NAME))
-            QueryProcessor.execute(String.format("create index %s_idx on %s.%s (v)", tbl2, ks, tbl2), ConsistencyLevel.ONE);
     }
 
     void makeSSTables(int num)
@@ -105,14 +111,14 @@ public abstract class AbstractPendingAntiCompactionTest
             int val = i * rowsPerSSTable;  // multiplied to prevent ranges from overlapping
             for (int j = 0; j < rowsPerSSTable; j++)
                 QueryProcessor.executeInternal(String.format("INSERT INTO %s.%s (k, v) VALUES (?, ?)", ks, cfs.getTableName()), val + j, val + j);
-            Util.flush(cfs);
+            cfs.forceBlockingFlush(UNIT_TESTS);
         }
         Assert.assertEquals(num, cfs.getLiveSSTables().size());
     }
 
-    TimeUUID prepareSession()
+    UUID prepareSession()
     {
-        TimeUUID sessionID = AbstractRepairTest.registerSession(cfs, true, true);
+        UUID sessionID = AbstractRepairTest.registerSession(cfs, true, true);
         LocalSessionAccessor.prepareUnsafe(sessionID, AbstractRepairTest.COORDINATOR, Sets.newHashSet(AbstractRepairTest.COORDINATOR));
         return sessionID;
     }

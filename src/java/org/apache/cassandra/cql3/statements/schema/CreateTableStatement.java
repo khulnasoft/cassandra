@@ -19,12 +19,14 @@ package org.apache.cassandra.cql3.statements.schema;
 
 import java.util.*;
 import java.util.stream.Collectors;
-
-import javax.annotation.Nullable;
+import java.util.function.UnaryOperator;
 
 import com.google.common.collect.ImmutableSet;
 
 import org.apache.commons.lang3.StringUtils;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.audit.AuditLogContext;
 import org.apache.cassandra.audit.AuditLogEntryType;
@@ -32,28 +34,31 @@ import org.apache.cassandra.auth.DataResource;
 import org.apache.cassandra.auth.IResource;
 import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.cql3.*;
-import org.apache.cassandra.cql3.functions.masking.ColumnMask;
-import org.apache.cassandra.db.guardrails.Guardrails;
+import org.apache.cassandra.cql3.statements.RawKeyspaceAwareStatement;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.AlreadyExistsException;
+import org.apache.cassandra.guardrails.Guardrails;
+import org.apache.cassandra.guardrails.UserKeyspaceFilter;
+import org.apache.cassandra.guardrails.UserKeyspaceFilterProvider;
 import org.apache.cassandra.schema.*;
 import org.apache.cassandra.schema.Keyspaces.KeyspacesDiff;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.service.reads.repair.ReadRepairStrategy;
 import org.apache.cassandra.transport.Event.SchemaChange;
 import org.apache.cassandra.transport.Event.SchemaChange.Change;
 import org.apache.cassandra.transport.Event.SchemaChange.Target;
 
-import static java.util.Comparator.comparing;
-
 import static com.google.common.collect.Iterables.concat;
+import static java.util.Comparator.comparing;
 
 public final class CreateTableStatement extends AlterSchemaStatement
 {
+    private static final Logger logger = LoggerFactory.getLogger(CreateTableStatement.class);
     private final String tableName;
 
-    private final Map<ColumnIdentifier, ColumnProperties.Raw> rawColumns;
+    private final Map<ColumnIdentifier, CQL3Type.Raw> rawColumns;
     private final Set<ColumnIdentifier> staticColumns;
     private final List<ColumnIdentifier> partitionKeyColumns;
     private final List<ColumnIdentifier> clusteringColumns;
@@ -64,20 +69,22 @@ public final class CreateTableStatement extends AlterSchemaStatement
     private final boolean ifNotExists;
     private final boolean useCompactStorage;
 
-    private String expandedCql;
-
-    public CreateTableStatement(String keyspaceName,
+    public CreateTableStatement(String queryString,
+                                String keyspaceName,
                                 String tableName,
-                                Map<ColumnIdentifier, ColumnProperties.Raw> rawColumns,
+
+                                Map<ColumnIdentifier, CQL3Type.Raw> rawColumns,
                                 Set<ColumnIdentifier> staticColumns,
                                 List<ColumnIdentifier> partitionKeyColumns,
                                 List<ColumnIdentifier> clusteringColumns,
+
                                 LinkedHashMap<ColumnIdentifier, Boolean> clusteringOrder,
                                 TableAttributes attrs,
+
                                 boolean ifNotExists,
                                 boolean useCompactStorage)
     {
-        super(keyspaceName);
+        super(queryString, keyspaceName);
         this.tableName = tableName;
 
         this.rawColumns = rawColumns;
@@ -92,17 +99,49 @@ public final class CreateTableStatement extends AlterSchemaStatement
         this.useCompactStorage = useCompactStorage;
     }
 
-    @Override
-    public String cql()
+    public boolean isCompactStorage()
     {
-        if (expandedCql != null)
-            return expandedCql;
-        return super.cql();
+        return useCompactStorage;
     }
 
-    public Keyspaces apply(ClusterMetadata metadata)
+    @Override
+    public void validate(QueryState state)
     {
-        Keyspaces schema = metadata.schema.getKeyspaces();
+        super.validate(state);
+
+        // Some tools use CreateTableStatement, and the guardrails below both don't make too much sense for tools and
+        // require the server to be initialized, so skipping them if it isn't.
+        if (Guardrails.ready())
+        {
+            // Guardrails on table properties
+            Guardrails.disallowedTableProperties.ensureAllowed(attrs.updatedProperties(), state);
+            Guardrails.ignoredTableProperties.maybeIgnoreAndWarn(attrs.updatedProperties(), attrs::removeProperty, state);
+
+            // Guardrail on counter
+            if (rawColumns.values().stream().anyMatch(CQL3Type.Raw::isCounter))
+                Guardrails.counterEnabled.ensureEnabled(state);
+
+            // Guardrail on columns per table
+            Guardrails.columnsPerTable.guard(rawColumns.size(), tableName, false, state);
+
+            if (Guardrails.tablesLimit.enabled(state))
+            {
+                // guardrails on number of tables
+                UserKeyspaceFilter userKeyspaceFilter = UserKeyspaceFilterProvider.instance.get(state);
+                int totalUserTables = Schema.instance.getUserKeyspaces().stream().map(ksm -> Keyspace.open(ksm.name))
+                                                            .filter(userKeyspaceFilter::filter)
+                                                            .mapToInt(keyspace -> keyspace.getColumnFamilyStores().size())
+                                                            .sum();
+
+                Guardrails.tablesLimit.guard(totalUserTables + 1, tableName, false, state);
+            }
+
+            rawColumns.forEach((name, raw) -> raw.validate(state, "Column " + name));
+        }
+    }
+
+    public Keyspaces apply(Keyspaces schema)
+    {
         KeyspaceMetadata keyspace = schema.getNullable(keyspaceName);
         if (null == keyspace)
             throw ire("Keyspace '%s' doesn't exist", keyspaceName);
@@ -115,66 +154,16 @@ public final class CreateTableStatement extends AlterSchemaStatement
             throw new AlreadyExistsException(keyspaceName, tableName);
         }
 
-        // add all user functions to be able to give a good error message to the user if the alter references
-        // a function from another keyspace
-        UserFunctions.Builder ufBuilder = UserFunctions.builder().add();
-        for (KeyspaceMetadata ksm : schema)
-            ufBuilder.add(ksm.userFunctions);
-
-        TableMetadata.Builder builder = builder(keyspace.types, ufBuilder.build()).epoch(metadata.nextEpoch());
-
-        // We do not want to set table ID here just yet, since we are using CQL for serialising a fully expanded CREATE TABLE statement.
-        this.expandedCql = builder.build().toCqlString(false, attrs.hasProperty(TableAttributes.ID), ifNotExists);
-
-        if (!attrs.hasProperty(TableAttributes.ID))
-            builder.id(TableId.get(metadata));
-        TableMetadata table = builder.build();
+        TableMetadata table = builder(keyspace.types).build();
         table.validate();
 
-        if (keyspace.replicationStrategy.hasTransientReplicas()
+        if (keyspace.createReplicationStrategy().hasTransientReplicas()
             && table.params.readRepair != ReadRepairStrategy.NONE)
         {
             throw ire("read_repair must be set to 'NONE' for transiently replicated keyspaces");
         }
 
-        if (!table.params.compression.isEnabled())
-            Guardrails.uncompressedTablesEnabled.ensureEnabled(state);
-
         return schema.withAddedOrUpdated(keyspace.withSwapped(keyspace.tables.with(table)));
-    }
-
-    @Override
-    public void validate(ClientState state)
-    {
-        super.validate(state);
-
-        // If a memtable configuration is specified, validate it against config
-        if (attrs.hasOption(TableParams.Option.MEMTABLE))
-            MemtableParams.get(attrs.getString(TableParams.Option.MEMTABLE.toString()));
-
-        // Guardrail on table properties
-        Guardrails.tableProperties.guard(attrs.updatedProperties(), attrs::removeProperty, state);
-
-        // Guardrail on columns per table
-        Guardrails.columnsPerTable.guard(rawColumns.size(), tableName, false, state);
-
-        // Guardrail on number of tables
-        if (Guardrails.tables.enabled(state))
-        {
-            int totalUserTables = Schema.instance.getUserKeyspaces()
-                                                 .stream()
-                                                 .mapToInt(ksm -> ksm.tables.size())
-                                                 .sum();
-            Guardrails.tables.guard(totalUserTables + 1, tableName, false, state);
-        }
-
-        // Guardrail to check whether creation of new COMPACT STORAGE tables is allowed
-        if (useCompactStorage)
-            Guardrails.compactTablesEnabled.ensureEnabled(state);
-
-        validateDefaultTimeToLive(attrs.asNewTableParams());
-
-        rawColumns.forEach((name, raw) -> raw.validate(state, name));
     }
 
     SchemaChange schemaChangeEvent(KeyspacesDiff diff)
@@ -184,7 +173,7 @@ public final class CreateTableStatement extends AlterSchemaStatement
 
     public void authorize(ClientState client)
     {
-        client.ensureAllTablesPermission(keyspaceName, Permission.CREATE);
+        client.ensureKeyspacePermission(keyspaceName, Permission.CREATE);
     }
 
     @Override
@@ -204,28 +193,14 @@ public final class CreateTableStatement extends AlterSchemaStatement
         return String.format("%s (%s, %s)", getClass().getSimpleName(), keyspaceName, tableName);
     }
 
-    public TableMetadata.Builder builder(Types types, UserFunctions functions)
+    public TableMetadata.Builder builder(Types types)
     {
         attrs.validate();
         TableParams params = attrs.asNewTableParams();
 
         // use a TreeMap to preserve ordering across JDK versions (see CASSANDRA-9492) - important for stable unit tests
-        Map<ColumnIdentifier, ColumnProperties> columns = new TreeMap<>(comparing(o -> o.bytes));
-        rawColumns.forEach((column, properties) -> columns.put(column, properties.prepare(keyspaceName, tableName, column, types, functions)));
-
-        // check for nested non-frozen UDTs or collections in a non-frozen UDT
-        columns.forEach((column, properties) ->
-        {
-            AbstractType<?> type = properties.type;
-            if (type.isUDT() && type.isMultiCell())
-            {
-                ((UserType) type).fieldTypes().forEach(field ->
-                {
-                    if (field.isMultiCell())
-                        throw ire("Non-frozen UDTs with nested non-frozen collections are not supported");
-                });
-            }
-        });
+        Map<ColumnIdentifier, CQL3Type> columns = new TreeMap<>(comparing(o -> o.bytes));
+        rawColumns.forEach((column, type) -> columns.put(column, type.prepare(keyspaceName, types)));
 
         /*
          * Deal with PRIMARY KEY columns
@@ -234,47 +209,31 @@ public final class CreateTableStatement extends AlterSchemaStatement
         HashSet<ColumnIdentifier> primaryKeyColumns = new HashSet<>();
         concat(partitionKeyColumns, clusteringColumns).forEach(column ->
         {
-            ColumnProperties properties = columns.get(column);
-            if (null == properties)
+            CQL3Type type = columns.get(column);
+            if (null == type)
                 throw ire("Unknown column '%s' referenced in PRIMARY KEY for table '%s'", column, tableName);
 
             if (!primaryKeyColumns.add(column))
                 throw ire("Duplicate column '%s' in PRIMARY KEY clause for table '%s'", column, tableName);
 
-            AbstractType<?> type = properties.type;
-            if (type.isMultiCell())
-            {
-                CQL3Type cqlType = properties.cqlType;
-                if (type.isCollection())
-                    throw ire("Invalid non-frozen collection type %s for PRIMARY KEY column '%s'", cqlType, column);
-                else
-                    throw ire("Invalid non-frozen user-defined type %s for PRIMARY KEY column '%s'", cqlType, column);
-            }
-
-            if (type.isCounter())
-                throw ire("counter type is not supported for PRIMARY KEY column '%s'", column);
-
-            if (type.referencesDuration())
-                throw ire("duration type is not supported for PRIMARY KEY column '%s'", column);
-
             if (staticColumns.contains(column))
                 throw ire("Static column '%s' cannot be part of the PRIMARY KEY", column);
         });
 
-        List<ColumnProperties> partitionKeyColumnProperties = new ArrayList<>();
-        List<ColumnProperties> clusteringColumnProperties = new ArrayList<>();
+        List<AbstractType<?>> partitionKeyTypes = new ArrayList<>();
+        List<AbstractType<?>> clusteringTypes = new ArrayList<>();
 
         partitionKeyColumns.forEach(column ->
         {
-            ColumnProperties columnProperties = columns.remove(column);
-            partitionKeyColumnProperties.add(columnProperties);
+            CQL3Type type = columns.remove(column);
+            partitionKeyTypes.add(type.getType());
         });
 
         clusteringColumns.forEach(column ->
         {
-            ColumnProperties columnProperties = columns.remove(column);
+            CQL3Type type = columns.remove(column);
             boolean reverse = !clusteringOrder.getOrDefault(column, true);
-            clusteringColumnProperties.add(reverse ? columnProperties.withReversedType() : columnProperties);
+            clusteringTypes.add(reverse ? ReversedType.getInstance(type.getType()) : type.getType());
         });
 
         List<ColumnIdentifier> nonClusterColumn = clusteringOrder.keySet().stream()
@@ -302,7 +261,7 @@ public final class CreateTableStatement extends AlterSchemaStatement
         // For COMPACT STORAGE, we reject any "feature" that we wouldn't be able to translate back to thrift.
         if (useCompactStorage)
         {
-            validateCompactTable(clusteringColumnProperties, columns);
+            validateCompactTable(clusteringTypes, columns);
         }
         else
         {
@@ -315,14 +274,9 @@ public final class CreateTableStatement extends AlterSchemaStatement
          * Counter table validation
          */
 
-        boolean hasCounters = rawColumns.values().stream().anyMatch(c -> c.rawType.isCounter());
+        boolean hasCounters = rawColumns.values().stream().anyMatch(CQL3Type.Raw::isCounter);
         if (hasCounters)
         {
-            // We've handled anything that is not a PRIMARY KEY so columns only contains NON-PK columns. So
-            // if it's a counter table, make sure we don't have non-counter types
-            if (columns.values().stream().anyMatch(t -> !t.type.isCounter()))
-                throw ire("Cannot mix counter and non counter columns in the same table");
-
             if (params.defaultTimeToLive > 0)
                 throw ire("Cannot set %s on a table with counters", TableParams.Option.DEFAULT_TIME_TO_LIVE);
         }
@@ -340,44 +294,40 @@ public final class CreateTableStatement extends AlterSchemaStatement
                .params(params);
 
         for (int i = 0; i < partitionKeyColumns.size(); i++)
-        {
-            ColumnProperties properties = partitionKeyColumnProperties.get(i);
-            builder.addPartitionKeyColumn(partitionKeyColumns.get(i), properties.type, properties.mask);
-        }
+            builder.addPartitionKeyColumn(partitionKeyColumns.get(i), partitionKeyTypes.get(i));
 
         for (int i = 0; i < clusteringColumns.size(); i++)
-        {
-            ColumnProperties properties = clusteringColumnProperties.get(i);
-            builder.addClusteringColumn(clusteringColumns.get(i), properties.type, properties.mask);
-        }
+            builder.addClusteringColumn(clusteringColumns.get(i), clusteringTypes.get(i));
 
         if (useCompactStorage)
         {
-            fixupCompactTable(clusteringColumnProperties, columns, hasCounters, builder);
+            fixupCompactTable(clusteringTypes, columns, hasCounters, builder);
         }
         else
         {
-            columns.forEach((column, properties) -> {
+            columns.forEach((column, type) -> {
                 if (staticColumns.contains(column))
-                    builder.addStaticColumn(column, properties.type, properties.mask);
+                    builder.addStaticColumn(column, type.getType());
                 else
-                    builder.addRegularColumn(column, properties.type, properties.mask);
+                    builder.addRegularColumn(column, type.getType());
             });
         }
+        for (DroppedColumn.Raw record : attrs.droppedColumnRecords())
+            builder.recordColumnDrop(record.prepare(keyspaceName, tableName, types));
         return builder;
     }
 
-    private void validateCompactTable(List<ColumnProperties> clusteringColumnProperties,
-                                      Map<ColumnIdentifier, ColumnProperties> columns)
+    private void validateCompactTable(List<AbstractType<?>> clusteringTypes,
+                                      Map<ColumnIdentifier, CQL3Type> columns)
     {
-        boolean isDense = !clusteringColumnProperties.isEmpty();
+        boolean isDense = !clusteringTypes.isEmpty();
 
-        if (columns.values().stream().anyMatch(c -> c.type.isMultiCell()))
+        if (columns.values().stream().anyMatch(c -> c.getType().isMultiCell()))
             throw ire("Non-frozen collections and UDTs are not supported with COMPACT STORAGE");
         if (!staticColumns.isEmpty())
             throw ire("Static columns are not supported in COMPACT STORAGE tables");
 
-        if (clusteringColumnProperties.isEmpty())
+        if (clusteringTypes.isEmpty())
         {
             // It's a thrift "static CF" so there should be some columns definition
             if (columns.isEmpty())
@@ -399,8 +349,8 @@ public final class CreateTableStatement extends AlterSchemaStatement
         }
     }
 
-    private void fixupCompactTable(List<ColumnProperties> clusteringTypes,
-                                   Map<ColumnIdentifier, ColumnProperties> columns,
+    private void fixupCompactTable(List<AbstractType<?>> clusteringTypes,
+                                   Map<ColumnIdentifier, CQL3Type> columns,
                                    boolean hasCounters,
                                    TableMetadata.Builder builder)
     {
@@ -419,12 +369,12 @@ public final class CreateTableStatement extends AlterSchemaStatement
 
         builder.flags(flags);
 
-        columns.forEach((name, properties) -> {
+        columns.forEach((name, type) -> {
             // Note that for "static" no-clustering compact storage we use static for the defined columns
             if (staticColumns.contains(name) || isStaticCompact)
-                builder.addStaticColumn(name, properties.type, properties.mask);
+                builder.addStaticColumn(name, type.getType());
             else
-                builder.addRegularColumn(name, properties.type, properties.mask);
+                builder.addRegularColumn(name, type.getType());
         });
 
         DefaultNames names = new DefaultNames(builder.columnNames());
@@ -440,6 +390,39 @@ public final class CreateTableStatement extends AlterSchemaStatement
             // that's the case, add it but with a specific EmptyType so we can recognize that case later
             builder.addRegularColumn(names.defaultCompactValueName(), EmptyType.instance);
         }
+    }
+
+    @Override
+    public Set<String> clientWarnings(KeyspacesDiff diff)
+    {
+        ImmutableSet.Builder<String> warnings = ImmutableSet.builder();
+
+        if (attrs.hasUnsupportedDseCompaction())
+        {
+            Map<String, String> compactionOptions = attrs.getMap(TableParams.Option.COMPACTION.toString());
+            String strategy = compactionOptions.get(CompactionParams.Option.CLASS.toString());
+            warnings.add(String.format("The given compaction strategy (%s) is not supported. ", strategy) +
+                         "The compaction strategy parameter was overridden with the default " +
+                         String.format("(%s). ", CompactionParams.DEFAULT.klass().getCanonicalName()) +
+                         "Inspect your schema and adjust other table properties if needed.");
+        }
+
+        if (attrs.hasProperty("nodesync"))
+        {
+            warnings.add("The unsupported 'nodesync' table option was ignored.");
+        }
+
+        if (attrs.hasProperty("dse_vertex_label_property"))
+        {
+            warnings.add("The unsupported graph table property was ignored (VERTEX LABEL).");
+        }
+
+        if (attrs.hasProperty("dse_edge_label_property"))
+        {
+            warnings.add("The unsupported graph table property was ignored (EDGE LABEL).");
+        }
+
+        return warnings.build();
     }
 
     private static class DefaultNames
@@ -481,19 +464,24 @@ public final class CreateTableStatement extends AlterSchemaStatement
 
     public static TableMetadata.Builder parse(String cql, String keyspace)
     {
-        return CQLFragmentParser.parseAny(CqlParser::createTableStatement, cql, "CREATE TABLE")
-                                .keyspace(keyspace)
-                                .prepare(null) // works around a messy ClientState/QueryProcessor class init deadlock
-                                .builder(Types.none(), UserFunctions.none());
+        return parse(cql, keyspace, Types.none());
     }
 
-    public final static class Raw extends CQLStatement.Raw
+    public static TableMetadata.Builder parse(String cql, String keyspace, Types types)
+    {
+        return CQLFragmentParser.parseAny(CqlParser::createTableStatement, cql, "CREATE TABLE")
+                         .keyspace(keyspace)
+                         .prepare(null) // works around a messy ClientState/QueryProcessor class init deadlock
+                         .builder(types);
+    }
+
+    public static final class Raw extends RawKeyspaceAwareStatement<CreateTableStatement>
     {
         private final QualifiedName name;
         private final boolean ifNotExists;
 
         private boolean useCompactStorage = false;
-        private final Map<ColumnIdentifier, ColumnProperties.Raw> rawColumns = new HashMap<>();
+        private final Map<ColumnIdentifier, CQL3Type.Raw> rawColumns = new HashMap<>();
         private final Set<ColumnIdentifier> staticColumns = new HashSet<>();
         private final List<ColumnIdentifier> clusteringColumns = new ArrayList<>();
 
@@ -508,21 +496,29 @@ public final class CreateTableStatement extends AlterSchemaStatement
             this.ifNotExists = ifNotExists;
         }
 
-        public CreateTableStatement prepare(ClientState state)
+        @Override
+        public CreateTableStatement prepare(ClientState state, UnaryOperator<String> keyspaceMapper)
         {
-            String keyspaceName = name.hasKeyspace() ? name.getKeyspace() : state.getKeyspace();
+            String keyspaceName = keyspaceMapper.apply(name.hasKeyspace() ? name.getKeyspace() : state.getKeyspace());
+
+            if (keyspaceMapper != Constants.IDENTITY_STRING_MAPPER)
+                rawColumns.values().forEach(t -> t.forEachUserType(utName -> utName.updateKeyspaceIfDefined(keyspaceMapper)));
 
             if (null == partitionKeyColumns)
                 throw ire("No PRIMARY KEY specifed for table '%s' (exactly one required)", name);
 
-            return new CreateTableStatement(keyspaceName,
+            return new CreateTableStatement(rawCQLStatement,
+                                            keyspaceName,
                                             name.getName(),
+
                                             rawColumns,
                                             staticColumns,
                                             partitionKeyColumns,
                                             clusteringColumns,
+
                                             clusteringOrder,
                                             attrs,
+
                                             ifNotExists,
                                             useCompactStorage);
         }
@@ -543,10 +539,9 @@ public final class CreateTableStatement extends AlterSchemaStatement
             return name.getName();
         }
 
-        public void addColumn(ColumnIdentifier column, CQL3Type.Raw type, boolean isStatic, ColumnMask.Raw mask)
+        public void addColumn(ColumnIdentifier column, CQL3Type.Raw type, boolean isStatic)
         {
-
-            if (null != rawColumns.put(column, new ColumnProperties.Raw(type, mask)))
+            if (null != rawColumns.put(column, type))
                 throw ire("Duplicate column '%s' declaration for table '%s'", column, name);
 
             if (isStatic)
@@ -580,62 +575,6 @@ public final class CreateTableStatement extends AlterSchemaStatement
         {
             if (null != clusteringOrder.put(column, ascending))
                 throw ire("Duplicate column '%s' in CLUSTERING ORDER BY clause for table '%s'", column, name);
-        }
-    }
-
-    /**
-     * Class encapsulating the properties of a column, which are its type and mask.
-     */
-    private final static class ColumnProperties
-    {
-        public final AbstractType<?> type;
-        public final CQL3Type cqlType; // we keep the original CQL type for printing fully qualified user type names
-
-        @Nullable
-        public final ColumnMask mask;
-
-        public ColumnProperties(AbstractType<?> type, CQL3Type cqlType, @Nullable ColumnMask mask)
-        {
-            this.type = type;
-            this.cqlType = cqlType;
-            this.mask = mask;
-        }
-
-        public ColumnProperties withReversedType()
-        {
-            return new ColumnProperties(ReversedType.getInstance(type),
-                                        cqlType,
-                                        mask == null ? null : mask.withReversedType());
-        }
-
-        public final static class Raw
-        {
-            public final CQL3Type.Raw rawType;
-
-            @Nullable
-            public final ColumnMask.Raw rawMask;
-
-            public Raw(CQL3Type.Raw rawType, @Nullable ColumnMask.Raw rawMask)
-            {
-                this.rawType = rawType;
-                this.rawMask = rawMask;
-            }
-
-            public void validate(ClientState state, ColumnIdentifier name)
-            {
-                rawType.validate(state, "Column " + name);
-
-                if (rawMask != null)
-                    ColumnMask.ensureEnabled();
-            }
-
-            public ColumnProperties prepare(String keyspace, String table, ColumnIdentifier column, Types udts, UserFunctions functions)
-            {
-                CQL3Type cqlType = rawType.prepare(keyspace, udts);
-                AbstractType<?> type = cqlType.getType();
-                ColumnMask mask = rawMask == null ? null : rawMask.prepare(keyspace, table, column, type, functions);
-                return new ColumnProperties(type, cqlType, mask);
-            }
         }
     }
 }

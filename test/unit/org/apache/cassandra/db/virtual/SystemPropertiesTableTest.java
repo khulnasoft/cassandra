@@ -27,31 +27,35 @@ import java.util.stream.Stream;
 
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
+import com.khulnasoft.driver.core.ResultSet;
+import com.khulnasoft.driver.core.Row;
 import org.apache.cassandra.cql3.CQLTester;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Maps;
 
-// checkstyle: suppress below 'blockSystemPropertyUsage'
-
 public class SystemPropertiesTableTest extends CQLTester
 {
     private static final String KS_NAME = "vts";
     private static final Map<String, String> ORIGINAL_ENV_MAP = System.getenv();
-    private static final String TEST_PROP = "cassandra.SystemPropertiesTableTest";
+    private static final String TEST_PROP = "org.apache.cassandra.db.virtual.SystemPropertiesTableTest";
 
     private SystemPropertiesTable table;
+
+    @BeforeClass
+    public static void setUpClass()
+    {
+        CQLTester.setUpClass();
+    }
 
     @Before
     public void config()
     {
         table = new SystemPropertiesTable(KS_NAME);
         VirtualKeyspaceRegistry.instance.register(new VirtualKeyspace(KS_NAME, ImmutableList.of(table)));
-        disablePreparedReuseForTest();
     }
 
     @Test

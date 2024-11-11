@@ -21,6 +21,7 @@ package org.apache.cassandra.distributed.test;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -28,9 +29,6 @@ import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLSession;
 
 import com.google.common.collect.ImmutableMap;
-
-import org.apache.cassandra.transport.TlsTestUtils;
-import org.apache.cassandra.utils.concurrent.Condition;
 import org.junit.Assert;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,22 +50,16 @@ import io.netty.util.concurrent.FutureListener;
 import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.security.ISslContextFactory;
 import org.apache.cassandra.security.SSLFactory;
-
-import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.apache.cassandra.config.EncryptionOptions.ClientAuth.REQUIRED;
-import static org.apache.cassandra.distributed.test.AbstractEncryptionOptionsImpl.ConnectResult.CONNECTING;
-import static org.apache.cassandra.distributed.test.AbstractEncryptionOptionsImpl.ConnectResult.UNINITIALIZED;
-import static org.apache.cassandra.utils.concurrent.Condition.newOneTimeCondition;
+import org.apache.cassandra.utils.concurrent.SimpleCondition;
 
 public class AbstractEncryptionOptionsImpl extends TestBaseImpl
 {
     final Logger logger = LoggerFactory.getLogger(EncryptionOptions.class);
-    final static String validKeyStorePath = TlsTestUtils.SERVER_KEYSTORE_PATH;
-    final static String validKeyStorePassword = TlsTestUtils.SERVER_KEYSTORE_PASSWORD;
-    final static String validTrustStorePath = TlsTestUtils.SERVER_TRUSTSTORE_PATH;
-    final static String validTrustStorePassword = TlsTestUtils.SERVER_TRUSTSTORE_PASSWORD;
+    final static String validKeyStorePath = "test/conf/cassandra_ssl_test.keystore";
+    final static String validKeyStorePassword = "cassandra";
+    final static String validTrustStorePath = "test/conf/cassandra_ssl_test.truststore";
+    final static String validTrustStorePassword = "cassandra";
 
     // Base configuration map for a valid keystore that can be opened
     final static Map<String,Object> validKeystore = ImmutableMap.of("keystore", validKeyStorePath,
@@ -197,17 +189,17 @@ public class AbstractEncryptionOptionsImpl extends TestBaseImpl
         ConnectResult connect() throws Throwable
         {
             AtomicInteger connectAttempts = new AtomicInteger(0);
-            result.set(UNINITIALIZED);
+            result.set(ConnectResult.UNINITIALIZED);
             setLastThrowable(null);
             setProtocolAndCipher(null, null);
 
             SslContext sslContext = SSLFactory.getOrCreateSslContext(
-            encryptionOptions.withAcceptedProtocols(acceptedProtocols).withCipherSuites(cipherSuites),
-            REQUIRED, ISslContextFactory.SocketType.CLIENT, "test");
+                encryptionOptions.withAcceptedProtocols(acceptedProtocols).withCipherSuites(cipherSuites),
+                true, SSLFactory.SocketType.CLIENT);
 
             EventLoopGroup workerGroup = new NioEventLoopGroup();
             Bootstrap b = new Bootstrap();
-            Condition attemptCompleted = newOneTimeCondition();
+            SimpleCondition attemptCompleted = new SimpleCondition();
 
             // Listener on the SSL handshake makes sure that the test completes immediately as
             // the server waits to receive a message over the TLS connection, so the discardHandler.decode
@@ -304,12 +296,12 @@ public class AbstractEncryptionOptionsImpl extends TestBaseImpl
                 }
             });
 
-            result.set(CONNECTING);
+            result.set(ConnectResult.CONNECTING);
             ChannelFuture f = b.connect(host, port);
             try
             {
                 f.sync();
-                attemptCompleted.await(15, SECONDS);
+                attemptCompleted.await(15, TimeUnit.SECONDS);
             }
             finally
             {
@@ -336,29 +328,6 @@ public class AbstractEncryptionOptionsImpl extends TestBaseImpl
                               lastThrowable().getMessage().contains("Received fatal alert: handshake_failure") ||
                               lastThrowable().getMessage().contains("Received fatal alert: protocol_version") ||
                               lastThrowable.getCause() instanceof  SSLHandshakeException);
-        }
-    }
-
-    /* Provde the cluster cannot start with the configured options */
-    void assertCannotStartDueToConfigurationException(Cluster cluster)
-    {
-        Throwable tr = null;
-        try
-        {
-            cluster.startup();
-        }
-        catch (Throwable maybeConfigException)
-        {
-            tr = maybeConfigException;
-        }
-
-        if (tr == null)
-        {
-            Assert.fail("Expected a ConfigurationException");
-        }
-        else
-        {
-            Assert.assertEquals(ConfigurationException.class.getName(), tr.getClass().getName());
         }
     }
 }

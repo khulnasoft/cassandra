@@ -34,7 +34,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
@@ -48,7 +47,6 @@ import org.apache.cassandra.distributed.api.NodeToolResult;
 import org.apache.cassandra.utils.Pair;
 import org.assertj.core.util.Lists;
 
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -56,8 +54,9 @@ public class ToolRunner
 {
     protected static final Logger logger = LoggerFactory.getLogger(ToolRunner.class);
 
-    public static final ImmutableList<String> DEFAULT_CLEANERS = ImmutableList.of("(?im)^picked up.*\\R",
-                                                                                  "(?im)^.*`USE <keyspace>` with prepared statements is.*\\R");
+    private static final ImmutableList<String> DEFAULT_CLEANERS = ImmutableList.of("(?im)^picked up.*\\R",
+                                                                                   "(?im)^.*`USE <keyspace>` with prepared statements is.*\\R");
+    private static final ImmutableList<String> STDOUT_CLEANERS = ImmutableList.of("^DEBUG .*\\R");
 
     public static int runClassAsTool(String clazz, String... args)
     {
@@ -121,13 +120,11 @@ public class ToolRunner
 
         private final InputStream input;
         private final T out;
-        private final boolean autoCloseOut;
 
-        private StreamGobbler(InputStream input, T out, boolean autoCloseOut)
+        private StreamGobbler(InputStream input, T out)
         {
             this.input = input;
             this.out = out;
-            this.autoCloseOut = autoCloseOut;
         }
 
         public void run()
@@ -140,8 +137,6 @@ public class ToolRunner
                     int read = input.read(buffer);
                     if (read == -1)
                     {
-                        if (autoCloseOut)
-                            out.close();
                         return;
                     }
                     out.write(buffer, 0, read);
@@ -196,11 +191,6 @@ public class ToolRunner
         return invoke(args.toArray(new String[args.size()]));
     }
 
-    public static ToolResult invoke(Map<String, String> env, List<String> args)
-    {
-        return invoke(env, args.toArray(new String[args.size()]));
-    }
-
     public static ToolResult invoke(String... args) 
     {
         try (ObservableTool  t = invokeAsync(args))
@@ -209,22 +199,9 @@ public class ToolRunner
         }
     }
 
-    public static ToolResult invoke(Map<String, String> env, String... args)
-    {
-        try (ObservableTool  t = invokeAsync(env, args))
-        {
-            return t.waitComplete();
-        }
-    }
-
     public static ObservableTool invokeAsync(String... args)
     {
         return invokeAsync(Collections.emptyMap(), null, Arrays.asList(args));
-    }
-
-    public static ObservableTool invokeAsync(Map<String, String> env, String... args)
-    {
-        return invokeAsync(env, null, Arrays.asList(args));
     }
 
     public static ToolResult invoke(Map<String, String> env, InputStream stdin, List<String> args)
@@ -240,6 +217,9 @@ public class ToolRunner
         ProcessBuilder pb = new ProcessBuilder(args);
         if (env != null && !env.isEmpty())
             pb.environment().putAll(env);
+        String jvmOpts = pb.environment().getOrDefault("JVM_OPTS", "") + " -Dcassandra.disable_tcactive_openssl=true";
+        pb.environment().put("JVM_OPTS", jvmOpts);
+
         try
         {
             return new ForkedObservableTool(pb.start(), stdin, args);
@@ -407,31 +387,19 @@ public class ToolRunner
         {
             return e;
         }
-
-        /**
-         * Checks if the stdErr is empty after removing any potential JVM env info output and other noise
-         *
-         * Some JVM configs may output env info on stdErr. We need to remove those to see what was the tool's actual
-         * stdErr
-         */
-        public void assertCleanStdErr()
-        {
-            assertCleanStdErr(DEFAULT_CLEANERS);
-        }
         
         /**
          * Checks if the stdErr is empty after removing any potential JVM env info output and other noise
          * 
          * Some JVM configs may output env info on stdErr. We need to remove those to see what was the tool's actual
          * stdErr
+         * 
+         * @return The ToolRunner instance
          */
-        public void assertCleanStdErr(List<String> regExpCleaners)
+        public void assertCleanStdErr()
         {
-            String raw = getStderr();
-            String cleaned = getCleanedStderr(regExpCleaners);
-            assertTrue("Failed to clean stderr completely.\nRaw (length=" + raw.length() + "):\n" + raw +
-                       "\nCleaned (length=" + cleaned.length() + "):\n" + cleaned,
-                       cleaned.trim().isEmpty());
+            assertTrue("Failed because cleaned stdErr wasn't empty: " + getCleanedStderr(),
+                       getCleanedStderr().isEmpty());
         }
 
         public void assertOnExitCode()
@@ -466,10 +434,14 @@ public class ToolRunner
          */
         public String getCleanedStderr(List<String> regExpCleaners)
         {
-            String sanitizedStderr = getStderr();
+            return applyCleaners(getStderr(), regExpCleaners);
+        }
+
+        private static String applyCleaners(String input, List<String> regExpCleaners)
+        {
             for (String regExp : regExpCleaners)
-                sanitizedStderr = sanitizedStderr.replaceAll(regExp, "");
-            return sanitizedStderr;
+                input = input.replaceAll(regExp, "");
+            return input;
         }
 
         /**
@@ -482,64 +454,15 @@ public class ToolRunner
             return getCleanedStderr(DEFAULT_CLEANERS);
         }
 
+        public String getCleanedStdout()
+        {
+            return applyCleaners(getStdout(), STDOUT_CLEANERS);
+        }
+        
         public void assertOnCleanExit()
         {
-            assertOnCleanExit(DEFAULT_CLEANERS);
-        }
-
-        public void assertOnCleanExit(List<String> regExpCleaners)
-        {
             assertOnExitCode();
-            assertCleanStdErr(regExpCleaners);
-        }
-
-        public AssertHelp asserts()
-        {
-            return new AssertHelp();
-        }
-
-        public final class AssertHelp
-        {
-            public AssertHelp success()
-            {
-                if (exitCode != 0)
-                    fail("was not successful");
-                return this;
-            }
-
-            public AssertHelp failure()
-            {
-                if (exitCode == 0)
-                    fail("was not successful");
-                return this;
-            }
-
-            public AssertHelp errorContains(String messages)
-            {
-                return errorContainsAny(messages);
-            }
-
-            public AssertHelp errorContainsAny(String... messages)
-            {
-                assertThat(messages).hasSizeGreaterThan(0);
-                assertThat(stderr).isNotNull();
-                if (!Stream.of(messages).anyMatch(stderr::contains))
-                    fail("stderr does not contain " + Arrays.toString(messages));
-                return this;
-            }
-
-            private void fail(String msg)
-            {
-                StringBuilder sb = new StringBuilder();
-                sb.append("nodetool command ").append(String.join(" ", allArgs)).append(": ").append(msg).append('\n');
-                if (stdout != null)
-                    sb.append("stdout:\n").append(stdout).append('\n');
-                if (stderr != null)
-                    sb.append("stderr:\n").append(stderr).append('\n');
-                if (e != null)
-                    sb.append("Exception:\n").append(Throwables.getStackTraceAsString(e)).append('\n');
-                throw new AssertionError(sb.toString());
-            }
+            assertCleanStdErr();
         }
     }
 
@@ -601,8 +524,11 @@ public class ToolRunner
 
     private static final class ForkedObservableTool implements ObservableTool
     {
+        @SuppressWarnings("resource")
         private final ByteArrayOutputStream err = new ByteArrayOutputStream();
+        @SuppressWarnings("resource")
         private final ByteArrayOutputStream out = new ByteArrayOutputStream();
+        @SuppressWarnings("resource")
         private final InputStream stdin;
         private final Process process;
         private final Thread[] ioWatchers;
@@ -623,19 +549,19 @@ public class ToolRunner
             if (includeStdinWatcher)
                 numWatchers = 3;
             ioWatchers = new Thread[numWatchers];
-            ioWatchers[0] = new Thread(new StreamGobbler<>(process.getErrorStream(), err, false));
+            ioWatchers[0] = new Thread(new StreamGobbler<>(process.getErrorStream(), err));
             ioWatchers[0].setDaemon(true);
             ioWatchers[0].setName("IO Watcher stderr");
             ioWatchers[0].start();
 
-            ioWatchers[1] = new Thread(new StreamGobbler<>(process.getInputStream(), out, false));
+            ioWatchers[1] = new Thread(new StreamGobbler<>(process.getInputStream(), out));
             ioWatchers[1].setDaemon(true);
             ioWatchers[1].setName("IO Watcher stdout");
             ioWatchers[1].start();
 
             if (includeStdinWatcher)
             {
-                ioWatchers[2] = new Thread(new StreamGobbler<>(stdin, process.getOutputStream(), true));
+                ioWatchers[2] = new Thread(new StreamGobbler<>(stdin, process.getOutputStream()));
                 ioWatchers[2].setDaemon(true);
                 ioWatchers[2].setName("IO Watcher stdin");
                 ioWatchers[2].start();

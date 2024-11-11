@@ -29,19 +29,16 @@ import java.util.Map;
 import java.util.Set;
 import javax.management.openmbean.TabularData;
 
-import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.tools.NodeProbe;
 
 public class CompactionHistoryHolder implements StatsHolder
 {
     public final NodeProbe probe;
     public List<String> indexNames;
-    private final boolean humanReadable;
 
-    public CompactionHistoryHolder(NodeProbe probe, boolean humanReadable)
+    public CompactionHistoryHolder(NodeProbe probe)
     {
         this.probe = probe;
-        this.humanReadable = humanReadable;
     }
 
     /**
@@ -57,9 +54,8 @@ public class CompactionHistoryHolder implements StatsHolder
         private final long bytesIn;
         private final long bytesOut;
         private final String rowMerged;
-        private final String compactionProperties;
 
-        CompactionHistoryRow(String id, String ksName, String cfName, long compactedAt, long bytesIn, long bytesOut, String rowMerged, String compactionProperties)
+        CompactionHistoryRow(String id, String ksName, String cfName, long compactedAt, long bytesIn, long bytesOut, String rowMerged)
         {
             this.id = id;
             this.ksName = ksName;
@@ -68,7 +64,6 @@ public class CompactionHistoryHolder implements StatsHolder
             this.bytesIn = bytesIn;
             this.bytesOut = bytesOut;
             this.rowMerged = rowMerged;
-            this.compactionProperties = compactionProperties;
         }
 
         public int compareTo(CompactionHistoryHolder.CompactionHistoryRow chr)
@@ -76,7 +71,7 @@ public class CompactionHistoryHolder implements StatsHolder
             return Long.signum(chr.compactedAt - this.compactedAt);
         }
 
-        private HashMap<String, Object> getAllAsMap(boolean humanReadable)
+        private HashMap<String, Object> getAllAsMap()
         {
             HashMap<String, Object> compaction = new HashMap<>();
             compaction.put("id", this.id);
@@ -85,10 +80,9 @@ public class CompactionHistoryHolder implements StatsHolder
             Instant instant = Instant.ofEpochMilli(this.compactedAt);
             LocalDateTime ldt = LocalDateTime.ofInstant(instant, ZoneId.systemDefault());
             compaction.put("compacted_at", ldt.toString());
-            compaction.put("bytes_in", FileUtils.stringifyFileSize(this.bytesIn, humanReadable));
-            compaction.put("bytes_out", FileUtils.stringifyFileSize(this.bytesOut, humanReadable));
+            compaction.put("bytes_in", this.bytesIn);
+            compaction.put("bytes_out", this.bytesOut);
             compaction.put("rows_merged", this.rowMerged);
-            compaction.put("compaction_properties", this.compactionProperties);
             return compaction;
         }
     }
@@ -116,8 +110,7 @@ public class CompactionHistoryHolder implements StatsHolder
                 (Long)value.get(3),
                 (Long)value.get(4),
                 (Long)value.get(5),
-                (String)value.get(6),
-                (String)value.get(7)
+                (String)value.get(6)
             );
             chrList.add(chr);
         }
@@ -125,7 +118,7 @@ public class CompactionHistoryHolder implements StatsHolder
         Collections.sort(chrList);
         for (CompactionHistoryHolder.CompactionHistoryRow chr : chrList)
         {
-            compactions.add(chr.getAllAsMap(humanReadable));
+            compactions.add(chr.getAllAsMap());
         }
         result.put("CompactionHistory", compactions);
         return result;

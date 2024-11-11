@@ -26,7 +26,6 @@ import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.MoreExecutors;
 
-import org.apache.cassandra.io.sstable.format.big.BigFormatPartitionWriter;
 import org.apache.cassandra.locator.RangesAtEndpoint;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -39,7 +38,6 @@ import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.db.streaming.CassandraOutgoingFile;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryProcessor;
@@ -56,12 +54,12 @@ import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.concurrent.Refs;
 
 import static org.apache.cassandra.SchemaLoader.compositeIndexCFMD;
 import static org.apache.cassandra.SchemaLoader.createKeyspace;
 import static org.apache.cassandra.SchemaLoader.standardCFMD;
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
@@ -89,7 +87,6 @@ public class StreamingTransferTest
     public static void defineSchema() throws Exception
     {
         SchemaLoader.prepareServer();
-        MessagingService.instance().waitUntilListeningUnchecked();
         StorageService.instance.initServer();
 
         createKeyspace(KEYSPACE1,
@@ -120,7 +117,7 @@ public class StreamingTransferTest
     public void testEmptyStreamPlan() throws Exception
     {
         StreamResultFuture futureResult = new StreamPlan(StreamOperation.OTHER).execute();
-        final TimeUUID planId = futureResult.planId;
+        final UUID planId = futureResult.planId;
         Futures.addCallback(futureResult, new FutureCallback<StreamState>()
         {
             public void onSuccess(StreamState result)
@@ -152,7 +149,7 @@ public class StreamingTransferTest
                                                   .requestRanges(LOCAL, KEYSPACE2, RangesAtEndpoint.toDummyList(ranges), RangesAtEndpoint.toDummyList(Collections.emptyList()))
                                                   .execute();
 
-        TimeUUID planId = futureResult.planId;
+        UUID planId = futureResult.planId;
         StreamState result = futureResult.get();
         assert planId.equals(result.planId);
         assert result.streamOperation == StreamOperation.OTHER;
@@ -178,7 +175,7 @@ public class StreamingTransferTest
         long timestamp = 1234;
         for (int i = 1; i <= 3; i++)
             mutator.mutate("key" + i, "col" + i, timestamp);
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         Util.compactAll(cfs, Integer.MAX_VALUE).get();
         assertEquals(1, cfs.getLiveSSTables().size());
 
@@ -204,7 +201,7 @@ public class StreamingTransferTest
         assertEquals(1, cfs.getLiveSSTables().size());
 
         // and that the index and filter were properly recovered
-        List<ImmutableBTreePartition> partitions = Util.getAllUnfiltered(Util.cmd(cfs).build());
+        List<? extends Partition> partitions = Util.getAllUnfiltered(Util.cmd(cfs).build());
         assertEquals(offs.length, partitions.size());
         for (int i = 0; i < offs.length; i++)
         {
@@ -212,9 +209,9 @@ public class StreamingTransferTest
             String col = "col" + offs[i];
 
             assert !Util.getAll(Util.cmd(cfs, key).build()).isEmpty();
-            ImmutableBTreePartition partition = partitions.get(i);
+            Partition partition = partitions.get(i);
             assert ByteBufferUtil.compareUnsigned(partition.partitionKey().getKey(), ByteBufferUtil.bytes(key)) == 0;
-            assert ByteBufferUtil.compareUnsigned(partition.iterator().next().clustering().bufferAt(0), ByteBufferUtil.bytes(col)) == 0;
+            assert ByteBufferUtil.compareUnsigned(partition.unfilteredIterator().next().clustering().bufferAt(0), ByteBufferUtil.bytes(col)) == 0;
         }
 
         // and that the max timestamp for the file was rediscovered
@@ -243,13 +240,13 @@ public class StreamingTransferTest
         List<Range<Token>> ranges = new ArrayList<>();
         // wrapped range
         ranges.add(new Range<Token>(p.getToken(ByteBufferUtil.bytes("key1")), p.getToken(ByteBufferUtil.bytes("key0"))));
-        StreamPlan streamPlan = new StreamPlan(StreamOperation.OTHER).transferRanges(LOCAL, cfs.getKeyspaceName(), RangesAtEndpoint.toDummyList(ranges), cfs.getTableName());
+        StreamPlan streamPlan = new StreamPlan(StreamOperation.OTHER).transferRanges(LOCAL, cfs.keyspace.getName(), RangesAtEndpoint.toDummyList(ranges), cfs.getTableName());
         streamPlan.execute().get();
 
         //cannot add ranges after stream session is finished
         try
         {
-            streamPlan.transferRanges(LOCAL, cfs.getKeyspaceName(), RangesAtEndpoint.toDummyList(ranges), cfs.getTableName());
+            streamPlan.transferRanges(LOCAL, cfs.keyspace.getName(), RangesAtEndpoint.toDummyList(ranges), cfs.getTableName());
             fail("Should have thrown exception");
         }
         catch (RuntimeException e)
@@ -344,13 +341,13 @@ public class StreamingTransferTest
 
         // add columns of size slightly less than column_index_size to force insert column index
         updates.clustering(1)
-                .add("val", ByteBuffer.wrap(new byte[DatabaseDescriptor.getColumnIndexSize(BigFormatPartitionWriter.DEFAULT_GRANULARITY) - 64]))
+                .add("val", ByteBuffer.wrap(new byte[DatabaseDescriptor.getColumnIndexSize() - 64]))
                 .build()
                 .apply();
 
         updates = new RowUpdateBuilder(cfs.metadata(), FBUtilities.timestampMicros(), key);
         updates.clustering(6)
-                .add("val", ByteBuffer.wrap(new byte[DatabaseDescriptor.getColumnIndexSize(BigFormatPartitionWriter.DEFAULT_GRANULARITY)]))
+                .add("val", ByteBuffer.wrap(new byte[DatabaseDescriptor.getColumnIndexSize()]))
                 .build()
                 .apply();
 
@@ -366,7 +363,7 @@ public class StreamingTransferTest
                 .build()
                 .apply();
 
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
 
         SSTableReader sstable = cfs.getLiveSSTables().iterator().next();
         cfs.clearUnsafe();
@@ -558,7 +555,7 @@ public class StreamingTransferTest
         // write a lot more data so the data is spread in more than 1 chunk.
         for (int i = 1; i <= 6000; i++)
             mutator.mutate("key" + i, "col" + i, System.currentTimeMillis());
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         Util.compactAll(cfs, Integer.MAX_VALUE).get();
         SSTableReader sstable = cfs.getLiveSSTables().iterator().next();
         cfs.clearUnsafe();

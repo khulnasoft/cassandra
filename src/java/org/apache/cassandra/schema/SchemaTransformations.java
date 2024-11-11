@@ -23,10 +23,6 @@ import java.util.Optional;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.exceptions.AlreadyExistsException;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.cql3.CQLStatement;
-import org.apache.cassandra.cql3.QueryProcessor;
-import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.tcm.ClusterMetadata;
 
 import static org.apache.cassandra.cql3.statements.RequestValidations.invalidRequest;
 
@@ -35,14 +31,6 @@ import static org.apache.cassandra.cql3.statements.RequestValidations.invalidReq
  */
 public class SchemaTransformations
 {
-    public static SchemaTransformation fromCql(String cql)
-    {
-        CQLStatement statement = QueryProcessor.getStatement(cql, ClientState.forInternalCalls());
-        if (!(statement instanceof SchemaTransformation))
-            throw new IllegalArgumentException("Can not deserialize schema transformation");
-        return (SchemaTransformation) statement;
-    }
-
     /**
      * Creates a schema transformation that adds the provided keyspace.
      *
@@ -54,9 +42,8 @@ public class SchemaTransformations
      */
     public static SchemaTransformation addKeyspace(KeyspaceMetadata keyspace, boolean ignoreIfExists)
     {
-        return (metadata) ->
+        return schema ->
         {
-            Keyspaces schema = metadata.schema.getKeyspaces();
             KeyspaceMetadata existing = schema.getNullable(keyspace.name);
             if (existing != null)
             {
@@ -81,9 +68,8 @@ public class SchemaTransformations
      */
     public static SchemaTransformation addTable(TableMetadata table, boolean ignoreIfExists)
     {
-        return (metadata) ->
+        return schema ->
         {
-            Keyspaces schema = metadata.schema.getKeyspaces();
             KeyspaceMetadata keyspace = schema.getNullable(table.keyspace);
             if (keyspace == null)
                 throw invalidRequest("Keyspace '%s' doesn't exist", table.keyspace);
@@ -104,9 +90,8 @@ public class SchemaTransformations
 
     public static SchemaTransformation addTypes(Types toAdd, boolean ignoreIfExists)
     {
-        return (metadata) ->
+        return schema ->
         {
-            Keyspaces schema = metadata.schema.getKeyspaces();
             if (toAdd.isEmpty())
                 return schema;
 
@@ -128,7 +113,33 @@ public class SchemaTransformations
 
                 types = types.with(type);
             }
-            return schema.withAddedOrReplaced(keyspace.withSwapped(types));
+            return schema.withAddedOrUpdated(keyspace.withSwapped(types));
+        };
+    }
+
+    /**
+     * Creates a schema transformation that either add the provided type, or "update" (replace really) it to be the
+     * provided type.
+     *
+     * <p>Please note that this usually <b>unsafe</b>: if the type exists, this replace it without any particular check
+     * and so could replace it with an incompatible version. This is used internally however for hard-coded tables
+     * (System ones, including DSE ones) to force the "last version".
+     *
+     * @param type the type to add/update.
+     * @return the created transformation.
+     */
+    public static SchemaTransformation addOrUpdateType(UserType type)
+    {
+        return schema ->
+        {
+            KeyspaceMetadata keyspace = schema.getNullable(type.keyspace);
+            if (null == keyspace)
+                throw invalidRequest("Keyspace '%s' doesn't exist", type.keyspace);
+
+            Types newTypes = keyspace.types.get(type.name).isPresent()
+                             ? keyspace.types.withUpdatedUserType(type)
+                             : keyspace.types.with(type);
+            return schema.withAddedOrUpdated(keyspace.withSwapped(newTypes));
         };
     }
 
@@ -143,9 +154,8 @@ public class SchemaTransformations
      */
     public static SchemaTransformation addView(ViewMetadata view, boolean ignoreIfExists)
     {
-        return (metadata) ->
+        return schema ->
         {
-            Keyspaces schema = metadata.schema.getKeyspaces();
             KeyspaceMetadata keyspace = schema.getNullable(view.keyspace());
             if (keyspace == null)
                 throw invalidRequest("Cannot add view to non existing keyspace '%s'", view.keyspace());
@@ -185,9 +195,8 @@ public class SchemaTransformations
             }
 
             @Override
-            public Keyspaces apply(ClusterMetadata metadata)
+            public Keyspaces apply(Keyspaces schema)
             {
-                Keyspaces schema = metadata.schema.getKeyspaces();
                 KeyspaceMetadata updatedKeyspace = keyspace;
                 KeyspaceMetadata curKeyspace = schema.getNullable(keyspace.name);
                 if (curKeyspace != null)
@@ -219,7 +228,7 @@ public class SchemaTransformations
                         }
                     }
                 }
-                return schema.withAddedOrReplaced(updatedKeyspace);
+                return schema.withAddedOrUpdated(updatedKeyspace);
             }
         };
     }

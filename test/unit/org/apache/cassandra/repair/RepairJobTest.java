@@ -27,6 +27,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -37,27 +38,19 @@ import java.util.stream.Collectors;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.ListenableFuture;
-
-import org.apache.cassandra.repair.messages.SyncResponse;
-import org.apache.cassandra.repair.messages.ValidationResponse;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.service.paxos.cleanup.PaxosRepairState;
-import org.assertj.core.api.Assertions;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.concurrent.ExecutorPlus;
-import org.apache.cassandra.db.ConsistencyLevel;
+import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.dht.ByteOrderedPartitioner;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.exceptions.RepairException;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
@@ -66,31 +59,23 @@ import org.apache.cassandra.repair.messages.RepairMessage;
 import org.apache.cassandra.repair.messages.SyncRequest;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.service.ActiveRepairService;
-import org.apache.cassandra.service.paxos.Paxos;
-import org.apache.cassandra.service.paxos.cleanup.PaxosCleanupRequest;
-import org.apache.cassandra.service.paxos.cleanup.PaxosCleanupResponse;
 import org.apache.cassandra.streaming.PreviewKind;
+import org.apache.cassandra.streaming.SessionSummary;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MerkleTree;
 import org.apache.cassandra.utils.MerkleTrees;
 import org.apache.cassandra.utils.ObjectSizes;
 import org.apache.cassandra.utils.Throwables;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.UUIDGen;
 import org.apache.cassandra.utils.asserts.SyncTaskListAssert;
 
-import static java.util.Collections.emptySet;
-import static org.apache.cassandra.repair.RepairParallelism.SEQUENTIAL;
-import static org.apache.cassandra.streaming.PreviewKind.NONE;
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
+import static org.apache.cassandra.net.Verb.SNAPSHOT_MSG;
+import static org.apache.cassandra.net.Verb.SYNC_REQ;
+import static org.apache.cassandra.net.Verb.VALIDATION_REQ;
 import static org.apache.cassandra.utils.asserts.SyncTaskAssert.assertThat;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.apache.cassandra.net.Verb.PAXOS2_CLEANUP_START_PREPARE_REQ;
-import static org.apache.cassandra.net.Verb.PAXOS2_CLEANUP_REQ;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 public class RepairJobTest
 {
@@ -105,7 +90,7 @@ public class RepairJobTest
     private static final Range<Token> RANGE_1 = range(0, 1);
     private static final Range<Token> RANGE_2 = range(2, 3);
     private static final Range<Token> RANGE_3 = range(4, 5);
-    private static final RepairJobDesc JOB_DESC = new RepairJobDesc(nextTimeUUID(), nextTimeUUID(), KEYSPACE, CF, Collections.emptyList());
+    private static final RepairJobDesc JOB_DESC = new RepairJobDesc(UUID.randomUUID(), UUID.randomUUID(), KEYSPACE, CF, Collections.emptyList());
     private static final List<Range<Token>> FULL_RANGE = Collections.singletonList(new Range<>(MURMUR3_PARTITIONER.getMinimumToken(),
                                                                                                MURMUR3_PARTITIONER.getMaximumToken()));
     private static InetAddressAndPort addr1;
@@ -123,28 +108,23 @@ public class RepairJobTest
     {
         private final List<Callable<?>> syncCompleteCallbacks = new ArrayList<>();
 
-        public MeasureableRepairSession(TimeUUID parentRepairSession, CommonRange commonRange, String keyspace,
+        public MeasureableRepairSession(UUID parentRepairSession, UUID id, CommonRange commonRange, String keyspace,
                                         RepairParallelism parallelismDegree, boolean isIncremental, boolean pullRepair,
-                                        PreviewKind previewKind, boolean optimiseStreams, boolean repairPaxos, boolean paxosOnly,
-                                        String... cfnames)
+                                        PreviewKind previewKind, boolean optimiseStreams, String... cfnames)
         {
-            super(SharedContext.Global.instance, new Scheduler.NoopScheduler(),
-                  parentRepairSession, commonRange, keyspace, parallelismDegree, isIncremental, pullRepair,
-                  previewKind, optimiseStreams, repairPaxos, paxosOnly, cfnames);
+            super(parentRepairSession, id, Scheduler.build(0), commonRange, keyspace, parallelismDegree, isIncremental,
+                  false, pullRepair, previewKind, optimiseStreams, cfnames);
+        }
+
+        protected DebuggableThreadPoolExecutor createExecutor()
+        {
+            DebuggableThreadPoolExecutor executor = super.createExecutor();
+            executor.setKeepAliveTime(THREAD_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+            return executor;
         }
 
         @Override
-        protected ExecutorPlus createExecutor(SharedContext ctx)
-        {
-            return ctx.executorFactory()
-                    .configurePooled("RepairJobTask", Integer.MAX_VALUE)
-                    .withDefaultThreadGroup()
-                    .withKeepAlive(THREAD_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
-                    .build();
-        }
-
-        @Override
-        public void syncComplete(RepairJobDesc desc, Message<SyncResponse> message)
+        public void syncComplete(RepairJobDesc desc, SyncNodePair nodes, boolean success, List<SessionSummary> summaries)
         {
             for (Callable<?> callback : syncCompleteCallbacks)
             {
@@ -157,7 +137,7 @@ public class RepairJobTest
                     throw Throwables.cleaned(e);
                 }
             }
-            super.syncComplete(desc, message);
+            super.syncComplete(desc, nodes, success, summaries);
         }
 
         public void registerSyncCompleteCallback(Callable<?> callback)
@@ -170,9 +150,6 @@ public class RepairJobTest
     public static void setupClass() throws UnknownHostException
     {
         SchemaLoader.prepareServer();
-        // todo; tcm - we default to paxos v2, which implies running paxos repairs, in trunk we default to v1 which doesn't
-        //       this test doesn't run them, so disable here for now
-        DatabaseDescriptor.setPaxosRepairEnabled(false);
         SchemaLoader.createKeyspace(KEYSPACE,
                                     KeyspaceParams.simple(1),
                                     SchemaLoader.standardCFMD(KEYSPACE, CF));
@@ -188,27 +165,27 @@ public class RepairJobTest
     {
         Set<InetAddressAndPort> neighbors = new HashSet<>(Arrays.asList(addr2, addr3));
 
-        TimeUUID parentRepairSession = nextTimeUUID();
-        ActiveRepairService.instance().registerParentRepairSession(parentRepairSession, FBUtilities.getBroadcastAddressAndPort(),
-                                                                   Collections.singletonList(Keyspace.open(KEYSPACE).getColumnFamilyStore(CF)), FULL_RANGE, false,
-                                                                   ActiveRepairService.UNREPAIRED_SSTABLE, false, PreviewKind.NONE);
+        UUID parentRepairSession = UUID.randomUUID();
+        ActiveRepairService.instance.registerParentRepairSession(parentRepairSession, FBUtilities.getBroadcastAddressAndPort(),
+                                                                 Collections.singletonList(Keyspace.open(KEYSPACE).getColumnFamilyStore(CF)), FULL_RANGE, false,
+                                                                 ActiveRepairService.UNREPAIRED_SSTABLE, false, PreviewKind.NONE);
 
-        this.session = new MeasureableRepairSession(parentRepairSession,
-                                                    new CommonRange(neighbors, emptySet(), FULL_RANGE),
-                                                    KEYSPACE, SEQUENTIAL, false, false,
-                                                    NONE, false, true, false, CF);
+        this.session = new MeasureableRepairSession(parentRepairSession, UUIDGen.getTimeUUID(),
+                                                    new CommonRange(neighbors, Collections.emptySet(), FULL_RANGE),
+                                                    KEYSPACE, RepairParallelism.SEQUENTIAL, false, false,
+                                                    PreviewKind.NONE, false, CF);
 
         this.job = new RepairJob(session, CF);
-        this.sessionJobDesc = new RepairJobDesc(session.state.parentRepairSession, session.getId(),
-                                                session.state.keyspace, CF, session.ranges());
+        this.sessionJobDesc = new RepairJobDesc(session.parentRepairSession, session.getId(),
+                                                session.keyspace, CF, session.ranges());
 
-        FBUtilities.setBroadcastInetAddress(addr1.getAddress());
+        FBUtilities.setBroadcastInetAddress(addr1.address);
     }
 
     @After
     public void reset()
     {
-        ActiveRepairService.instance().terminateSessions();
+        ActiveRepairService.instance.terminateSessions();
         MessagingService.instance().outboundSink.clear();
         MessagingService.instance().inboundSink.clear();
         FBUtilities.reset();
@@ -230,7 +207,6 @@ public class RepairJobTest
 
         job.run();
 
-        Thread.sleep(1000);
         RepairResult result = job.get(TEST_TIMEOUT_S, TimeUnit.SECONDS);
 
         // Since there are no differences, there should be nothing to sync.
@@ -239,9 +215,9 @@ public class RepairJobTest
         // RepairJob should send out SNAPSHOTS -> VALIDATIONS -> done
         List<Verb> expectedTypes = new ArrayList<>();
         for (int i = 0; i < 3; i++)
-            expectedTypes.add(Verb.SNAPSHOT_MSG);
+            expectedTypes.add(SNAPSHOT_MSG);
         for (int i = 0; i < 3; i++)
-            expectedTypes.add(Verb.VALIDATION_REQ);
+            expectedTypes.add(VALIDATION_REQ);
 
         assertThat(observedMessages).extracting(Message::verb).containsExactlyElementsOf(expectedTypes);
     }
@@ -268,18 +244,16 @@ public class RepairJobTest
 
         // Use addr4 instead of one of the provided trees to force everything to be remote sync tasks as
         // LocalSyncTasks try to reach over the network.
-        List<SyncTask> syncTasks = RepairJob.createStandardSyncTasks(SharedContext.Global.instance, sessionJobDesc, mockTreeResponses,
+        List<SyncTask> syncTasks = RepairJob.createStandardSyncTasks(sessionJobDesc, mockTreeResponses,
                                                                      addr4, // local
                                                                      noTransient(),
                                                                      session.isIncremental,
+                                                                     session.pushRepair,
                                                                      session.pullRepair,
                                                                      session.previewKind);
 
         // SyncTasks themselves should not contain significant memory
         SyncTaskListAssert.assertThat(syncTasks).hasSizeLessThan(0.2 * singleTreeSize);
-
-        // Remember the size of the session before we've executed any tasks
-        long sizeBeforeExecution = ObjectSizes.measureDeep(session);
 
         // block syncComplete execution until test has verified session still retains the trees
         CompletableFuture<?> future = new CompletableFuture<>();
@@ -287,8 +261,7 @@ public class RepairJobTest
         ListenableFuture<List<SyncStat>> syncResults = job.executeTasks(syncTasks);
 
         // Immediately following execution the internal execution queue should still retain the trees
-        long sizeDuringExecution = ObjectSizes.measureDeep(session);
-        assertThat(sizeDuringExecution).isGreaterThan(sizeBeforeExecution + (syncTasks.size() * singleTreeSize));
+        assertThat(ObjectSizes.measureDeep(session)).isGreaterThan(singleTreeSize);
         // unblock syncComplete callback, session should remove trees
         future.complete(null);
 
@@ -297,8 +270,9 @@ public class RepairJobTest
         long millisUntilFreed;
         for (millisUntilFreed = 0; millisUntilFreed < TEST_TIMEOUT_S * 1000; millisUntilFreed += THREAD_TIMEOUT_MILLIS)
         {
+            // The measured size of the syncingTasks, and result of the computation should be much smaller
             TimeUnit.MILLISECONDS.sleep(THREAD_TIMEOUT_MILLIS);
-            if (ObjectSizes.measureDeep(session) < (sizeDuringExecution - (syncTasks.size() * singleTreeSize)))
+            if (ObjectSizes.measureDeep(session) < 0.8 * singleTreeSize)
                 break;
         }
 
@@ -311,43 +285,13 @@ public class RepairJobTest
 
         assertThat(results)
             .hasSize(2)
-            .extracting(s -> s.differences.size())
-            .containsOnly(1);
+            .extracting(s -> s.numberOfDifferences)
+            .containsOnly(1L);
 
         assertThat(messages)
             .hasSize(2)
             .extracting(Message::verb)
-            .containsOnly(Verb.SYNC_REQ);
-    }
-
-    @Test
-    public void testValidationFailure() throws InterruptedException, TimeoutException
-    {
-        Map<InetAddressAndPort, MerkleTrees> mockTrees = new HashMap<>();
-        mockTrees.put(addr1, createInitialTree(false));
-        mockTrees.put(addr2, createInitialTree(false));
-        mockTrees.put(addr3, null);
-
-        interceptRepairMessages(mockTrees, new ArrayList<>());
-
-        try 
-        {
-            job.run();
-            job.get(TEST_TIMEOUT_S, TimeUnit.SECONDS);
-            fail("The repair job should have failed on a simulated validation error.");
-        }
-        catch (ExecutionException e)
-        {
-            Assertions.assertThat(e).hasRootCauseInstanceOf(RepairException.class);
-        }
-
-        // When the job fails, all three outstanding validation tasks should be aborted.
-        List<ValidationTask> tasks = job.validationTasks;
-        assertEquals(3, tasks.size());
-        assertFalse(tasks.stream().anyMatch(ValidationTask::isActive));
-        // Switched from false to true in CASSANDRA-18816.
-        // The reason is that not failing the future can cause the failing cleanup logic to not always happen
-        assertTrue(tasks.stream().allMatch(ValidationTask::isDone));
+            .containsOnly(SYNC_REQ);
     }
 
     @Test
@@ -368,10 +312,11 @@ public class RepairJobTest
                                                          treeResponse(addr2, RANGE_1, "different", RANGE_2, "same", RANGE_3, "different"),
                                                          treeResponse(addr3, RANGE_1, "same", RANGE_2, "same", RANGE_3, "same"));
 
-        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(SharedContext.Global.instance, JOB_DESC,
+        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(JOB_DESC,
                                                                                     treeResponses,
                                                                                     addr1, // local
                                                                                     noTransient(), // transient
+                                                                                    false,
                                                                                     false,
                                                                                     pullRepair,
                                                                                     PreviewKind.ALL));
@@ -392,6 +337,40 @@ public class RepairJobTest
     }
 
     @Test
+    public void testCreateStandardSyncTasksWithPushRepair()
+    {
+        List<TreeResponse> treeResponses = Arrays.asList(treeResponse(addr1, RANGE_1, "1", RANGE_2, "1", RANGE_3, "1"),
+                                                         treeResponse(addr2, RANGE_1, "1", RANGE_2, "2", RANGE_3, "3"),
+                                                         treeResponse(addr3, RANGE_1, "2", RANGE_2, "3", RANGE_3, "1"));
+
+        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(JOB_DESC,
+                                                                                    treeResponses,
+                                                                                    addr1, // local
+                                                                                    noTransient(), // transient
+                                                                                    false,
+                                                                                    true,
+                                                                                    false,
+                                                                                    PreviewKind.ALL));
+        assertThat(tasks).hasSize(2);
+
+        // between local and addr2: range2 and rang3 are different
+        assertThat(tasks.get(pair(addr1, addr2)))
+        .isInstanceOf(LocalSyncTask.class)
+        .isLocal()
+        .isNotRequestRanges()
+        .hasTransferRanges(true)
+        .hasRanges(RANGE_2, RANGE_3);
+
+        // between local and addr3: range1 and rang2 are different
+        assertThat(tasks.get(pair(addr1, addr3)))
+        .isInstanceOf(LocalSyncTask.class)
+        .isLocal()
+        .isNotRequestRanges()
+        .hasTransferRanges(true)
+        .hasRanges(RANGE_1, RANGE_2);
+    }
+
+    @Test
     public void testStandardSyncTransient()
     {
         // Do not stream towards transient nodes
@@ -404,10 +383,11 @@ public class RepairJobTest
         List<TreeResponse> treeResponses = Arrays.asList(treeResponse(addr1, RANGE_1, "same", RANGE_2, "same", RANGE_3, "same"),
                                                          treeResponse(addr2, RANGE_1, "different", RANGE_2, "same", RANGE_3, "different"));
 
-        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(SharedContext.Global.instance, JOB_DESC,
+        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(JOB_DESC,
                                                                                     treeResponses,
                                                                                     addr1, // local
                                                                                     transientPredicate(addr2),
+                                                                                    false,
                                                                                     false,
                                                                                     pullRepair,
                                                                                     PreviewKind.ALL));
@@ -434,10 +414,11 @@ public class RepairJobTest
         List<TreeResponse> treeResponses = Arrays.asList(treeResponse(addr1, RANGE_1, "same", RANGE_2, "same", RANGE_3, "same"),
                                                          treeResponse(addr2, RANGE_1, "different", RANGE_2, "same", RANGE_3, "different"));
 
-        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(SharedContext.Global.instance, JOB_DESC,
+        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(JOB_DESC,
                                                                                     treeResponses,
                                                                                     addr1, // local
                                                                                     transientPredicate(addr1),
+                                                                                    false,
                                                                                     false,
                                                                                     pullRepair,
                                                                                     PreviewKind.ALL));
@@ -494,10 +475,11 @@ public class RepairJobTest
         List<TreeResponse> treeResponses = Arrays.asList(treeResponse(addr1, RANGE_1, "same", RANGE_2, "same", RANGE_3, "same"),
                                                          treeResponse(addr2, RANGE_1, "same", RANGE_2, "same", RANGE_3, "same"));
 
-        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(SharedContext.Global.instance, JOB_DESC,
+        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(JOB_DESC,
                                                                                     treeResponses,
                                                                                     local, // local
                                                                                     isTransient,
+                                                                                    false,
                                                                                     false,
                                                                                     pullRepair,
                                                                                     PreviewKind.ALL));
@@ -512,10 +494,11 @@ public class RepairJobTest
                                                          treeResponse(addr2, RANGE_1, "two", RANGE_2, "two", RANGE_3, "two"),
                                                          treeResponse(addr3, RANGE_1, "three", RANGE_2, "three", RANGE_3, "three"));
 
-        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(SharedContext.Global.instance, JOB_DESC,
+        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(JOB_DESC,
                                                                                     treeResponses,
                                                                                     addr1, // local
                                                                                     ep -> ep.equals(addr3), // transient
+                                                                                    false,
                                                                                     false,
                                                                                     true,
                                                                                     PreviewKind.ALL));
@@ -543,10 +526,11 @@ public class RepairJobTest
                                                          treeResponse(addr5, RANGE_1, "five", RANGE_2, "five", RANGE_3, "five"));
 
         Predicate<InetAddressAndPort> isTransient = ep -> ep.equals(addr4) || ep.equals(addr5);
-        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(SharedContext.Global.instance, JOB_DESC,
+        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(JOB_DESC,
                                                                                     treeResponses,
                                                                                     addr1, // local
                                                                                     isTransient, // transient
+                                                                                    false,
                                                                                     false,
                                                                                     true,
                                                                                     PreviewKind.ALL));
@@ -585,7 +569,7 @@ public class RepairJobTest
         for (InetAddressAndPort local : new InetAddressAndPort[]{ addr1, addr2, addr3 })
         {
             FBUtilities.reset();
-            FBUtilities.setBroadcastInetAddress(local.getAddress());
+            FBUtilities.setBroadcastInetAddress(local.address);
             testLocalSyncWithTransient(local, false);
         }
     }
@@ -596,7 +580,7 @@ public class RepairJobTest
         for (InetAddressAndPort local : new InetAddressAndPort[]{ addr1, addr2, addr3 })
         {
             FBUtilities.reset();
-            FBUtilities.setBroadcastInetAddress(local.getAddress());
+            FBUtilities.setBroadcastInetAddress(local.address);
             testLocalSyncWithTransient(local, true);
         }
     }
@@ -610,10 +594,11 @@ public class RepairJobTest
                                                          treeResponse(addr5, RANGE_1, "five", RANGE_2, "five", RANGE_3, "five"));
 
         Predicate<InetAddressAndPort> isTransient = ep -> ep.equals(addr4) || ep.equals(addr5);
-        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(SharedContext.Global.instance, JOB_DESC,
+        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(JOB_DESC,
                                                                                     treeResponses,
                                                                                     local, // local
                                                                                     isTransient, // transient
+                                                                                    false,
                                                                                     false,
                                                                                     pullRepair,
                                                                                     PreviewKind.ALL));
@@ -652,17 +637,18 @@ public class RepairJobTest
 
     private static void testLocalAndRemoteTransient(boolean pullRepair)
     {
-        FBUtilities.setBroadcastInetAddress(addr4.getAddress());
+        FBUtilities.setBroadcastInetAddress(addr4.address);
         List<TreeResponse> treeResponses = Arrays.asList(treeResponse(addr1, RANGE_1, "one", RANGE_2, "one", RANGE_3, "one"),
                                                          treeResponse(addr2, RANGE_1, "two", RANGE_2, "two", RANGE_3, "two"),
                                                          treeResponse(addr3, RANGE_1, "three", RANGE_2, "three", RANGE_3, "three"),
                                                          treeResponse(addr4, RANGE_1, "four", RANGE_2, "four", RANGE_3, "four"),
                                                          treeResponse(addr5, RANGE_1, "five", RANGE_2, "five", RANGE_3, "five"));
 
-        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(SharedContext.Global.instance, JOB_DESC,
+        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createStandardSyncTasks(JOB_DESC,
                                                                                     treeResponses,
                                                                                     addr4, // local
                                                                                     ep -> ep.equals(addr4) || ep.equals(addr5), // transient
+                                                                                    false,
                                                                                     false,
                                                                                     pullRepair,
                                                                                     PreviewKind.ALL));
@@ -677,7 +663,7 @@ public class RepairJobTest
                                                          treeResponse(addr2, RANGE_1, "two", RANGE_2, "two", RANGE_3, "two"),
                                                          treeResponse(addr3, RANGE_1, "three", RANGE_2, "three", RANGE_3, "three"));
 
-        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createOptimisedSyncingSyncTasks(SharedContext.Global.instance, JOB_DESC,
+        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createOptimisedSyncingSyncTasks(JOB_DESC,
                                                                                             treeResponses,
                                                                                             addr1, // local
                                                                                             noTransient(),
@@ -712,7 +698,7 @@ public class RepairJobTest
                                                          treeResponse(addr2, RANGE_1, "one", RANGE_2, "two"),
                                                          treeResponse(addr3, RANGE_1, "three", RANGE_2, "two"));
 
-        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createOptimisedSyncingSyncTasks(SharedContext.Global.instance, JOB_DESC,
+        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createOptimisedSyncingSyncTasks(JOB_DESC,
                                                                                             treeResponses,
                                                                                             addr4, // local
                                                                                             noTransient(),
@@ -744,8 +730,8 @@ public class RepairJobTest
                                                          treeResponse(addr2, RANGE_1, "different", RANGE_2, "same", RANGE_3, "different"),
                                                          treeResponse(addr3, RANGE_1, "same", RANGE_2, "same", RANGE_3, "same"));
 
-        RepairJobDesc desc = new RepairJobDesc(nextTimeUUID(), nextTimeUUID(), "ks", "cf", Collections.emptyList());
-        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createOptimisedSyncingSyncTasks(SharedContext.Global.instance, desc,
+        RepairJobDesc desc = new RepairJobDesc(UUID.randomUUID(), UUID.randomUUID(), "ks", "cf", Collections.emptyList());
+        Map<SyncNodePair, SyncTask> tasks = toMap(RepairJob.createOptimisedSyncingSyncTasks(desc,
                                                                                             treeResponses,
                                                                                             addr1, // local
                                                                                             ep -> ep.equals(addr3),
@@ -846,19 +832,19 @@ public class RepairJobTest
 
     private MerkleTrees createInitialTree(boolean invalidate)
     {
-        MerkleTrees trees = new MerkleTrees(MURMUR3_PARTITIONER);
-        trees.addMerkleTrees((int) Math.pow(2, 15), FULL_RANGE);
-        trees.init();
+        MerkleTrees tree = new MerkleTrees(MURMUR3_PARTITIONER);
+        tree.addMerkleTrees((int) Math.pow(2, 15), FULL_RANGE);
+        tree.init();
 
         if (invalidate)
         {
             // change a range in one of the trees
             Token token = MURMUR3_PARTITIONER.midpoint(FULL_RANGE.get(0).left, FULL_RANGE.get(0).right);
-            trees.invalidate(token);
-            trees.get(token).hash("non-empty hash!".getBytes());
+            tree.invalidate(token);
+            tree.get(token).hash("non-empty hash!".getBytes());
         }
 
-        return trees;
+        return tree;
     }
 
     private void interceptRepairMessages(Map<InetAddressAndPort, MerkleTrees> mockTrees,
@@ -866,49 +852,30 @@ public class RepairJobTest
     {
         MessagingService.instance().inboundSink.add(message -> message.verb().isResponse());
         MessagingService.instance().outboundSink.add((message, to) -> {
-                if (message == null || !(message.payload instanceof RepairMessage))
-                    return false;
-
-                if (message.verb() == PAXOS2_CLEANUP_START_PREPARE_REQ)
-                {
-                    Message<?> messageIn = message.responseWith(Paxos.newBallot(null, ConsistencyLevel.SERIAL));
-                    MessagingService.instance().inboundSink.accept(messageIn);
-                    return false;
-                }
-
-                if (message.verb() == PAXOS2_CLEANUP_REQ)
-                {
-                    PaxosCleanupRequest request = (PaxosCleanupRequest) message.payload;
-                    PaxosRepairState.instance().finishSession(to, new PaxosCleanupResponse(request.session, true, null));
-                    return false;
-                }
-
-                if (!(message.payload instanceof RepairMessage))
-                    return false;
-
-                // So different Thread's messages don't overwrite each other.
-                synchronized (MESSAGE_LOCK)
-                {
-                    messageCapture.add(message);
-                }
-
-                switch (message.verb())
-                {
-                    case SNAPSHOT_MSG:
-                        MessagingService.instance().callbacks.removeAndRespond(message.id(), to, message.emptyResponse());
-                        break;
-                    case VALIDATION_REQ:
-                        MerkleTrees tree = mockTrees.get(to);
-                        session.validationComplete(sessionJobDesc, Message.builder(Verb.VALIDATION_RSP, tree != null ? new ValidationResponse(sessionJobDesc, tree) : new ValidationResponse(sessionJobDesc)).from(to).build());
-                        break;
-                    case SYNC_REQ:
-                        SyncRequest syncRequest = (SyncRequest) message.payload;
-                        session.syncComplete(sessionJobDesc, Message.builder(Verb.SYNC_RSP, new SyncResponse(sessionJobDesc, new SyncNodePair(syncRequest.src, syncRequest.dst), true, Collections.emptyList())).from(to).build());
-                        break;
-                    default:
-                        break;
-                }
+            if (message == null || !(message.payload instanceof RepairMessage))
                 return false;
+
+            // So different Thread's messages don't overwrite each other.
+            synchronized (MESSAGE_LOCK)
+            {
+                messageCapture.add(message);
+            }
+
+            if (message.verb() == SNAPSHOT_MSG)
+            {
+                MessagingService.instance().callbacks.removeAndRespond(message.id(), to, message.emptyResponse());
+            }
+            else if (message.verb() == VALIDATION_REQ)
+            {
+                session.validationComplete(sessionJobDesc, to, mockTrees.get(to));
+            }
+            else if (message.verb() == SYNC_REQ)
+            {
+                SyncRequest syncRequest = (SyncRequest) message.payload;
+                session.syncComplete(sessionJobDesc, new SyncNodePair(syncRequest.src, syncRequest.dst),
+                                     true, Collections.emptyList());
+            }
+            return false;
         });
     }
 }

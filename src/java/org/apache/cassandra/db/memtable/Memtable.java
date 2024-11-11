@@ -19,40 +19,44 @@
 package org.apache.cassandra.db.memtable;
 
 import java.util.concurrent.atomic.AtomicReference;
-import javax.annotation.concurrent.NotThreadSafe;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.util.concurrent.ListenableFuture;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DataRange;
+import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.commitlog.CommitLogPosition;
+import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.partitions.BTreePartitionUpdate;
 import org.apache.cassandra.db.partitions.Partition;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
+import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.rows.EncodingStats;
-import org.apache.cassandra.db.rows.UnfilteredSource;
 import org.apache.cassandra.index.transactions.UpdateTransaction;
 import org.apache.cassandra.io.sstable.format.SSTableWriter;
+import org.apache.cassandra.metrics.TableMetrics;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.concurrent.Future;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 
 /**
  * Memtable interface. This defines the operations the ColumnFamilyStore can perform with memtables.
  * They are of several types:
  * - construction factory interface
- * - write and read operations: put, rowIterator and partitionIterator
+ * - write and read operations: put, getPartition and makePartitionIterator
  * - statistics and features, including partition counts, data size, encoding stats, written columns
  * - memory usage tracking, including methods of retrieval and of adding extra allocated space (used non-CFS secondary
  *   indexes)
  * - flush functionality, preparing the set of partitions to flush for given ranges
  * - lifecycle management, i.e. operations that prepare and execute switch to a different memtable, together
  *   with ways of tracking the affected commit log spans
- *
- * See Memtable_API.md for details on implementing and using alternative memtable implementations.
  */
-public interface Memtable extends Comparable<Memtable>, UnfilteredSource
+public interface Memtable extends Comparable<Memtable>
 {
     public static final long NO_MIN_TIMESTAMP = -1;
 
@@ -62,10 +66,9 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
      * Factory interface for constructing memtables, and querying write durability features.
      *
      * The factory is chosen using the MemtableParams class (passed as argument to
-     * {@code CREATE TABLE ... WITH memtable = '<configuration_name>'} where the configuration definition is a map given
-     * under {@code memtable_configurations} in cassandra.yaml). To make that possible, implementations must provide
-     * either a static {@code FACTORY} field (if they accept no further option) or a static
-     * {@code factory(Map<String, String>)} method. In the latter case, the method should avoid creating
+     * {@code CREATE TABLE ... WITH memtable = {...}} or in the memtable options in cassandra.yaml). To make that
+     * possible, implementations must provide either a static {@code FACTORY} field (if they accept no further option)
+     * or a static {@code factory(Map<String, String>)} method. In the latter case, the method should avoid creating
      * multiple instances of the factory for the same parameters, or factories should at least implement hashCode and
      * equals.
      */
@@ -81,16 +84,6 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
          * @param owner Owning objects that will receive flush requests triggered by the memtable (e.g. on expiration).
          */
         Memtable create(AtomicReference<CommitLogPosition> commitLogLowerBound, TableMetadataRef metadaRef, Owner owner);
-
-        /**
-         * Create a release action for the memtable's metrics. This is used to release any resources that are not needed.
-         * @param metadataRef Pointer to the up-to-date table metadata.
-         * @return Runnable that releases the metrics resources.
-         */
-        default Runnable createMemtableMetricsReleaser(TableMetadataRef metadataRef)
-        {
-            return () -> {};
-        }
 
         /**
          * If the memtable can achieve write durability directly (i.e. using some feature other than the commitlog, e.g.
@@ -145,17 +138,32 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
         {
             return false;
         }
+
+        /**
+         * Memtable metrics lifecycle matches table lifecycle. It is the table
+         * that owns the metrics and decides when to release them;
+         */
+        default TableMetrics.ReleasableMetric createMemtableMetrics(TableMetadataRef metadataRef)
+        {
+            return null;
+        }
+
+        /**
+         * Override this method to provide a custom partition update factory for more efficient merging of updates.
+         */
+        default PartitionUpdate.Factory partitionUpdateFactory()
+        {
+            return BTreePartitionUpdate.FACTORY;
+        }
     }
 
     /**
-     * Interface for providing signals back and requesting information from the owner, i.e. the object that controls the
-     * memtable. This is usually the ColumnFamilyStore; the interface is used to limit the dependency of memtables on
-     * the details of its implementation.
+     * Interface for providing signals back to the owner.
      */
     interface Owner
     {
         /** Signal to the owner that a flush is required (e.g. in response to hitting space limits) */
-        Future<CommitLogPosition> signalFlushRequired(Memtable memtable, ColumnFamilyStore.FlushReason reason);
+        ListenableFuture<CommitLogPosition> signalFlushRequired(Memtable memtable, ColumnFamilyStore.FlushReason reason);
 
         /** Get the current memtable for this owner. Used to avoid capturing memtable in scheduled flush tasks. */
         Memtable getCurrentMemtable();
@@ -166,14 +174,12 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
          */
         Iterable<Memtable> getIndexMemtables();
 
-        /**
-         * Construct a list of boundaries that split the locally-owned ranges into the given number of shards,
-         * splitting the owned space evenly. It is up to the memtable to use this information.
-         * Any changes in the ring structure (e.g. added or removed nodes) will invalidate the splits; in such a case
-         * the memtable will be sent a {@link #shouldSwitch}(OWNED_RANGES_CHANGE) and, should that return false, a
-         * {@link #localRangesUpdated()} call.
-         */
         ShardBoundaries localRangeSplits(int shardCount);
+
+        /**
+         * Get the op-order primitive that protects data for the duration of reads.
+         */
+        public OpOrder readOrdering();
     }
 
     // Main write and read operations
@@ -192,7 +198,29 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
      */
     long put(PartitionUpdate update, UpdateTransaction indexer, OpOrder.Group opGroup);
 
-    // Read operations are provided by the UnfilteredSource interface.
+    /**
+     * Get the partition for the specified key. Returns null if no such partition is present.
+     */
+    Partition getPartition(DecoratedKey key);
+
+    /**
+     * Returns a partition iterator for the given data range.
+     *
+     * @param columnFilter filter to apply to all returned partitions
+     * @param dataRange the partition and clustering range queried
+     */
+    MemtableUnfilteredPartitionIterator makePartitionIterator(ColumnFilter columnFilter,
+                                                              DataRange dataRange);
+
+    interface MemtableUnfilteredPartitionIterator extends UnfilteredPartitionIterator
+    {
+        /**
+         * Returns the minimum local deletion time for all partitions in the range.
+         * Required for the efficiency of partition range read commands.
+         */
+        int getMinLocalDeletionTime();
+    }
+
 
     // Statistics
 
@@ -202,11 +230,23 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
     /** Size of the data not accounting for any metadata / mapping overheads */
     long getLiveDataSize();
 
+    /** Average size of the data of each row */
+    long getEstimatedAverageRowSize();
+
     /**
      * Number of "operations" (in the sense defined in {@link PartitionUpdate#operationCount()}) the memtable has
      * executed.
      */
-    long operationCount();
+    long getOperations();
+
+    /** Minimum timestamp of all stored data */
+    long getMinTimestamp();
+
+    /** Min partition key inserted so far. */
+    DecoratedKey minPartitionKey();
+
+    /** Max partition key inserted so far. */
+    DecoratedKey maxPartitionKey();
 
     /**
      * The table's definition metadata.
@@ -215,6 +255,16 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
      * the memtable.
      */
     TableMetadata metadata();
+
+    /**
+     * The {@link OpOrder} that guards reads from this memtable. This is used to ensure that the memtable does not corrupt any
+     * active reads because of other operations on it. Returns null if the memtable is not protected by an OpOrder
+     * (overridden by {@link AbstractAllocatorMemtable}).
+     */
+    default OpOrder readOrdering()
+    {
+        return null;
+    }
 
 
     // Memory usage tracking
@@ -247,7 +297,28 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
         return usage;
     }
 
-    @NotThreadSafe
+    /**
+     * Estimates the total number of rows stored in the memtable.
+     * It is optimized for speed, not for accuracy.
+     */
+    static long estimateRowCount(Memtable memtable)
+    {
+        long rowSize = memtable.getEstimatedAverageRowSize();
+        return rowSize > 0 ? memtable.getLiveDataSize() / rowSize : 0;
+    }
+
+    /**
+     * Returns the amount of on-heap memory that has been allocated for this memtable but is not yet used.
+     * This is not counted in the memory usage to have a better flushing decision behaviour -- we do not want to flush
+     * immediately after allocating a new buffer but when we have actually used the space provided.
+     * The method is provided for testing the memory usage tracking of memtables.
+     */
+    @VisibleForTesting
+    default long unusedReservedOnHeapMemory()
+    {
+        return 0;
+    }
+
     class MemoryUsage
     {
         /** On-heap memory used in bytes */
@@ -259,7 +330,6 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
         /** Off-heap memory as ratio to permitted memtable space */
         public float ownershipRatioOffHeap = 0.0f;
 
-        @Override
         public String toString()
         {
             return String.format("%s (%.0f%%) on-heap, %s (%.0f%%) off-heap",
@@ -296,7 +366,7 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
     /**
      * Get the collection of data between the given partition boundaries in a form suitable for flushing.
      */
-    FlushablePartitionSet<?> getFlushSet(PartitionPosition from, PartitionPosition to);
+    FlushCollection<?> getFlushSet(PartitionPosition from, PartitionPosition to);
 
     /**
      * A collection of partitions for flushing plus some information required for writing an sstable.
@@ -305,7 +375,7 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
      * being written to, care must be taken to not list newer items as they may violate the bounds collected by the
      * encoding stats or refer to columns that don't exist in the collected columns set.
      */
-    interface FlushablePartitionSet<P extends Partition> extends Iterable<P>, SSTableWriter.SSTableSizeParameters
+    interface FlushCollection<P extends Partition> extends Iterable<P>, SSTableWriter.SSTableSizeParameters
     {
         Memtable memtable();
 
@@ -327,6 +397,7 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
             return memtable().metadata();
         }
 
+        long partitionCount();
         default boolean isEmpty()
         {
             return partitionCount() > 0;
@@ -377,9 +448,9 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
     /** True if the memtable contains no data */
     boolean isClean();
 
-    // The following two methods provide a way of tracking ongoing flushes
-    LifecycleTransaction setFlushTransaction(LifecycleTransaction transaction);
-    LifecycleTransaction getFlushTransaction();
+    /** These two methods provide a way of tracking on-going flushes */
+    public LifecycleTransaction setFlushTransaction(LifecycleTransaction transaction);
+    public LifecycleTransaction getFlushTransaction();
 
     /** Order memtables by time as reflected in the commit log position at time of construction */
     default int compareTo(Memtable that)
@@ -392,37 +463,17 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource
      * Normally this will return true, but e.g. persistent memtables may choose not to flush. Returning false will
      * trigger further action for some reasons:
      * - SCHEMA_CHANGE will be followed by metadataUpdated().
-     * - OWNED_RANGES_CHANGE will be followed by localRangesUpdated().
      * - SNAPSHOT will be followed by performSnapshot().
      * - STREAMING/REPAIR will be followed by creating a FlushSet for the streamed/repaired ranges. This data will be
      *   used to create sstables, which will be streamed and then deleted.
-     * The table metadata is supplied explicitly as this might not be the same as the current published metadata for
-     * the table. When applying a schema change, the ColumnFamilyStore instance is reloaded using the new table metadata
-     * before the Schema registry is updated. The memtable needs to examine the new metadata in order to determine
-     * whether the changes warrant a switch.
-     * This will not be called to perform truncation or drop (in that case the memtable is unconditionally dropped),
-     * but a flush may nevertheless be requested in that case to prepare a snapshot.
+     * This will not be called if the sstable is switched because of truncation or drop.
      */
-    boolean shouldSwitch(ColumnFamilyStore.FlushReason reason, TableMetadata latest);
-
-    default boolean shouldSwitch(ColumnFamilyStore.FlushReason reason)
-    {
-        return shouldSwitch(reason, metadata());
-    }
+    boolean shouldSwitch(ColumnFamilyStore.FlushReason reason);
 
     /**
      * Called when the table's metadata is updated. The memtable's metadata reference now points to the new version.
-     * This will not be called if {@link #shouldSwitch } (SCHEMA_CHANGE) returns true, as the memtable will be swapped out
-     * instead.
      */
     void metadataUpdated();
-
-    /**
-     * Called when the known ranges have been updated and owner.localRangeSplits() may return different values.
-     * This will not be called if {@link #shouldSwitch } (OWNED_RANGES_CHANGE) returns true, as the memtable will be
-     * swapped out instead.
-     */
-    void localRangesUpdated();
 
     /**
      * If the memtable needs to do some special action for snapshots (e.g. because it is persistent and does not want

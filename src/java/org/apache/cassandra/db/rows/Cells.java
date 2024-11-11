@@ -83,8 +83,8 @@ public abstract class Cells
         if (leftTimestamp != rightTimestamp)
             return leftTimestamp > rightTimestamp ? left : right;
 
-        long leftLocalDeletionTime = left.localDeletionTime();
-        long rightLocalDeletionTime = right.localDeletionTime();
+        int leftLocalDeletionTime = left.localDeletionTime();
+        int rightLocalDeletionTime = right.localDeletionTime();
 
         boolean leftIsExpiringOrTombstone = leftLocalDeletionTime != Cell.NO_DELETION_TIME;
         boolean rightIsExpiringOrTombstone = rightLocalDeletionTime != Cell.NO_DELETION_TIME;

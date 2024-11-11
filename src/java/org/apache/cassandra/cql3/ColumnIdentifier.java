@@ -18,22 +18,20 @@
 package org.apache.cassandra.cql3;
 
 import java.nio.ByteBuffer;
-import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ConcurrentMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import com.google.common.collect.Lists;
 import com.google.common.collect.MapMaker;
 
 import org.apache.cassandra.cache.IMeasurableMemory;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.ObjectSizes;
 import org.apache.cassandra.utils.memory.ByteBufferCloner;
-
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 
 /**
  * Represents an identifer for a CQL column definition.
@@ -110,7 +108,7 @@ public class ColumnIdentifier implements IMeasurableMemory, Comparable<ColumnIde
 
     public ColumnIdentifier(String rawText, boolean keepCase)
     {
-        this.text = keepCase ? rawText : toLowerCaseLocalized(rawText);
+        this.text = keepCase ? rawText : rawText.toLowerCase(Locale.US);
         this.bytes = ByteBufferUtil.bytes(this.text);
         this.prefixComparison = prefixComparison(bytes);
         this.interned = false;
@@ -141,7 +139,7 @@ public class ColumnIdentifier implements IMeasurableMemory, Comparable<ColumnIde
 
     public static ColumnIdentifier getInterned(String rawText, boolean keepCase)
     {
-        String text = keepCase ? rawText : toLowerCaseLocalized(rawText);
+        String text = keepCase ? rawText : rawText.toLowerCase(Locale.US);
         ByteBuffer bytes = ByteBufferUtil.bytes(text);
         return getInterned(UTF8Type.instance, bytes, text);
     }
@@ -190,23 +188,27 @@ public class ColumnIdentifier implements IMeasurableMemory, Comparable<ColumnIde
     }
 
     /**
-     * Returns the CQL String corresponding to the specified identifiers.
-     *
-     * @param identifiers the column identifiers to convert.
-     * @return the CQL String corresponding to the specified identifiers
-     */
-    public static List<String> toCqlStrings(List<ColumnIdentifier> identifiers)
-    {
-        return Lists.transform(identifiers, ColumnIdentifier::toCQLString);
-    }
-
-    /**
      * Returns a string representation of the identifier that is safe to use directly in CQL queries.
      * If necessary, the string will be double-quoted, and any quotes inside the string will be escaped.
      */
     public String toCQLString()
     {
         return maybeQuote(text);
+    }
+
+    public static String toCQLString(ByteBuffer name)
+    {
+        try
+        {
+            return maybeQuote(UTF8Type.instance.getString(name));
+        }
+        catch (MarshalException e)
+        {
+            // Note: some (hopefully very, very rare) legacy tables (from thrift) could have column names that
+            // are not text-based, so this could theoretically be triggered. Usually, ColumnIdentifier handles this,
+            // but this method is called in places where it's not worth bothering.
+            return ByteBufferUtil.toDebugHexString(name);
+        }
     }
 
     public long unsharedHeapSize()
@@ -219,7 +221,7 @@ public class ColumnIdentifier implements IMeasurableMemory, Comparable<ColumnIde
     public long unsharedHeapSizeExcludingData()
     {
         return EMPTY_SIZE
-             + ObjectSizes.sizeOnHeapExcludingDataOf(bytes)
+             + ObjectSizes.sizeOnHeapExcludingData(bytes)
              + ObjectSizes.sizeOf(text);
     }
 
@@ -242,6 +244,16 @@ public class ColumnIdentifier implements IMeasurableMemory, Comparable<ColumnIde
     {
         if (UNQUOTED_IDENTIFIER.matcher(text).matches() && !ReservedKeywords.isReserved(text))
             return text;
+        return quote(text);
+    }
+
+    /**
+     * Adds double quotes to the given text
+     * @param text the text to double-quote
+     * @return the double-quoted text
+     */
+    public static String quote(String text)
+    {
         return '"' + PATTERN_DOUBLE_QUOTE.matcher(text).replaceAll(ESCAPED_DOUBLE_QUOTE) + '"';
     }
 }

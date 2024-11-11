@@ -18,12 +18,10 @@
 
 package org.apache.cassandra.cql3;
 
-import java.util.Optional;
+import com.google.common.base.Optional;
 
 import org.apache.cassandra.auth.PasswordAuthenticator;
 import org.apache.cassandra.auth.RoleOptions;
-
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 
 /**
  * Obfuscates passwords in a given string
@@ -31,7 +29,7 @@ import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 public class PasswordObfuscator
 {
     public static final String OBFUSCATION_TOKEN = "*******";
-    public static final String PASSWORD_TOKEN = toLowerCaseLocalized(PasswordAuthenticator.PASSWORD_KEY);
+    public static final String PASSWORD_TOKEN = PasswordAuthenticator.PASSWORD_KEY.toLowerCase();
 
     /**
      * Obfuscates everything after the first appearance password token
@@ -44,7 +42,7 @@ public class PasswordObfuscator
         if (null == sourceString)
             return null;
 
-        int passwordTokenStartIndex = toLowerCaseLocalized(sourceString).indexOf(PASSWORD_TOKEN);
+        int passwordTokenStartIndex = sourceString.toLowerCase().indexOf(PASSWORD_TOKEN);
         if (passwordTokenStartIndex < 0)
             return sourceString;
 
@@ -65,15 +63,9 @@ public class PasswordObfuscator
 
         Optional<String> pass = opts.getPassword();
         if (!pass.isPresent() || pass.get().isEmpty())
-            pass = opts.getHashedPassword();
-        if (!pass.isPresent() || pass.get().isEmpty())
             return query;
 
-        // Regular expression:
-        //  - Match new line and case insensitive (?si), and PASSWORD_TOKEN with greedy mode up to the start of the actual password and group it.
-        //  - Quote the password between \Q and \E so any potential special characters are ignored
-        //  - Replace the match with the grouped data + the obfuscated token
-        return query.replaceAll("((?si)"+ PASSWORD_TOKEN + ".+?)\\Q" + pass.get() + "\\E",
-                                "$1" + PasswordObfuscator.OBFUSCATION_TOKEN);
+        // match new line, case insensitive (?si), and PASSWORD_TOKEN up to the actual password greedy. Group that and replace the password
+        return query.replaceAll("((?si)"+ PASSWORD_TOKEN + ".+?)" + pass.get(), "$1" + PasswordObfuscator.OBFUSCATION_TOKEN);
     }
 }

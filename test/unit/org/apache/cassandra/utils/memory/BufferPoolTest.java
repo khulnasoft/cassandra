@@ -376,7 +376,7 @@ public class BufferPoolTest
     @Test
     public void testChunkExhausted()
     {
-        final int size = BufferPool.NORMAL_CHUNK_SIZE / 64; // 1kibibit
+        final int size = BufferPool.NORMAL_CHUNK_SIZE / 64; // 1kbit
         int[] sizes = new int[128];
         Arrays.fill(sizes, size);
 
@@ -875,8 +875,8 @@ public class BufferPoolTest
     @Test
     public void testRecyclePartialFreeChunk()
     {
-        // normal chunk size is 128KiB
-        int halfNormalChunk = BufferPool.NORMAL_CHUNK_SIZE / 2; // 64KiB, half of normal chunk
+        // normal chunk size is 128kb
+        int halfNormalChunk = BufferPool.NORMAL_CHUNK_SIZE / 2; // 64kb, half of normal chunk
         List<ByteBuffer> toRelease = new ArrayList<>();
 
         // allocate three buffers on different chunks
@@ -905,7 +905,7 @@ public class BufferPoolTest
         assertNotEquals(chunk1, chunk3);
         assertNotEquals(chunk2, chunk3);
 
-        // verify chunk2 got evicted, it doesn't have a owner
+        // verify chunk2 got evicted, it doesn't have an owner
         assertNotNull(chunk0.owner());
         assertEquals(BufferPool.Chunk.Status.IN_USE, chunk0.status());
         assertNotNull(chunk1.owner());

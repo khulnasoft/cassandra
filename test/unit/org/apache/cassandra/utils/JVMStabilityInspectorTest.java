@@ -20,7 +20,7 @@ package org.apache.cassandra.utils;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.SocketException;
-import java.util.Arrays;
+import java.util.function.Consumer;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -30,11 +30,8 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
-import org.assertj.core.api.Assertions;
-import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.service.CassandraDaemon;
-import org.apache.cassandra.service.DefaultFSErrorHandler;
-import org.apache.cassandra.service.StorageService;
+import org.mockito.ArgumentMatchers;
+import org.mockito.Mockito;
 
 import static java.util.Arrays.asList;
 import static org.junit.Assert.assertEquals;
@@ -55,66 +52,58 @@ public class JVMStabilityInspectorTest
     public void testKill() throws Exception
     {
         KillerForTests killerForTests = new KillerForTests();
-        JVMStabilityInspector.Killer originalKiller = JVMStabilityInspector.replaceKiller(killerForTests);
+        JVMKiller originalKiller = JVMStabilityInspector.replaceKiller(killerForTests);
 
         Config.DiskFailurePolicy oldPolicy = DatabaseDescriptor.getDiskFailurePolicy();
         Config.CommitFailurePolicy oldCommitPolicy = DatabaseDescriptor.getCommitFailurePolicy();
-        FileUtils.setFSErrorHandler(new DefaultFSErrorHandler());
+
+        Consumer<Throwable> diskErrorHandler = Mockito.mock(Consumer.class);
+        JVMStabilityInspector.setDiskErrorHandler(diskErrorHandler);
         try
         {
-            CassandraDaemon daemon = new CassandraDaemon();
-            daemon.completeSetup();
-            for (boolean daemonSetupCompleted : Arrays.asList(false, true))
-            {
-                // disk policy acts differently depending on if setup is complete or not; which is defined by
-                // the daemon thread not being null
-                StorageService.instance.registerDaemon(daemonSetupCompleted ? daemon : null);
+            killerForTests.reset();
+            JVMStabilityInspector.inspectThrowable(new IOException());
+            assertFalse(killerForTests.wasKilled());
 
-                try
-                {
-                    killerForTests.reset();
-                    JVMStabilityInspector.inspectThrowable(new IOException());
-                    assertFalse(killerForTests.wasKilled());
+            DatabaseDescriptor.setDiskFailurePolicy(Config.DiskFailurePolicy.die);
+            killerForTests.reset();
+            Mockito.reset(diskErrorHandler);
+            JVMStabilityInspector.inspectThrowable(new FSReadError(new IOException(), "blah"));
+            assertTrue(killerForTests.wasKilled());
+            Mockito.verify(diskErrorHandler).accept(ArgumentMatchers.any(FSReadError.class));
 
-                    DatabaseDescriptor.setDiskFailurePolicy(Config.DiskFailurePolicy.die);
-                    killerForTests.reset();
-                    JVMStabilityInspector.inspectThrowable(new FSReadError(new IOException(), "blah"));
-                    assertTrue(killerForTests.wasKilled());
+            killerForTests.reset();
+            Mockito.reset(diskErrorHandler);
+            JVMStabilityInspector.inspectThrowable(new FSWriteError(new IOException(), "blah"));
+            assertTrue(killerForTests.wasKilled());
+            Mockito.verify(diskErrorHandler).accept(ArgumentMatchers.any(FSWriteError.class));
 
-                    killerForTests.reset();
-                    JVMStabilityInspector.inspectThrowable(new FSWriteError(new IOException(), "blah"));
-                    assertTrue(killerForTests.wasKilled());
+            killerForTests.reset();
+            Mockito.reset(diskErrorHandler);
+            JVMStabilityInspector.inspectThrowable(new CorruptSSTableException(new IOException(), "blah"));
+            assertTrue(killerForTests.wasKilled());
+            Mockito.verify(diskErrorHandler).accept(ArgumentMatchers.any(CorruptSSTableException.class));
 
-                    killerForTests.reset();
-                    JVMStabilityInspector.inspectThrowable(new CorruptSSTableException(new IOException(), "blah"));
-                    assertTrue(killerForTests.wasKilled());
+            killerForTests.reset();
+            Mockito.reset(diskErrorHandler);
+            JVMStabilityInspector.inspectThrowable(new RuntimeException(new CorruptSSTableException(new IOException(), "blah")));
+            assertTrue(killerForTests.wasKilled());
+            Mockito.verify(diskErrorHandler).accept(ArgumentMatchers.any(CorruptSSTableException.class));
 
-                    killerForTests.reset();
-                    JVMStabilityInspector.inspectThrowable(new RuntimeException(new CorruptSSTableException(new IOException(), "blah")));
-                    assertTrue(killerForTests.wasKilled());
+            DatabaseDescriptor.setCommitFailurePolicy(Config.CommitFailurePolicy.die);
+            killerForTests.reset();
+            JVMStabilityInspector.inspectCommitLogThrowable("testKill", new Throwable());
+            assertTrue(killerForTests.wasKilled());
 
-                    DatabaseDescriptor.setCommitFailurePolicy(Config.CommitFailurePolicy.die);
-                    killerForTests.reset();
-                    JVMStabilityInspector.inspectCommitLogThrowable(new Throwable());
-                    assertTrue(killerForTests.wasKilled());
-
-                    killerForTests.reset();
-                    JVMStabilityInspector.inspectThrowable(new Exception(new IOException()));
-                    assertFalse(killerForTests.wasKilled());
-                }
-                catch (Exception | Error e)
-                {
-                    throw new AssertionError("Failure when daemonSetupCompleted=" + daemonSetupCompleted, e);
-                }
-            }
+            killerForTests.reset();
+            JVMStabilityInspector.inspectThrowable(new Exception(new IOException()));
+            assertFalse(killerForTests.wasKilled());
         }
         finally
         {
             JVMStabilityInspector.replaceKiller(originalKiller);
             DatabaseDescriptor.setDiskFailurePolicy(oldPolicy);
             DatabaseDescriptor.setCommitFailurePolicy(oldCommitPolicy);
-            StorageService.instance.registerDaemon(null);
-            FileUtils.setFSErrorHandler(null);
         }
     }
 
@@ -151,19 +140,10 @@ public class JVMStabilityInspectorTest
     }
 
     @Test
-    public void testForceHeapSpaceOomExclude()
-    {
-        OutOfMemoryError error = new OutOfMemoryError("Java heap space");
-        Assertions.assertThatThrownBy(() -> JVMStabilityInspector.inspectThrowable(error))
-                  .isInstanceOf(OutOfMemoryError.class)
-                  .isEqualTo(error);
-    }
-
-    @Test
     public void fileHandleTest()
     {
         KillerForTests killerForTests = new KillerForTests();
-        JVMStabilityInspector.Killer originalKiller = JVMStabilityInspector.replaceKiller(killerForTests);
+        JVMKiller originalKiller = JVMStabilityInspector.replaceKiller(killerForTests);
 
         try
         {
@@ -188,7 +168,7 @@ public class JVMStabilityInspectorTest
             assertTrue(killerForTests.wasKilled());
 
             killerForTests.reset();
-            JVMStabilityInspector.inspectCommitLogThrowable(new FileNotFoundException("Too many open files"));
+            JVMStabilityInspector.inspectCommitLogThrowable("fileHandleTest", new FileNotFoundException("Too many open files"));
             assertTrue(killerForTests.wasKilled());
 
         }
@@ -196,5 +176,51 @@ public class JVMStabilityInspectorTest
         {
             JVMStabilityInspector.replaceKiller(originalKiller);
         }
+    }
+
+    @Test
+    public void testShutdownHookRemoved()
+    {
+        class TestShutdownHook {
+            boolean shutdownHookRemoved = false;
+            
+            private void onHookRemoved()
+            {
+                shutdownHookRemoved = true;
+            }
+
+            private void shutdownHook()
+            {
+            }
+        }
+        
+        TestShutdownHook testShutdownHook = new TestShutdownHook();
+        JVMStabilityInspector.registerShutdownHook(new Thread(() -> testShutdownHook.shutdownHook()), () -> testShutdownHook.onHookRemoved());
+        JVMStabilityInspector.removeShutdownHooks();
+        assertTrue(testShutdownHook.shutdownHookRemoved);
+    }
+
+    @Test
+    public void testSettingCustomGlobalHandler()
+    {
+        Consumer<Throwable> globalHandler = Mockito.mock(Consumer.class);
+        JVMStabilityInspector.setGlobalErrorHandler(globalHandler);
+
+        Throwable causeThrowable = new Throwable("cause");
+        Throwable topThrowable = new Throwable("hello", causeThrowable);
+        Throwable suppressedThrowable = new Throwable("suppressed");
+        topThrowable.addSuppressed(suppressedThrowable);
+
+        JVMStabilityInspector.inspectThrowable(topThrowable);
+
+        Mockito.verify(globalHandler).accept(Mockito.eq(topThrowable));
+        Mockito.verify(globalHandler).accept(Mockito.eq(suppressedThrowable));
+        Mockito.verify(globalHandler).accept(Mockito.eq(causeThrowable));
+    }
+
+    @Test
+    public void testInspectingNull()
+    {
+        JVMStabilityInspector.inspectThrowable(null);
     }
 }

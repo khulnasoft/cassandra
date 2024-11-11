@@ -30,8 +30,9 @@ import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static junit.framework.Assert.assertFalse;
+import static junit.framework.Assert.assertTrue;
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 
 public class DeletePartitionTest
 {
@@ -71,11 +72,11 @@ public class DeletePartitionTest
         // validate that data's written
         FilteredPartition partition = Util.getOnlyPartition(Util.cmd(store, key).build());
         assertTrue(partition.rowCount() > 0);
-        Row r = partition.iterator().next();
+        Row r = partition.rowIterator().next();
         assertTrue(r.getCell(column).value().equals(ByteBufferUtil.bytes("asdf")));
 
         if (flushBeforeRemove)
-            Util.flush(store);
+            store.forceBlockingFlush(UNIT_TESTS);
 
         // delete the partition
         new Mutation.PartitionUpdateCollector(KEYSPACE1, key)
@@ -84,11 +85,11 @@ public class DeletePartitionTest
                 .applyUnsafe();
 
         if (flushAfterRemove)
-            Util.flush(store);
+            store.forceBlockingFlush(UNIT_TESTS);
 
         // validate removal
-        ImmutableBTreePartition partitionUnfiltered = Util.getOnlyPartitionUnfiltered(Util.cmd(store, key).build());
+        Partition partitionUnfiltered = Util.getOnlyPartitionUnfiltered(Util.cmd(store, key).build());
         assertFalse(partitionUnfiltered.partitionLevelDeletion().isLive());
-        assertFalse(partitionUnfiltered.iterator().hasNext());
+        assertFalse(partitionUnfiltered.rowIterator().hasNext());
     }
 }

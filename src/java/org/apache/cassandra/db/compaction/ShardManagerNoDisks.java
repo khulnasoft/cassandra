@@ -22,15 +22,15 @@ import java.util.List;
 
 import javax.annotation.Nullable;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.PartitionPosition;
+import org.apache.cassandra.db.SortedLocalRanges;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Splitter;
 import org.apache.cassandra.dht.Token;
 
 public class ShardManagerNoDisks implements ShardManager
 {
-    final ColumnFamilyStore.VersionedLocalRanges localRanges;
+    final SortedLocalRanges localRanges;
 
     /**
      * Ending positions for the local token ranges, in covered token range; in other words, the accumulated share of
@@ -39,11 +39,11 @@ public class ShardManagerNoDisks implements ShardManager
      */
     final double[] localRangePositions;
 
-    public ShardManagerNoDisks(ColumnFamilyStore.VersionedLocalRanges localRanges)
+    public ShardManagerNoDisks(SortedLocalRanges localRanges)
     {
         this.localRanges = localRanges;
         double position = 0;
-        final List<Splitter.WeightedRange> ranges = localRanges;
+        final List<Splitter.WeightedRange> ranges = localRanges.getRanges();
         localRangePositions = new double[ranges.size()];
         for (int i = 0; i < localRangePositions.length; ++i)
         {
@@ -51,12 +51,6 @@ public class ShardManagerNoDisks implements ShardManager
             position += span;
             localRangePositions[i] = position;
         }
-    }
-
-    public boolean isOutOfDate(long ringVersion)
-    {
-        return ringVersion != localRanges.ringVersion.getEpoch() &&
-               !localRanges.ringVersion.is(ColumnFamilyStore.RING_VERSION_IRRELEVANT);
     }
 
     @Override
@@ -69,7 +63,7 @@ public class ShardManagerNoDisks implements ShardManager
     private double rangeSizeNonWrapping(Range<Token> tableRange)
     {
         double size = 0;
-        for (Splitter.WeightedRange range : localRanges)
+        for (Splitter.WeightedRange range : localRanges.getRanges())
         {
             Range<Token> ix = range.range().intersectionNonWrapping(tableRange); // local and table ranges are non-wrapping
             if (ix == null)
@@ -89,6 +83,11 @@ public class ShardManagerNoDisks implements ShardManager
     public double shardSetCoverage()
     {
         return localSpaceCoverage();
+    }
+
+    public double minimumPerPartitionSpan()
+    {
+        return localSpaceCoverage() / Math.max(1, localRanges.getRealm().estimatedPartitionCount());
     }
 
     @Override
@@ -111,7 +110,7 @@ public class ShardManagerNoDisks implements ShardManager
         {
             this.count = count;
             rangeStep = localSpaceCoverage() / count;
-            currentStart = localRanges.get(0).left();
+            currentStart = localRanges.getRanges().get(0).left();
             currentRange = 0;
             nextShardIndex = 1;
             if (nextShardIndex == count)
@@ -130,7 +129,7 @@ public class ShardManagerNoDisks implements ShardManager
                 right = localRangePositions[++currentRange];
             }
 
-            final Range<Token> range = localRanges.get(currentRange).range();
+            final Range<Token> range = localRanges.getRanges().get(currentRange).range();
             return currentStart.getPartitioner().split(range.left, range.right, (toPos - left) / (right - left));
         }
 

@@ -22,13 +22,12 @@ import java.io.Closeable;
 import java.io.IOException;
 
 import javax.annotation.concurrent.NotThreadSafe;
-import javax.annotation.concurrent.ThreadSafe;
 
-import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.index.sai.utils.PrimaryKey;
+import org.apache.cassandra.io.sstable.SSTableId;
 
 /**
- * A bidirectional map of {@link PrimaryKey} to row ID. Implementations of this interface
+ * A bidirectional map of {@link PrimaryKey} to row Id. Implementations of this interface
  * are not expected to be threadsafe.
  */
 @NotThreadSafe
@@ -38,59 +37,91 @@ public interface PrimaryKeyMap extends Closeable
      * A factory for creating {@link PrimaryKeyMap} instances. Implementations of this
      * interface are expected to be threadsafe.
      */
-    @ThreadSafe
-    interface Factory extends Closeable
+    public interface Factory extends Closeable
     {
         /**
          * Creates a new {@link PrimaryKeyMap} instance
          *
          * @return a {@link PrimaryKeyMap}
-         * @throws IOException if the {@link PrimaryKeyMap} couldn't be created
+         * @throws IOException
          */
-        PrimaryKeyMap newPerSSTablePrimaryKeyMap() throws IOException;
+        PrimaryKeyMap newPerSSTablePrimaryKeyMap();
+
+        /**
+         * Returns the number of primary keys in the map. This is part of the factory because
+         * it can be retrieved without opening the map.
+         * @return the number of primary keys in the map
+         */
+        default long count()
+        {
+            try (PrimaryKeyMap map = newPerSSTablePrimaryKeyMap())
+            {
+                return map.count();
+            }
+            catch (IOException e)
+            {
+                throw new RuntimeException(e);
+            }
+        }
 
         @Override
-        default void close()
+        default void close() throws IOException
         {
         }
     }
 
     /**
-     * Returns a {@link PrimaryKey} for a row ID
+     * Returns the {@link SSTableId} associated with this {@link PrimaryKeyMap}
+     * @return an {@link SSTableId}
+     */
+    SSTableId<?> getSSTableId();
+
+    /**
+     * Returns a {@link PrimaryKey} for a row Id
      *
-     * @param sstableRowId the row ID to lookup
-     * @return the {@link PrimaryKey} associated with the row ID
+     * @param sstableRowId the row Id to lookup
+     * @return the {@link PrimaryKey} associated with the row Id
      */
     PrimaryKey primaryKeyFromRowId(long sstableRowId);
 
     /**
-     * Returns a row ID for a {@link PrimaryKey}
+     * Returns a row Id for a {@link PrimaryKey}. If there is no such term, returns the `-(next row id) - 1` where
+     * `next row id` is the row id of the next greatest {@link PrimaryKey} in the map.
      *
      * @param key the {@link PrimaryKey} to lookup
-     * @return the row ID associated with the {@link PrimaryKey}
+     * @return the row Id associated with the {@link PrimaryKey}
      */
-    long rowIdFromPrimaryKey(PrimaryKey key);
+    long exactRowIdOrInvertedCeiling(PrimaryKey key);
 
     /**
-     * Returns the first row ID of the nearest {@link Token} greater than or equal to the given {@link Token},
-     * or a negative value if not found
+     * Returns the sstable row id associated with the least {@link PrimaryKey} greater than or equal to the given
+     * {@link PrimaryKey}. If the {@link PrimaryKey} is a prefix of multiple {@link PrimaryKey}s in the map, e.g. it is
+     * just a token or a token and a partition key, the row id associated with the least {@link PrimaryKey} will be
+     * returned. If there is no {@link PrimaryKey} in the map that meets this definition, returns a negative value.
      *
-     * @param token the {@link Token} to lookup
-     * @return the ceiling row ID associated with the {@link Token} or a negative value
+     * @param key the {@link PrimaryKey} to lookup
+     * @return an sstable row id or a negative value if no row is found
      */
-    long ceiling(Token token);
+    long ceiling(PrimaryKey key);
 
     /**
-     * Returns the last row ID of the nearest {@link Token} less than or equal to the given {@link Token},
-     * or a negative value if the {@link Token} is at its minimum value
+     * Returns the sstable row id associated with the greatest {@link PrimaryKey} less than or equal to the given
+     * {@link PrimaryKey}. If the {@link PrimaryKey} is a prefix of multiple {@link PrimaryKey}s in the map, e.g. it is
+     * just a token or a token and a partition key, the row id associated with the greatest {@link PrimaryKey} will be
+     * returned. If there is no {@link PrimaryKey} in the map that meets this definition, returns a negative value.
      *
-     * @param token the {@link Token} to lookup
-     * @return the floor row ID associated with the {@link Token}
+     * @param key the {@link PrimaryKey} to lookup
+     * @return an sstable row id or a negative value if no row is found
      */
-    long floor(Token token);
+    long floor(PrimaryKey key);
+
+    /**
+     * Returns the number of primary keys in the map
+     */
+    long count();
 
     @Override
-    default void close()
+    default void close() throws IOException
     {
     }
 }

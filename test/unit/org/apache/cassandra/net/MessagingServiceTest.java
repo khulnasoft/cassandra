@@ -20,22 +20,14 @@
  */
 package org.apache.cassandra.net;
 
-import java.io.IOException;
 import java.net.InetAddress;
-import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
-import java.nio.channels.AsynchronousSocketChannel;
-import java.security.cert.Certificate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -48,20 +40,20 @@ import org.junit.Test;
 
 import com.codahale.metrics.Timer;
 import org.apache.cassandra.auth.IInternodeAuthenticator;
+import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.EncryptionOptions.ServerEncryptionOptions;
 import org.apache.cassandra.db.commitlog.CommitLog;
-import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.metrics.MessagingMetrics;
-import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
-import org.awaitility.Awaitility;
 import org.caffinitas.ohc.histo.EstimatedHistogram;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static org.apache.cassandra.net.NoPayload.noPayload;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
@@ -70,33 +62,11 @@ import static org.junit.Assert.assertTrue;
 public class MessagingServiceTest
 {
     private final static long[] bucketOffsets = new EstimatedHistogram(160).getBucketOffsets();
-    public static AtomicInteger rejectedConnections = new AtomicInteger();
     public static final IInternodeAuthenticator ALLOW_NOTHING_AUTHENTICATOR = new IInternodeAuthenticator()
     {
-        public boolean authenticate(InetAddress remoteAddress, int remotePort,
-                                    Certificate[] certificates, InternodeConnectionDirection connectionType)
+        public boolean authenticate(InetAddress remoteAddress, int remotePort)
         {
-            rejectedConnections.incrementAndGet();
             return false;
-        }
-
-        public void validateConfiguration() throws ConfigurationException
-        {
-
-        }
-    };
-
-    public static final IInternodeAuthenticator REJECT_OUTBOUND_AUTHENTICATOR = new IInternodeAuthenticator()
-    {
-        public boolean authenticate(InetAddress remoteAddress, int remotePort,
-                                    Certificate[] certificates, InternodeConnectionDirection connectionType)
-        {
-            if (connectionType == InternodeConnectionDirection.OUTBOUND)
-            {
-                rejectedConnections.incrementAndGet();
-                return false;
-            }
-            return true;
         }
 
         public void validateConfiguration() throws ConfigurationException
@@ -114,7 +84,6 @@ public class MessagingServiceTest
     public static void beforeClass() throws UnknownHostException
     {
         DatabaseDescriptor.daemonInitialization();
-        ClusterMetadataTestHelper.setInstanceForTest();
         CommitLog.instance.start();
         DatabaseDescriptor.setBroadcastAddress(InetAddress.getByName("127.0.0.1"));
         originalAuthenticator = DatabaseDescriptor.getInternodeAuthenticator();
@@ -128,7 +97,6 @@ public class MessagingServiceTest
         messagingService.metrics.resetDroppedMessages();
         messagingService.closeOutbound(InetAddressAndPort.getByName("127.0.0.2"));
         messagingService.closeOutbound(InetAddressAndPort.getByName("127.0.0.3"));
-        DatabaseDescriptor.setInternodeAuthenticator(originalAuthenticator);
     }
 
     @After
@@ -137,7 +105,7 @@ public class MessagingServiceTest
         DatabaseDescriptor.setInternodeAuthenticator(originalAuthenticator);
         DatabaseDescriptor.setInternodeMessagingEncyptionOptions(originalServerEncryptionOptions);
         DatabaseDescriptor.setShouldListenOnBroadcastAddress(false);
-        DatabaseDescriptor.setListenAddress(originalListenAddress.getAddress());
+        DatabaseDescriptor.setListenAddress(originalListenAddress.address);
         FBUtilities.reset();
     }
 
@@ -184,7 +152,7 @@ public class MessagingServiceTest
     public void testDCLatency()
     {
         int latency = 100;
-        ConcurrentHashMap<String, MessagingMetrics.DCLatencyRecorder> dcLatency = MessagingService.instance().metrics.dcLatency;
+        Map<String, MessagingMetrics.DCLatencyRecorder> dcLatency = MessagingService.instance().metrics.dcLatency;
         dcLatency.clear();
 
         long now = System.currentTimeMillis();
@@ -193,14 +161,15 @@ public class MessagingServiceTest
         addDCLatency(sentAt, now);
         assertNotNull(dcLatency.get("datacenter1"));
         assertEquals(1, dcLatency.get("datacenter1").dcLatency.getCount());
-        long expectedBucket = bucketOffsets[Math.abs(Arrays.binarySearch(bucketOffsets, MILLISECONDS.toMicros(latency))) - 1];
+        long expectedBucket = bucketOffsets[Math.abs(Arrays.binarySearch(bucketOffsets, MILLISECONDS.toNanos(latency))) - 1];
         assertEquals(expectedBucket, dcLatency.get("datacenter1").dcLatency.getSnapshot().getMax());
     }
 
     @Test
     public void testNegativeDCLatency()
     {
-        MessagingMetrics.DCLatencyRecorder updater = MessagingService.instance().metrics.internodeLatencyRecorder(InetAddressAndPort.getLocalHost());
+        MessagingMetrics.DCLatencyRecorder updater =
+        (MessagingMetrics.DCLatencyRecorder) MessagingService.instance().metrics.internodeLatencyRecorder(InetAddressAndPort.getLocalHost());
 
         // if clocks are off should just not track anything
         int latency = -100;
@@ -221,9 +190,9 @@ public class MessagingServiceTest
         Verb verb = Verb.MUTATION_REQ;
 
         Map<Verb, Timer> queueWaitLatency = MessagingService.instance().metrics.internalLatency;
-        MessagingService.instance().metrics.recordInternalLatency(verb, latency, MILLISECONDS);
+        MessagingService.instance().metrics.recordInternalLatency(verb, InetAddressAndPort.getLocalHost(), latency, MILLISECONDS);
         assertEquals(1, queueWaitLatency.get(verb).getCount());
-        long expectedBucket = bucketOffsets[Math.abs(Arrays.binarySearch(bucketOffsets, MILLISECONDS.toMicros(latency))) - 1];
+        long expectedBucket = bucketOffsets[Math.abs(Arrays.binarySearch(bucketOffsets, MILLISECONDS.toNanos(latency))) - 1];
         assertEquals(expectedBucket, queueWaitLatency.get(verb).getSnapshot().getMax());
     }
 
@@ -237,7 +206,7 @@ public class MessagingServiceTest
         queueWaitLatency.clear();
 
         assertNull(queueWaitLatency.get(verb));
-        MessagingService.instance().metrics.recordInternalLatency(verb, latency, MILLISECONDS);
+        MessagingService.instance().metrics.recordInternalLatency(verb, InetAddressAndPort.getLocalHost(), latency, MILLISECONDS);
         assertNull(queueWaitLatency.get(verb));
     }
 
@@ -253,75 +222,19 @@ public class MessagingServiceTest
      * @throws Exception
      */
     @Test
-    public void testFailedOutboundInternodeAuth() throws Exception
+    public void testFailedInternodeAuth() throws Exception
     {
-        // Listen on serverside for connections
-        ServerEncryptionOptions serverEncryptionOptions = new ServerEncryptionOptions()
-        .withInternodeEncryption(ServerEncryptionOptions.InternodeEncryption.none);
-
-        DatabaseDescriptor.setInternodeAuthenticator(REJECT_OUTBOUND_AUTHENTICATOR);
-        InetAddress listenAddress = FBUtilities.getJustLocalAddress();
-
-        InboundConnectionSettings settings = new InboundConnectionSettings().withEncryption(serverEncryptionOptions);
-        InboundSockets connections = new InboundSockets(settings);
-
-        try
-        {
-            connections.open().await();
-            Assert.assertTrue(connections.isListening());
-
-            MessagingService ms = MessagingService.instance();
-            //Should return null
-            int rejectedBefore = rejectedConnections.get();
-            Message<?> messageOut = Message.out(Verb.ECHO_REQ, NoPayload.noPayload);
-            InetAddressAndPort address = InetAddressAndPort.getByAddress(listenAddress);
-            ms.send(messageOut, address);
-            Awaitility.await().atMost(10, TimeUnit.SECONDS).until(() -> rejectedConnections.get() > rejectedBefore);
-
-            //Should tolerate null
-            ms.closeOutbound(address);
-            ms.send(messageOut, address);
-        }
-        finally
-        {
-            connections.close().await();
-            Assert.assertFalse(connections.isListening());
-        }
-    }
-
-    @Test
-    public void testFailedInboundInternodeAuth() throws IOException, InterruptedException
-    {
-        ServerEncryptionOptions serverEncryptionOptions = new ServerEncryptionOptions()
-            .withInternodeEncryption(ServerEncryptionOptions.InternodeEncryption.none);
-
+        MessagingService ms = MessagingService.instance();
         DatabaseDescriptor.setInternodeAuthenticator(ALLOW_NOTHING_AUTHENTICATOR);
-        InetAddress listenAddress = FBUtilities.getJustLocalAddress();
+        InetAddressAndPort address = InetAddressAndPort.getByName("127.0.0.250");
 
-        InboundConnectionSettings settings = new InboundConnectionSettings().withEncryption(serverEncryptionOptions);
-        InboundSockets connections = new InboundSockets(settings);
+        //Should return null
+        Message messageOut = Message.out(Verb.ECHO_REQ, noPayload);
+        assertFalse(ms.isConnected(address, messageOut));
 
-        try (AsynchronousSocketChannel testChannel = AsynchronousSocketChannel.open())
-        {
-            connections.open().await();
-            Assert.assertTrue(connections.isListening());
-
-            int rejectedBefore = rejectedConnections.get();
-            Future<Void> connectFuture = testChannel.connect(new InetSocketAddress(listenAddress, DatabaseDescriptor.getStoragePort()));
-            Awaitility.await().atMost(10, TimeUnit.SECONDS).until(connectFuture::isDone);
-
-            // Since authentication doesn't happen during connect, try writing a dummy string which triggers
-            // authentication handler.
-            testChannel.write(ByteBufferUtil.bytes("dummy string"));
-            Awaitility.await().atMost(10, TimeUnit.SECONDS).until(() -> rejectedConnections.get() > rejectedBefore);
-
-            connectFuture.cancel(true);
-        }
-        finally
-        {
-            connections.close().await();
-            Assert.assertFalse(connections.isListening());
-        }
+        //Should tolerate null
+        ms.closeOutbound(address);
+        ms.send(messageOut, address);
     }
 
 //    @Test
@@ -403,12 +316,9 @@ public class MessagingServiceTest
     @Test
     public void listenOptionalSecureConnection() throws InterruptedException
     {
-        for (int i = 0; i < 500; i++) // test used to be flaky, so run in a loop to make sure stable (see CASSANDRA-17033)
-        {
-            ServerEncryptionOptions serverEncryptionOptions = new ServerEncryptionOptions()
-                                                              .withOptional(true);
-            listen(serverEncryptionOptions, false);
-        }
+        ServerEncryptionOptions serverEncryptionOptions = new ServerEncryptionOptions()
+                                                          .withOptional(true);
+        listen(serverEncryptionOptions, false);
     }
 
     @Test
@@ -425,7 +335,7 @@ public class MessagingServiceTest
         if (listenOnBroadcastAddr)
         {
             DatabaseDescriptor.setShouldListenOnBroadcastAddress(true);
-            listenAddress = InetAddresses.increment(FBUtilities.getBroadcastAddressAndPort().getAddress());
+            listenAddress = InetAddresses.increment(FBUtilities.getBroadcastAddressAndPort().address);
             DatabaseDescriptor.setListenAddress(listenAddress);
             FBUtilities.reset();
         }
@@ -435,18 +345,18 @@ public class MessagingServiceTest
         InboundSockets connections = new InboundSockets(settings);
         try
         {
-            connections.open().sync();
-            Assert.assertTrue("connections is not listening", connections.isListening());
+            connections.open().await();
+            Assert.assertTrue(connections.isListening());
 
             Set<InetAddressAndPort> expect = new HashSet<>();
             expect.add(InetAddressAndPort.getByAddressOverrideDefaults(listenAddress, DatabaseDescriptor.getStoragePort()));
-            if (settings.encryption.legacy_ssl_storage_port_enabled)
+            if (settings.encryption.enable_legacy_ssl_storage_port)
                 expect.add(InetAddressAndPort.getByAddressOverrideDefaults(listenAddress, DatabaseDescriptor.getSSLStoragePort()));
             if (listenOnBroadcastAddr)
             {
-                expect.add(InetAddressAndPort.getByAddressOverrideDefaults(FBUtilities.getBroadcastAddressAndPort().getAddress(), DatabaseDescriptor.getStoragePort()));
-                if (settings.encryption.legacy_ssl_storage_port_enabled)
-                    expect.add(InetAddressAndPort.getByAddressOverrideDefaults(FBUtilities.getBroadcastAddressAndPort().getAddress(), DatabaseDescriptor.getSSLStoragePort()));
+                expect.add(InetAddressAndPort.getByAddressOverrideDefaults(FBUtilities.getBroadcastAddressAndPort().address, DatabaseDescriptor.getStoragePort()));
+                if (settings.encryption.enable_legacy_ssl_storage_port)
+                    expect.add(InetAddressAndPort.getByAddressOverrideDefaults(FBUtilities.getBroadcastAddressAndPort().address, DatabaseDescriptor.getSSLStoragePort()));
             }
 
             Assert.assertEquals(expect.size(), connections.sockets().size());
@@ -454,12 +364,12 @@ public class MessagingServiceTest
             final int legacySslPort = DatabaseDescriptor.getSSLStoragePort();
             for (InboundSockets.InboundSocket socket : connections.sockets())
             {
-                Assert.assertEquals(serverEncryptionOptions.getEnabled(), socket.settings.encryption.getEnabled());
-                Assert.assertEquals(serverEncryptionOptions.getOptional(), socket.settings.encryption.getOptional());
-                if (!serverEncryptionOptions.getEnabled())
-                    assertNotEquals(legacySslPort, socket.settings.bindAddress.getPort());
-                if (legacySslPort == socket.settings.bindAddress.getPort())
-                    Assert.assertFalse(socket.settings.encryption.getOptional());
+                Assert.assertEquals(serverEncryptionOptions.isEnabled(), socket.settings.encryption.isEnabled());
+                Assert.assertEquals(serverEncryptionOptions.isOptional(), socket.settings.encryption.isOptional());
+                if (!serverEncryptionOptions.isEnabled())
+                    assertNotEquals(legacySslPort, socket.settings.bindAddress.port);
+                if (legacySslPort == socket.settings.bindAddress.port)
+                    Assert.assertFalse(socket.settings.encryption.isOptional());
                 Assert.assertTrue(socket.settings.bindAddress.toString(), expect.remove(socket.settings.bindAddress));
             }
         }
@@ -519,4 +429,74 @@ public class MessagingServiceTest
 //
 //        Assert.assertEquals(privateIp, ms.getPreferredRemoteAddr(remote));
 //    }
+
+    private static class PostSinkFilter
+    {
+        private Verb verb;
+        public int count;
+
+        PostSinkFilter(Verb verb)
+        {
+            this.verb = verb;
+        }
+
+        public void accept(Message<?> message, InetAddressAndPort to)
+        {
+            // Count all the messages seen for our verb
+            if (message.verb() == verb)
+            {
+                count++;
+            }
+        }
+    }
+
+    @Test
+    public void runPostSinkHookVerbFilter() throws UnknownHostException
+    {
+        PostSinkFilter echoSink = new PostSinkFilter(Verb.ECHO_REQ);
+        MessagingService.instance().outboundSink.addPost((message, to) -> echoSink.accept(message, to));
+
+        int numOfMessages = 3;
+        // echoRecorder should see all ECHO_REQ messages
+        sendMessages(numOfMessages, Verb.ECHO_REQ);
+        assertEquals(numOfMessages, echoSink.count);
+
+        PostSinkFilter hintSink = new PostSinkFilter(Verb.HINT_REQ);
+        MessagingService.instance().outboundSink.addPost((message, to) -> hintSink.accept(message, to));
+
+        // hintRecorder should not see any ECHO_REQ messages
+        sendMessages(numOfMessages, Verb.ECHO_REQ);
+        assertEquals(0, hintSink.count);
+    }
+
+    public static class TestMessagingMetrics extends MessagingMetrics {}
+
+    @Test
+    public void testCreatingCustomMessagingMetrics()
+    {
+        String originalValue = CassandraRelevantProperties.CUSTOM_MESSAGING_METRICS_PROVIDER_PROPERTY.getString();
+        try
+        {
+            CassandraRelevantProperties.CUSTOM_MESSAGING_METRICS_PROVIDER_PROPERTY.setString(TestMessagingMetrics.class.getName());
+            MessagingService testMessagingService = new MessagingService(true);
+            assertTrue(testMessagingService.metrics instanceof TestMessagingMetrics);
+        }
+        finally
+        {
+            if (originalValue == null)
+                System.clearProperty(CassandraRelevantProperties.CUSTOM_MESSAGING_METRICS_PROVIDER_PROPERTY.getKey());
+            else
+                CassandraRelevantProperties.CUSTOM_MESSAGING_METRICS_PROVIDER_PROPERTY.setString(originalValue);
+        }
+    }
+
+    private static void sendMessages(int numOfMessages, Verb verb) throws UnknownHostException
+    {
+        InetAddressAndPort address = InetAddressAndPort.getByName("127.0.0.253");
+
+        for (int i = 0; i < numOfMessages; i++)
+        {
+            MessagingService.instance().send(Message.out(verb, noPayload), address);
+        }
+    }
 }

@@ -17,12 +17,15 @@
  */
 package org.apache.cassandra.net;
 
+import java.io.IOException;
 import java.net.UnknownHostException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.metrics.InternodeOutboundMetrics;
 import org.apache.cassandra.metrics.MessagingMetrics;
@@ -273,9 +276,12 @@ public class MessagingServiceMBeanImpl implements MessagingServiceMBean
     }
 
     @Override
-    public void reloadSslCertificates()
+    public void reloadSslCertificates() throws IOException
     {
-        SSLFactory.forceCheckCertFiles();
+        final EncryptionOptions.ServerEncryptionOptions serverOpts = DatabaseDescriptor.getInternodeMessagingEncyptionOptions();
+        final EncryptionOptions clientOpts = DatabaseDescriptor.getNativeProtocolEncryptionOptions();
+        SSLFactory.validateSslCerts(serverOpts, clientOpts);
+        SSLFactory.checkCertFilesForHotReloading(serverOpts, clientOpts);
     }
 
     @Override

@@ -25,15 +25,12 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.googlecode.concurrenttrees.common.Iterables;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SequenceBasedSSTableId;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
-import org.apache.cassandra.io.sstable.format.Version;
+import org.apache.cassandra.io.sstable.format.VersionAndType;
 import org.apache.cassandra.io.util.File;
 import org.assertj.core.util.Files;
 import org.quicktheories.core.Gen;
@@ -50,12 +47,6 @@ public class SSTablesGlobalTrackerTest
     private static final int MAX_VERSION_LIST_SIZE = 10;
     private static final int MAX_UPDATES_PER_GEN = 100;
 
-    @BeforeClass
-    public static void beforeClass()
-    {
-        DatabaseDescriptor.clientInitialization();
-    }
-
     /**
      * Ensures that the tracker properly maintains the set of versions in use.
      *
@@ -68,15 +59,15 @@ public class SSTablesGlobalTrackerTest
     {
         qt().forAll(lists().of(updates()).ofSizeBetween(0, MAX_UPDATES_PER_GEN),
                     sstableFormatTypes())
-            .checkAssert((updates, format) -> {
-                SSTablesGlobalTracker tracker = new SSTablesGlobalTracker(format);
+            .checkAssert((updates, formatType) -> {
+                SSTablesGlobalTracker tracker = new SSTablesGlobalTracker(formatType);
                 Set<Descriptor> all = new HashSet<>();
-                Set<Version> previous = Collections.emptySet();
+                Set<VersionAndType> previous = Collections.emptySet();
                 for (Update update : updates)
                 {
                     update.applyTo(all);
                     boolean triggerUpdate = tracker.handleSSTablesChange(update.removed, update.added);
-                    Set<Version> expectedInUse = versionAndTypes(all);
+                    Set<VersionAndType> expectedInUse = versionAndTypes(all);
                     assertEquals(expectedInUse, tracker.versionsInUse());
                     assertEquals(!expectedInUse.equals(previous), triggerUpdate);
                     previous = expectedInUse;
@@ -84,9 +75,9 @@ public class SSTablesGlobalTrackerTest
             });
     }
 
-    private Set<Version> versionAndTypes(Set<Descriptor> descriptors)
+    private Set<VersionAndType> versionAndTypes(Set<Descriptor> descriptors)
     {
-        return descriptors.stream().map(d -> d.version).collect(Collectors.toSet());
+        return descriptors.stream().map(SSTablesGlobalTracker::version).collect(Collectors.toSet());
     }
 
     private Gen<String> keyspaces()
@@ -118,16 +109,16 @@ public class SSTablesGlobalTrackerTest
         return lists().of(descriptors()).ofSizeBetween(minSize, MAX_VERSION_LIST_SIZE);
     }
 
-    private Gen<SSTableFormat<?, ?>> sstableFormatTypes()
+    private Gen<SSTableFormat.Type> sstableFormatTypes()
     {
-        return Generate.pick(Iterables.toList(DatabaseDescriptor.getSSTableFormats().values()));
+        return Generate.enumValues(SSTableFormat.Type.class);
     }
 
     private Gen<String> sstableVersionString()
     {
         // We want to somewhat favor the current version, as that is technically more realistic so we generate it 50%
         // of the time, and generate something random 50% of the time.
-        return Generate.constant(DatabaseDescriptor.getSelectedSSTableFormat().getLatestVersion().version)
+        return Generate.constant(SSTableFormat.Type.current().info.getLatestVersion().getVersion())
                        .mix(strings().betweenCodePoints('a', 'z').ofLength(2));
     }
 

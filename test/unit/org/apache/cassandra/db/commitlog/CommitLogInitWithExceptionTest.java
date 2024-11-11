@@ -19,23 +19,23 @@
 package org.apache.cassandra.db.commitlog;
 
 
-import org.apache.cassandra.Util;
-import org.apache.cassandra.utils.concurrent.Condition;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.apache.cassandra.CassandraIsolatedJunit4ClassRunner;
+import org.apache.cassandra.Util;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.utils.JVMStabilityInspector;
-
+import org.apache.cassandra.utils.concurrent.SimpleCondition;
 
 @RunWith(CassandraIsolatedJunit4ClassRunner.class)
 public class CommitLogInitWithExceptionTest
 {
-    private static Thread initThread;
-    private final static Condition killed = Condition.newOneTimeCondition();
+    private final static SimpleCondition killed = new SimpleCondition();
+
     @BeforeClass
     public static void setUp()
     {
@@ -59,7 +59,7 @@ public class CommitLogInitWithExceptionTest
             }
             finally
             {
-                killed.signal();
+                killed.signalAll();
             }
         };
     }
@@ -67,17 +67,17 @@ public class CommitLogInitWithExceptionTest
     @Test
     public void testCommitLogInitWithException() {
         // This line will trigger initialization process because it's the first time to access CommitLog class.
-        initThread = new Thread(CommitLog.instance::start);
+        Thread initThread = new Thread(CommitLog.instance::start);
 
         initThread.setName("initThread");
         initThread.start();
 
-        Util.spinAssertEquals(true, killed::isSignalled, 10);
+        Util.spinAssertEquals(true, killed::isSignaled, 120);
     }
 
     private static class MockCommitLogSegmentMgr extends CommitLogSegmentManagerStandard {
 
-        public MockCommitLogSegmentMgr(CommitLog commitLog, String storageDirectory)
+        public MockCommitLogSegmentMgr(CommitLog commitLog, File storageDirectory)
         {
             super(commitLog, storageDirectory);
         }

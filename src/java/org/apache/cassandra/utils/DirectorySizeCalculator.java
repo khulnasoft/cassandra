@@ -27,13 +27,17 @@ import java.nio.file.attribute.BasicFileAttributes;
 /**
  * Walks directory recursively, summing up total contents of files within.
  */
+import org.apache.cassandra.io.util.File;
+
 public class DirectorySizeCalculator extends SimpleFileVisitor<Path>
 {
-    private volatile long size = 0;
+    protected volatile long size = 0;
+    protected final File path;
 
-    public DirectorySizeCalculator()
+    public DirectorySizeCalculator(File path)
     {
         super();
+        this.path = path;
     }
 
     public boolean isAcceptable(Path file)
@@ -50,7 +54,7 @@ public class DirectorySizeCalculator extends SimpleFileVisitor<Path>
     }
 
     @Override
-    public FileVisitResult visitFileFailed(Path file, IOException exc)
+    public FileVisitResult visitFileFailed(Path file, IOException exc) throws IOException
     {
         return FileVisitResult.CONTINUE;
     }
@@ -58,13 +62,5 @@ public class DirectorySizeCalculator extends SimpleFileVisitor<Path>
     public long getAllocatedSize()
     {
         return size;
-    }
-
-    /**
-     * Reset the size to 0 in case that the size calculator is used multiple times
-     */
-    protected void resetSize()
-    {
-        size = 0;
     }
 }

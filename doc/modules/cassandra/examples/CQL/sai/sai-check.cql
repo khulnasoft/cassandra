@@ -1,1 +1,0 @@
-DESCRIBE TABLE cycling.cyclist_semi_pro; 

@@ -20,20 +20,21 @@
  */
 package org.apache.cassandra.utils;
 
-import java.io.*;
+import java.io.FileDescriptor;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.SyncFailedException;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
+import java.util.Objects;
 
 import com.google.common.base.Preconditions;
-
-import org.apache.cassandra.config.CassandraRelevantEnv;
-import org.apache.cassandra.config.CassandraRelevantProperties;
-import org.apache.cassandra.io.util.File;
-import org.apache.cassandra.utils.memory.MemoryUtil;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import org.apache.cassandra.config.Config;
+import org.apache.cassandra.io.util.File;
 
 /*
  * A wrapper around various mechanisms for syncing files that makes it possible to intercept
@@ -48,8 +49,8 @@ public class SyncUtil
     static
     {
         //If skipping syncing is requested by any means then skip them.
-        boolean skipSyncProperty = CassandraRelevantProperties.TEST_CASSANDRA_SKIP_SYNC.getBoolean();
-        boolean skipSyncEnv = CassandraRelevantEnv.CASSANDRA_SKIP_SYNC.getBoolean();
+        boolean skipSyncProperty = Boolean.getBoolean(Config.PROPERTY_PREFIX + "skip_sync");
+        boolean skipSyncEnv = Boolean.parseBoolean(System.getenv().getOrDefault("CASSANDRA_SKIP_SYNC", "false"));
         SKIP_SYNC = skipSyncProperty || skipSyncEnv;
         if (SKIP_SYNC)
         {
@@ -60,12 +61,6 @@ public class SyncUtil
     public static MappedByteBuffer force(MappedByteBuffer buf)
     {
         Preconditions.checkNotNull(buf);
-        Object attachment = MemoryUtil.getAttachment(buf);
-        if (attachment instanceof Runnable)
-        {
-            ((Runnable) attachment).run();
-            return buf;
-        }
         if (SKIP_SYNC)
         {
             return buf;
@@ -103,12 +98,18 @@ public class SyncUtil
         sync(fos.getFD());
     }
 
+    public static void sync(FileChannel fc) throws IOException
+    {
+        Objects.requireNonNull(fc);
+        sync(INativeLibrary.instance.getFileDescriptor(fc));
+    }
+
     public static void trySync(int fd)
     {
         if (SKIP_SYNC)
             return;
 
-        NativeLibrary.trySync(fd);
+        INativeLibrary.instance.trySync(fd);
     }
 
     public static void trySyncDir(File dir)
@@ -116,14 +117,14 @@ public class SyncUtil
         if (SKIP_SYNC)
             return;
 
-        int directoryFD = NativeLibrary.tryOpenDirectory(dir.path());
+        int directoryFD = INativeLibrary.instance.tryOpenDirectory(dir);
         try
         {
             trySync(directoryFD);
         }
         finally
         {
-            NativeLibrary.tryCloseFD(directoryFD);
+            INativeLibrary.instance.tryCloseFD(directoryFD);
         }
     }
 }

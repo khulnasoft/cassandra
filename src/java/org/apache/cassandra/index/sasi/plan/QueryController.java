@@ -20,20 +20,19 @@ package org.apache.cassandra.index.sasi.plan;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
-import javax.annotation.Nullable;
-
 import com.google.common.collect.Sets;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.ReadCommand;
+import org.apache.cassandra.db.PartitionRangeReadCommand;
 import org.apache.cassandra.db.ReadExecutionController;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.index.Index;
 import org.apache.cassandra.index.sasi.SASIIndex;
 import org.apache.cassandra.index.sasi.SSTableIndex;
 import org.apache.cassandra.index.sasi.TermIterator;
@@ -50,25 +49,23 @@ import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.Pair;
 
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
-
 public class QueryController
 {
     private final long executionQuota;
     private final long executionStart;
 
     private final ColumnFamilyStore cfs;
-    private final ReadCommand command;
+    private final PartitionRangeReadCommand command;
     private final DataRange range;
     private final Map<Collection<Expression>, List<RangeIterator<Long, Token>>> resources = new HashMap<>();
 
-    public QueryController(ColumnFamilyStore cfs, ReadCommand command, long timeQuotaMs)
+    public QueryController(ColumnFamilyStore cfs, PartitionRangeReadCommand command, long timeQuotaMs)
     {
         this.cfs = cfs;
         this.command = command;
         this.range = command.dataRange();
         this.executionQuota = TimeUnit.MILLISECONDS.toNanos(timeQuotaMs);
-        this.executionStart = nanoTime();
+        this.executionStart = System.nanoTime();
     }
 
     public TableMetadata metadata()
@@ -91,11 +88,12 @@ public class QueryController
         return cfs.metadata().partitionKeyType;
     }
 
-    @Nullable
     public ColumnIndex getIndex(RowFilter.Expression expression)
     {
-        return cfs.indexManager.getBestIndexFor(expression, SASIIndex.class).map(SASIIndex::getIndex).orElse(null);
+        Optional<Index> index = cfs.indexManager.getBestIndexFor(expression);
+        return index.isPresent() ? ((SASIIndex) index.get()).getIndex() : null;
     }
+
 
     public UnfilteredRowIterator getPartition(DecoratedKey key, ReadExecutionController executionController)
     {
@@ -143,6 +141,7 @@ public class QueryController
 
         for (Map.Entry<Expression, Set<SSTableIndex>> e : view)
         {
+            @SuppressWarnings("resource") // RangeIterators are closed by releaseIndexes
             RangeIterator<Long, Token> index = TermIterator.build(e.getKey(), e.getValue());
 
             builder.add(index);
@@ -155,7 +154,7 @@ public class QueryController
 
     public void checkpoint()
     {
-	long executionTime = (nanoTime() - executionStart);
+	long executionTime = (System.nanoTime() - executionStart);
 
         if (executionTime >= executionQuota)
             throw new TimeQuotaExceededException(
@@ -253,7 +252,7 @@ public class QueryController
     {
         return Sets.filter(indexes, index -> {
             SSTableReader sstable = index.getSSTable();
-            return range.startKey().compareTo(sstable.getLast()) <= 0 && (range.stopKey().isMinimum() || sstable.getFirst().compareTo(range.stopKey()) <= 0);
+            return range.startKey().compareTo(sstable.last) <= 0 && (range.stopKey().isMinimum() || sstable.first.compareTo(range.stopKey()) <= 0);
         });
     }
 }

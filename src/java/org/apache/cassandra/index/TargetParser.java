@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.index;
 
-import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -36,13 +35,6 @@ public class TargetParser
     private static final Pattern TARGET_REGEX = Pattern.compile("^(keys|entries|values|full)\\((.+)\\)$");
     private static final Pattern TWO_QUOTES = Pattern.compile("\"\"");
     private static final String QUOTE = "\"";
-
-    public static Optional<Pair<ColumnMetadata, IndexTarget.Type>> tryParse(TableMetadata metadata, IndexMetadata indexDef)
-    {
-        String target = indexDef.options.get("target");
-        assert target != null : String.format("No target definition found for index %s", indexDef.name);
-        return Optional.ofNullable(parse(metadata, target));
-    }
 
     public static Pair<ColumnMetadata, IndexTarget.Type> parse(TableMetadata metadata, IndexMetadata indexDef)
     {

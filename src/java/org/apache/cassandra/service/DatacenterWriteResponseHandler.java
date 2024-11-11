@@ -17,31 +17,27 @@
  */
 package org.apache.cassandra.service;
 
-import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.WriteType;
-import org.apache.cassandra.locator.InOurDc;
+import org.apache.cassandra.locator.InOurDcTester;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.ReplicaPlan;
 import org.apache.cassandra.net.Message;
-import org.apache.cassandra.transport.Dispatcher;
 
 import java.util.function.Predicate;
-import java.util.function.Supplier;
 
 /**
  * This class blocks for a quorum of responses _in the local datacenter only_ (CL.LOCAL_QUORUM).
  */
 public class DatacenterWriteResponseHandler<T> extends WriteResponseHandler<T>
 {
-    private final Predicate<InetAddressAndPort> waitingFor = InOurDc.endpoints();
+    private final Predicate<InetAddressAndPort> waitingFor = InOurDcTester.endpoints();
 
-    public DatacenterWriteResponseHandler(ReplicaPlan.ForWrite replicaPlan,
+    public DatacenterWriteResponseHandler(ReplicaPlan.ForTokenWrite replicaPlan,
                                           Runnable callback,
                                           WriteType writeType,
-                                          Supplier<Mutation> hintOnFailure,
-                                          Dispatcher.RequestTime requestTime)
+                                          long queryStartNanoTime)
     {
-        super(replicaPlan, callback, writeType, hintOnFailure, requestTime);
+        super(replicaPlan, callback, writeType, queryStartNanoTime);
         assert replicaPlan.consistencyLevel().isDatacenterLocal();
     }
 
@@ -61,7 +57,7 @@ public class DatacenterWriteResponseHandler<T> extends WriteResponseHandler<T>
     }
 
     @Override
-    protected boolean waitingFor(InetAddressAndPort from)
+    public boolean waitingFor(InetAddressAndPort from)
     {
         return waitingFor.test(from);
     }

@@ -34,7 +34,7 @@ public class GlobalBufferPoolAllocator extends BufferPoolAllocator
         super();
     }
 
-    public static ByteBuf wrap(ByteBuffer buffer)
+    static ByteBuf wrap(ByteBuffer buffer)
     {
         return new Wrapped(instance, buffer, buffer.capacity());
     }

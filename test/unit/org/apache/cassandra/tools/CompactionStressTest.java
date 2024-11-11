@@ -18,10 +18,9 @@
 
 package org.apache.cassandra.tools;
 
-
-import org.apache.cassandra.io.util.File;
 import org.junit.Test;
 
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.tools.ToolRunner.ToolResult;
 
 public class CompactionStressTest extends OfflineToolUtils
@@ -49,7 +48,7 @@ public class CompactionStressTest extends OfflineToolUtils
                                                  "-p",
                                                  profileFile,
                                                  "-t",
-                                                 "8");
+                                                 "4");
         tool.assertOnCleanExit();
 
         tool = ToolRunner.invokeClass("org.apache.cassandra.stress.CompactionStress",
@@ -59,7 +58,7 @@ public class CompactionStressTest extends OfflineToolUtils
                                       "-p",
                                       profileFile,
                                       "-t",
-                                      "8");
+                                      "4");
               tool.assertOnCleanExit();
     }
 }

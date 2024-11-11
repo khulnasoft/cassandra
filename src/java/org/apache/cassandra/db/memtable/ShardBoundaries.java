@@ -22,18 +22,20 @@ import java.util.List;
 
 import com.google.common.annotations.VisibleForTesting;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.PartitionPosition;
+import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.tcm.Epoch;
 
 /**
  * Holds boundaries (tokens) used to map a particular token (so partition key) to a shard id.
  * In practice, each keyspace has its associated boundaries, see {@link Keyspace}.
  * <p>
  * Technically, if we use {@code n} shards, this is a list of {@code n-1} tokens and each token {@code tk} gets assigned
- * to the shard ID corresponding to the slot of the smallest token in the list that is greater to {@code tk}, or {@code n}
- * if {@code tk} is bigger than any token in the list.
+ * to the core ID corresponding to the slot of the smallest token in the list that is equal or greater than {@code tk},
+ * or {@code n} if {@code tk} is bigger than any token in the list.
  */
 public class ShardBoundaries
 {
@@ -44,21 +46,21 @@ public class ShardBoundaries
     // - there is only 1 shard configured
     // - the default partitioner doesn't support splitting
     // - the keyspace is local system keyspace
-    public static final ShardBoundaries NONE = new ShardBoundaries(EMPTY_TOKEN_ARRAY, Epoch.EMPTY);
+    public static final ShardBoundaries NONE = new ShardBoundaries(EMPTY_TOKEN_ARRAY, -1);
 
     private final Token[] boundaries;
-    public final Epoch epoch;
+    public final long ringVersion;
 
     @VisibleForTesting
-    public ShardBoundaries(Token[] boundaries, Epoch epoch)
+    public ShardBoundaries(Token[] boundaries, long ringVersion)
     {
         this.boundaries = boundaries;
-        this.epoch = epoch;
+        this.ringVersion = ringVersion;
     }
 
-    public ShardBoundaries(List<Token> boundaries, Epoch epoch)
+    public ShardBoundaries(List<Token> boundaries, long ringVersion)
     {
-        this(boundaries.toArray(EMPTY_TOKEN_ARRAY), epoch);
+        this(boundaries.toArray(EMPTY_TOKEN_ARRAY), ringVersion);
     }
 
     /**
@@ -68,7 +70,7 @@ public class ShardBoundaries
     {
         for (int i = 0; i < boundaries.length; i++)
         {
-            if (tk.compareTo(boundaries[i]) < 0)
+            if (tk.compareTo(boundaries[i]) <= 0)   // boundaries are end-inclusive
                 return i;
         }
         return boundaries.length;
@@ -77,14 +79,41 @@ public class ShardBoundaries
     /**
      * Computes the shard to use for the provided key.
      */
-    public int getShardForKey(PartitionPosition key)
+    public int getShardForKey(DecoratedKey key)
     {
         // Boundaries are missing if the node is not sufficiently initialized yet
         if (boundaries.length == 0)
             return 0;
 
-        assert (key.getPartitioner() == boundaries[0].getPartitioner());
+        assert (key.getPartitioner() == DatabaseDescriptor.getPartitioner());
         return getShardForToken(key.getToken());
+    }
+
+    public AbstractBounds<PartitionPosition> getBounds(int shard)
+    {
+        checkShardIndex(shard);
+        return AbstractBounds.bounds(getMinBound(shard), false, getMaxBound(shard), true);
+    }
+
+    private void checkShardIndex(int shard)
+    {
+        if (shard < 0 || shard > boundaries.length)
+            throw new IllegalArgumentException(String.format("Shard %d out of bounds [0, %d]", shard, boundaries.length));
+    }
+
+
+    private PartitionPosition getMinBound(int shard)
+    {
+        return (shard == 0)
+               ? DatabaseDescriptor.getPartitioner().getMinimumToken().maxKeyBound()
+               : boundaries[shard - 1].maxKeyBound();
+    }
+
+    private PartitionPosition getMaxBound(int shard)
+    {
+        return (shard == boundaries.length)
+               ? DatabaseDescriptor.getPartitioner().getMaximumToken().maxKeyBound()
+               : boundaries[shard].maxKeyBound();
     }
 
     /**

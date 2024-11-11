@@ -36,7 +36,6 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
@@ -64,8 +63,6 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.Tables;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_CONFIG;
-
 public class PerSSTableIndexWriterTest extends SchemaLoader
 {
     private static final String KS_NAME = "sasi";
@@ -74,8 +71,8 @@ public class PerSSTableIndexWriterTest extends SchemaLoader
     @BeforeClass
     public static void loadSchema() throws ConfigurationException
     {
-        CASSANDRA_CONFIG.setString("cassandra-murmur.yaml");
-        ServerTestUtils.prepareServer();
+        System.setProperty("cassandra.config", "cassandra-murmur.yaml");
+        SchemaLoader.loadSchema();
         SchemaTestUtil.announceNewKeyspace(KeyspaceMetadata.create(KS_NAME,
                                                                    KeyspaceParams.simpleTransient(1),
                                                                    Tables.of(SchemaLoader.sasiCFMD(KS_NAME, CF_NAME).build())));
@@ -95,7 +92,7 @@ public class PerSSTableIndexWriterTest extends SchemaLoader
 
         File directory = cfs.getDirectories().getDirectoryForNewSSTables();
         Descriptor descriptor = cfs.newSSTableDescriptor(directory);
-        PerSSTableIndexWriter indexWriter = (PerSSTableIndexWriter) sasi.getFlushObserver(descriptor, LifecycleTransaction.offline(OperationType.FLUSH));
+        PerSSTableIndexWriter indexWriter = (PerSSTableIndexWriter) sasi.getFlushObserver(descriptor, LifecycleTransaction.offline(OperationType.FLUSH, cfs.metadata));
 
         SortedMap<DecoratedKey, Row> expectedKeys = new TreeMap<>(DecoratedKey.comparator);
 
@@ -123,9 +120,7 @@ public class PerSSTableIndexWriterTest extends SchemaLoader
 
                 Map.Entry<DecoratedKey, Row> key = keyIterator.next();
 
-
-                indexWriter.startPartition(key.getKey(), position, position);
-                position++;
+                indexWriter.startPartition(key.getKey(), position++);
                 indexWriter.nextUnfilteredCluster(key.getValue());
             }
 
@@ -139,15 +134,15 @@ public class PerSSTableIndexWriterTest extends SchemaLoader
         for (String segment : segments)
             Assert.assertTrue(new File(segment).exists());
 
-        File indexFile = indexWriter.indexes.get(column).file(true);
+        String indexFile = indexWriter.indexes.get(column).filename(true);
 
-        // final flush
-        indexWriter.complete();
+        // final flush (not: the `sstable` is not used by SASI, so passing `null` is fine)
+        indexWriter.complete(null);
 
         for (String segment : segments)
             Assert.assertFalse(new File(segment).exists());
 
-        OnDiskIndex index = new OnDiskIndex(indexFile, Int32Type.instance, keyPosition -> {
+        OnDiskIndex index = new OnDiskIndex(new File(indexFile), Int32Type.instance, keyPosition -> {
             ByteBuffer key = ByteBufferUtil.bytes(String.format(keyFormat, keyPosition));
             return cfs.metadata().partitioner.decorateKey(key);
         });
@@ -189,7 +184,7 @@ public class PerSSTableIndexWriterTest extends SchemaLoader
 
         File directory = cfs.getDirectories().getDirectoryForNewSSTables();
         Descriptor descriptor = cfs.newSSTableDescriptor(directory);
-        PerSSTableIndexWriter indexWriter = (PerSSTableIndexWriter) sasi.getFlushObserver(descriptor, LifecycleTransaction.offline(OperationType.FLUSH));
+        PerSSTableIndexWriter indexWriter = (PerSSTableIndexWriter) sasi.getFlushObserver(descriptor, LifecycleTransaction.offline(OperationType.FLUSH, cfs.metadata));
 
         final long now = System.currentTimeMillis();
 
@@ -239,7 +234,8 @@ public class PerSSTableIndexWriterTest extends SchemaLoader
         for (String segment : segments)
             Assert.assertTrue(new File(segment).exists());
 
-        indexWriter.complete();
+        // The sstable argument is not used by SASI
+        indexWriter.complete(null);
 
         // make sure that individual segments have been cleaned up
         for (String segment : segments)

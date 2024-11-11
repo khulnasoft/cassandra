@@ -17,48 +17,37 @@
  */
 package org.apache.cassandra.cql3.functions;
 
-import org.apache.cassandra.concurrent.ThreadPoolExecutorJMXAdapter;
-import org.apache.cassandra.concurrent.NamedThreadFactory;
-import org.apache.cassandra.concurrent.ThreadPoolExecutorBase;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
-import static org.apache.cassandra.config.CassandraRelevantProperties.UDF_EXECUTOR_THREAD_KEEPALIVE_MS;
-import static org.apache.cassandra.utils.FBUtilities.getAvailableProcessors;
-import static org.apache.cassandra.utils.concurrent.BlockingQueues.newBlockingQueue;
+import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
+import org.apache.cassandra.concurrent.NamedThreadFactory;
+import org.apache.cassandra.utils.FBUtilities;
 
 /**
- * Executor service which exposes stats via JMX, but which doesn't reference internal classes
- * as these are forbidden by the UDF execution sandbox.
- *
- * TODO: see if we can port to ExecutorPlus to avoid duplication
+ * Executor service which exposes stats via JMX, but which doesn't reference
+ * internal classes in its beforeExecute & afterExecute methods as these are
+ * forbidden by the UDF execution sandbox
  */
-final class UDFExecutorService extends ThreadPoolExecutorBase
+final class UDFExecutorService extends JMXEnabledThreadPoolExecutor
 {
-    private static final int KEEPALIVE = UDF_EXECUTOR_THREAD_KEEPALIVE_MS.getInt();
+    private static int KEEPALIVE = Integer.getInteger("cassandra.udf_executor_thread_keepalive_ms", 30000);
 
-    public UDFExecutorService(NamedThreadFactory threadFactory, String jmxPath)
+    UDFExecutorService(NamedThreadFactory threadFactory, String jmxPath)
     {
-        super(getAvailableProcessors(), KEEPALIVE, MILLISECONDS, newBlockingQueue(), threadFactory);
-        ThreadPoolExecutorJMXAdapter.register(jmxPath, this);
+        super(FBUtilities.getAvailableProcessors(),
+              KEEPALIVE,
+              TimeUnit.MILLISECONDS,
+              new LinkedBlockingQueue<>(),
+              threadFactory,
+              jmxPath);
     }
 
-    public int getCoreThreads()
+    protected void afterExecute(Runnable r, Throwable t)
     {
-        return getCorePoolSize();
     }
 
-    public void setCoreThreads(int newCorePoolSize)
+    protected void beforeExecute(Thread t, Runnable r)
     {
-        setCorePoolSize(newCorePoolSize);
-    }
-
-    public int getMaximumThreads()
-    {
-        return getMaximumPoolSize();
-    }
-
-    public void setMaximumThreads(int maxPoolSize)
-    {
-        setMaximumPoolSize(maxPoolSize);
     }
 }

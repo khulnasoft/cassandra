@@ -23,6 +23,9 @@ import org.junit.Test;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.SystemKeyspace;
+
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 
 /*
  * This test class was too large and used to timeout CASSANDRA-16777. We're splitting it into:
@@ -49,14 +52,16 @@ public class ViewRangesTest extends ViewAbstractTest
     {
         createTable("CREATE TABLE %s (k1 int, c1 int, c2 int, v1 int, v2 int, PRIMARY KEY (k1, c1, c2))");
 
-        createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s " +
-                   "WHERE k1 IS NOT NULL AND c1 IS NOT NULL AND c2 IS NOT NULL " +
-                   "PRIMARY KEY (k1, c2, c1)");
+        execute("USE " + keyspace());
+        executeNet("USE " + keyspace());
+
+        createView("view1",
+                   "CREATE MATERIALIZED VIEW view1 AS SELECT * FROM %%s WHERE k1 IS NOT NULL AND c1 IS NOT NULL AND c2 IS NOT NULL PRIMARY KEY (k1, c2, c1)");
 
         updateView("DELETE FROM %s USING TIMESTAMP 10 WHERE k1 = 1 and c1=1");
 
         if (flush)
-            Keyspace.open(keyspace()).getColumnFamilyStore(currentTable()).forceBlockingFlush(ColumnFamilyStore.FlushReason.UNIT_TESTS);
+            Keyspace.open(keyspace()).getColumnFamilyStore(currentTable()).forceBlockingFlush(UNIT_TESTS);
 
         String table = KEYSPACE + "." + currentTable();
         updateView("BEGIN BATCH " +
@@ -73,7 +78,7 @@ public class ViewRangesTest extends ViewAbstractTest
                                 row(1, 0, 0, 0, 0),
                                 row(1, 0, 1, 0, 1),
                                 row(1, 2, 0, 2, 0));
-        assertRowsIgnoringOrder(executeView("select k1,c1,c2,v1,v2 from %s"),
+        assertRowsIgnoringOrder(execute("select k1,c1,c2,v1,v2 from view1"),
                                 row(1, 0, 0, 0, 0),
                                 row(1, 0, 1, 0, 1),
                                 row(1, 2, 0, 2, 0));
@@ -91,37 +96,39 @@ public class ViewRangesTest extends ViewAbstractTest
                     "PRIMARY KEY((k, asciival), bigintval, textval1)" +
                     ")");
 
-        createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s " +
-                   "WHERE textval2 IS NOT NULL AND k IS NOT NULL AND asciival IS NOT NULL AND bigintval IS NOT NULL AND textval1 IS NOT NULL " +
-                   "PRIMARY KEY ((textval2, k), asciival, bigintval, textval1)");
+        execute("USE " + keyspace());
+        executeNet("USE " + keyspace());
+
+        createView("mv_test1", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE textval2 IS NOT NULL AND k IS NOT NULL AND asciival IS NOT NULL AND bigintval IS NOT NULL AND textval1 IS NOT NULL PRIMARY KEY ((textval2, k), asciival, bigintval, textval1)");
 
         for (int i = 0; i < 100; i++)
-            updateView("INSERT into %s (k,asciival,bigintval,textval1,textval2) VALUES (?,?,?,?,?)",
-                       0, "foo", (long) i % 2, "bar" + i, "baz");
+            updateView("INSERT into %s (k,asciival,bigintval,textval1,textval2)VALUES(?,?,?,?,?)", 0, "foo", (long) i % 2, "bar" + i, "baz");
 
         Assert.assertEquals(50, execute("select * from %s where k = 0 and asciival = 'foo' and bigintval = 0").size());
         Assert.assertEquals(50, execute("select * from %s where k = 0 and asciival = 'foo' and bigintval = 1").size());
 
-        Assert.assertEquals(100, executeView("select * from %s").size());
+        Assert.assertEquals(100, execute("select * from mv_test1").size());
 
         //Check the builder works
-        createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s " +
-                   "WHERE textval2 IS NOT NULL AND k IS NOT NULL AND asciival IS NOT NULL AND bigintval IS NOT NULL AND textval1 IS NOT NULL " +
-                   "PRIMARY KEY ((textval2, k), asciival, bigintval, textval1)");
+        createView("mv_test2", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE textval2 IS NOT NULL AND k IS NOT NULL AND asciival IS NOT NULL AND bigintval IS NOT NULL AND textval1 IS NOT NULL PRIMARY KEY ((textval2, k), asciival, bigintval, textval1)");
 
-        Assert.assertEquals(100, executeView("select * from %s").size());
+        while (!SystemKeyspace.isViewBuilt(keyspace(), "mv_test2"))
+            Thread.sleep(10);
 
-        createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s " +
-                   "WHERE textval2 IS NOT NULL AND k IS NOT NULL AND asciival IS NOT NULL AND bigintval IS NOT NULL AND textval1 IS NOT NULL " +
-                   "PRIMARY KEY ((textval2, k), bigintval, textval1, asciival)");
+        Assert.assertEquals(100, execute("select * from mv_test2").size());
 
-        Assert.assertEquals(100, executeView("select * from %s").size());
-        Assert.assertEquals(100, executeView("select asciival from %s where textval2 = ? and k = ?", "baz", 0).size());
+        createView("mv_test3", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE textval2 IS NOT NULL AND k IS NOT NULL AND asciival IS NOT NULL AND bigintval IS NOT NULL AND textval1 IS NOT NULL PRIMARY KEY ((textval2, k), bigintval, textval1, asciival)");
+
+        while (!SystemKeyspace.isViewBuilt(keyspace(), "mv_test3"))
+            Thread.sleep(10);
+
+        Assert.assertEquals(100, execute("select * from mv_test3").size());
+        Assert.assertEquals(100, execute("select asciival from mv_test3 where textval2 = ? and k = ?", "baz", 0).size());
 
         //Write a RT and verify the data is removed from index
         updateView("DELETE FROM %s WHERE k = ? AND asciival = ? and bigintval = ?", 0, "foo", 0L);
 
-        Assert.assertEquals(50, executeView("select asciival from %s where textval2 = ? and k = ?", "baz", 0).size());
+        Assert.assertEquals(50, execute("select asciival from mv_test3 where textval2 = ? and k = ?", "baz", 0).size());
     }
 
 
@@ -136,9 +143,10 @@ public class ViewRangesTest extends ViewAbstractTest
                     "PRIMARY KEY((k, asciival), bigintval)" +
                     ")");
 
-        createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s " +
-                   "WHERE textval1 IS NOT NULL AND k IS NOT NULL AND asciival IS NOT NULL AND bigintval IS NOT NULL " +
-                   "PRIMARY KEY ((textval1, k), asciival, bigintval)");
+        execute("USE " + keyspace());
+        executeNet("USE " + keyspace());
+
+        createView("mv", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE textval1 IS NOT NULL AND k IS NOT NULL AND asciival IS NOT NULL AND bigintval IS NOT NULL PRIMARY KEY ((textval1, k), asciival, bigintval)");
 
         for (int i = 0; i < 100; i++)
             updateView("INSERT into %s (k,asciival,bigintval,textval1)VALUES(?,?,?,?)", 0, "foo", (long) i % 2, "bar" + i);
@@ -148,13 +156,13 @@ public class ViewRangesTest extends ViewAbstractTest
 
 
         Assert.assertEquals(2, execute("select * from %s").size());
-        Assert.assertEquals(2, executeView("select * from %s").size());
+        Assert.assertEquals(2, execute("select * from mv").size());
 
         //Write a RT and verify the data is removed from index
         updateView("DELETE FROM %s WHERE k = ? AND asciival = ? and bigintval = ?", 0, "foo", 0L);
 
         Assert.assertEquals(1, execute("select * from %s").size());
-        Assert.assertEquals(1, executeView("select * from %s").size());
+        Assert.assertEquals(1, execute("select * from mv").size());
     }
 
     @Test
@@ -168,9 +176,10 @@ public class ViewRangesTest extends ViewAbstractTest
                     "PRIMARY KEY((k, asciival), bigintval)" +
                     ")");
 
-        createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s " +
-                   "WHERE textval1 IS NOT NULL AND k IS NOT NULL AND asciival IS NOT NULL AND bigintval IS NOT NULL " +
-                   "PRIMARY KEY ((textval1, k), asciival, bigintval)");
+        execute("USE " + keyspace());
+        executeNet("USE " + keyspace());
+
+        createView("mv", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE textval1 IS NOT NULL AND k IS NOT NULL AND asciival IS NOT NULL AND bigintval IS NOT NULL PRIMARY KEY ((textval1, k), asciival, bigintval)");
 
         for (int i = 0; i < 100; i++)
             updateView("INSERT into %s (k,asciival,bigintval,textval1)VALUES(?,?,?,?)", 0, "foo", (long) i % 2, "bar" + i);
@@ -180,12 +189,12 @@ public class ViewRangesTest extends ViewAbstractTest
 
 
         Assert.assertEquals(2, execute("select * from %s").size());
-        Assert.assertEquals(2, executeView("select * from %s").size());
+        Assert.assertEquals(2, execute("select * from mv").size());
 
         //Write a RT and verify the data is removed from index
         updateView("DELETE FROM %s WHERE k = ? AND asciival = ? and bigintval >= ?", 0, "foo", 0L);
 
         Assert.assertEquals(0, execute("select * from %s").size());
-        Assert.assertEquals(0, executeView("select * from %s").size());
+        Assert.assertEquals(0, execute("select * from mv").size());
     }
 }

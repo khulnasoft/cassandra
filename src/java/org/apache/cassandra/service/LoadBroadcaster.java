@@ -30,11 +30,9 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.gms.*;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.BROADCAST_INTERVAL_MS;
-
 public class LoadBroadcaster implements IEndpointStateChangeSubscriber
 {
-    static final int BROADCAST_INTERVAL = BROADCAST_INTERVAL_MS.getInt();
+    static final int BROADCAST_INTERVAL = Integer.getInteger("cassandra.broadcast_interval_ms", 60 * 1000);
 
     public static final LoadBroadcaster instance = new LoadBroadcaster();
 
@@ -83,8 +81,8 @@ public class LoadBroadcaster implements IEndpointStateChangeSubscriber
             {
                 if (!Gossiper.instance.isEnabled())
                     return;
-
-                logger.trace("Disseminating load info ...");
+                if (logger.isTraceEnabled())
+                    logger.trace("Disseminating load info ...");
                 Gossiper.instance.addLocalApplicationState(ApplicationState.LOAD,
                                                            StorageService.instance.valueFactory.load(StorageMetrics.load.getCount()));
             }

@@ -23,17 +23,12 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import com.google.common.collect.Iterables;
-
-import org.apache.cassandra.Util;
-import org.apache.cassandra.locator.AbstractReplicationStrategy;
-import org.apache.cassandra.locator.Endpoints;
-import org.apache.cassandra.locator.EndpointsForRange;
-import org.apache.cassandra.locator.ReplicaPlan;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
+import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.statements.schema.CreateTableStatement;
@@ -48,8 +43,12 @@ import org.apache.cassandra.db.rows.BTreeRow;
 import org.apache.cassandra.db.rows.BufferCell;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.locator.AbstractReplicationStrategy;
+import org.apache.cassandra.locator.Endpoints;
+import org.apache.cassandra.locator.EndpointsForRange;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Replica;
+import org.apache.cassandra.locator.ReplicaPlan;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.KeyspaceParams;
@@ -58,9 +57,7 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.Tables;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
-import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.apache.cassandra.locator.ReplicaUtils.full;
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 
 public class ReadRepairTest
 {
@@ -72,12 +69,12 @@ public class ReadRepairTest
     static Replica target3;
     static EndpointsForRange targets;
 
-    private static class InstrumentedReadRepairHandler<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<E, P>>
+    private static class InstrumentedReadRepairHandler<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<E>>
             extends BlockingPartitionRepair
     {
-        public InstrumentedReadRepairHandler(Map<Replica, Mutation> repairs, ReplicaPlan.ForWrite writePlan)
+        public InstrumentedReadRepairHandler(Map<Replica, Mutation> repairs, ReplicaPlan.ForTokenWrite writePlan)
         {
-            super(Util.dk("not a valid key"), repairs, writePlan);
+            super(Util.dk("not a valid key"), repairs, writePlan, e -> targets.endpoints().contains(e));
         }
 
         Map<InetAddressAndPort, Mutation> mutationsSent = new HashMap<>();
@@ -88,7 +85,7 @@ public class ReadRepairTest
         }
     }
 
-    static long now = TimeUnit.NANOSECONDS.toMicros(nanoTime());
+    static long now = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
     static DecoratedKey key;
     static Cell<?> cell1;
     static Cell<?> cell2;
@@ -124,7 +121,7 @@ public class ReadRepairTest
         ks = Keyspace.open(ksName);
         cfs = ks.getColumnFamilyStore("tbl");
 
-        cfs.sampleReadLatencyMicros = 0;
+        cfs.sampleReadLatencyNanos = 0;
 
         target1 = full(InetAddressAndPort.getByName("127.0.0.255"));
         target2 = full(InetAddressAndPort.getByName("127.0.0.254"));
@@ -164,7 +161,7 @@ public class ReadRepairTest
     private static InstrumentedReadRepairHandler createRepairHandler(Map<Replica, Mutation> repairs, EndpointsForRange all, EndpointsForRange targets)
     {
         ReplicaPlan.ForRangeRead readPlan = AbstractReadRepairTest.replicaPlan(ks, ConsistencyLevel.LOCAL_QUORUM, all, targets);
-        ReplicaPlan.ForWrite writePlan = AbstractReadRepairTest.repairPlan(readPlan);
+        ReplicaPlan.ForTokenWrite writePlan = AbstractReadRepairTest.repairPlan(readPlan);
         return new InstrumentedReadRepairHandler(repairs, writePlan);
     }
 
@@ -182,11 +179,12 @@ public class ReadRepairTest
     private static void assertMutationEqual(Mutation expected, Mutation actual)
     {
         Assert.assertEquals(expected.getKeyspaceName(), actual.getKeyspaceName());
+        Assert.assertEquals(expected.getKeyspace(), actual.getKeyspace());
         Assert.assertEquals(expected.key(), actual.key());
         Assert.assertEquals(expected.key(), actual.key());
         PartitionUpdate expectedUpdate = Iterables.getOnlyElement(expected.getPartitionUpdates());
         PartitionUpdate actualUpdate = Iterables.getOnlyElement(actual.getPartitionUpdates());
-        assertRowsEqual(Iterables.getOnlyElement(expectedUpdate), Iterables.getOnlyElement(actualUpdate));
+        assertRowsEqual(Iterables.getOnlyElement(expectedUpdate.rows()), Iterables.getOnlyElement(actualUpdate.rows()));
     }
 
     @Test
@@ -315,10 +313,10 @@ public class ReadRepairTest
     }
 
     /**
-     * For dc local consistency levels, if repair map has remote DC node, we will get assertion failure
+     * For dc local consistency levels, noop mutations and responses from remote dcs should not affect effective blockFor
      */
-    @Test(expected = IllegalStateException.class)
-    public void remoteDCNodeInvolveInLocalConsistencyTest() throws Exception
+    @Test
+    public void remoteDCTest() throws Exception
     {
         Map<Replica, Mutation> repairs = new HashMap<>();
         repairs.put(target1, mutation(cell1));
@@ -330,11 +328,26 @@ public class ReadRepairTest
         EndpointsForRange participants = EndpointsForRange.of(target1, target2, remote1, remote2);
         EndpointsForRange targets = EndpointsForRange.of(target1, target2);
 
-        createRepairHandler(repairs, participants, targets);
+        InstrumentedReadRepairHandler handler = createRepairHandler(repairs, participants, targets);
+        handler.sendInitialRepairs();
+        Assert.assertEquals(2, handler.mutationsSent.size());
+        Assert.assertTrue(handler.mutationsSent.containsKey(target1.endpoint()));
+        Assert.assertTrue(handler.mutationsSent.containsKey(remote1.endpoint()));
+
+        Assert.assertEquals(1, handler.waitingOn());
+        Assert.assertFalse(getCurrentRepairStatus(handler));
+
+        handler.ack(remote1.endpoint());
+        Assert.assertEquals(1, handler.waitingOn());
+        Assert.assertFalse(getCurrentRepairStatus(handler));
+
+        handler.ack(target1.endpoint());
+        Assert.assertEquals(0, handler.waitingOn());
+        Assert.assertTrue(getCurrentRepairStatus(handler));
     }
 
     private boolean getCurrentRepairStatus(BlockingPartitionRepair handler)
     {
-        return handler.awaitRepairsUntil(nanoTime(), NANOSECONDS);
+        return handler.awaitRepairsUntil(System.nanoTime(), TimeUnit.NANOSECONDS);
     }
 }

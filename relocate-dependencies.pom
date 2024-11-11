@@ -36,7 +36,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
-        <junit.version>4.12</junit.version>
+        <junit.version>4.13</junit.version>
         <maven.compiler.source>${java.version}</maven.compiler.source>
         <maven.compiler.target>${java.version}</maven.compiler.target>
         <dtest-local.version>4.0.0-SNAPSHOT</dtest-local.version>
@@ -90,8 +90,8 @@
                         </relocation>
 
                         <relocation>
-                            <pattern>com.datastax</pattern>
-                            <shadedPattern>relocated.shaded.com.datastax</shadedPattern>
+                            <pattern>com.khulnasoft</pattern>
+                            <shadedPattern>relocated.shaded.com.khulnasoft</shadedPattern>
                         </relocation>
                     </relocations>
 
@@ -126,7 +126,7 @@
                         </filter>
 
                         <filter>
-                            <artifact>com.datastax.cassandra:cassandra-driver-core</artifact>
+                            <artifact>com.khulnasoft.cassandra:cassandra-driver-core</artifact>
                             <excludes>
                                 <exclude>META-INF/maven/</exclude>
                             </excludes>

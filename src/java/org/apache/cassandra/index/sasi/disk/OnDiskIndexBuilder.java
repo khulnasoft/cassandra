@@ -31,6 +31,7 @@ import org.apache.cassandra.index.sasi.sa.SuffixSA;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.util.*;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
@@ -42,8 +43,6 @@ import com.google.common.annotations.VisibleForTesting;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import static org.apache.cassandra.utils.LocalizeString.toUpperCaseLocalized;
 
 public class OnDiskIndexBuilder
 {
@@ -64,7 +63,7 @@ public class OnDiskIndexBuilder
 
         public static Mode mode(String mode)
         {
-            return Mode.valueOf(toUpperCaseLocalized(mode));
+            return Mode.valueOf(mode.toUpperCase());
         }
 
         public boolean supports(Op op)
@@ -131,9 +130,9 @@ public class OnDiskIndexBuilder
     public static final int SUPER_BLOCK_SIZE = 64;
     public static final int IS_PARTIAL_BIT = 15;
 
-    private static final SequentialWriterOption WRITER_OPTION = SequentialWriterOption.newBuilder()
-                                                                                      .bufferSize(BLOCK_SIZE)
-                                                                                      .build();
+    public static final SequentialWriterOption WRITER_OPTION = SequentialWriterOption.newBuilder()
+                                                                                     .bufferSize(BLOCK_SIZE)
+                                                                                     .build();
 
     private final List<MutableLevel<InMemoryPointerTerm>> levels = new ArrayList<>();
     private MutableLevel<InMemoryDataTerm> dataLevel;
@@ -263,6 +262,7 @@ public class OnDiskIndexBuilder
         return true;
     }
 
+    @SuppressWarnings("resource")
     protected void finish(Descriptor descriptor, Pair<ByteBuffer, ByteBuffer> range, File file, TermIterator terms)
     {
         SequentialWriter out = null;

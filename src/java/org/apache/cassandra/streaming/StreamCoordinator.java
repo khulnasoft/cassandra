@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.streaming;
 
-import java.net.InetSocketAddress;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -26,9 +25,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.utils.TimeUUID;
-
-import static org.apache.cassandra.net.MessagingService.current_version;
 
 
 /**
@@ -44,17 +40,17 @@ public class StreamCoordinator
 
     private final boolean connectSequentially;
 
-    private final Map<InetSocketAddress, HostStreamingData> peerSessions = new ConcurrentHashMap<>();
+    private final Map<InetAddressAndPort, HostStreamingData> peerSessions = new ConcurrentHashMap<>();
     private final StreamOperation streamOperation;
     private final int connectionsPerHost;
     private final boolean follower;
-    private StreamingChannel.Factory factory;
+    private StreamConnectionFactory factory;
     private Iterator<StreamSession> sessionsToConnect = null;
-    private final TimeUUID pendingRepair;
+    private final UUID pendingRepair;
     private final PreviewKind previewKind;
 
-    public StreamCoordinator(StreamOperation streamOperation, int connectionsPerHost, StreamingChannel.Factory factory,
-                             boolean follower, boolean connectSequentially, TimeUUID pendingRepair, PreviewKind previewKind)
+    public StreamCoordinator(StreamOperation streamOperation, int connectionsPerHost, StreamConnectionFactory factory,
+                             boolean follower, boolean connectSequentially, UUID pendingRepair, PreviewKind previewKind)
     {
         this.streamOperation = streamOperation;
         this.connectionsPerHost = connectionsPerHost;
@@ -65,7 +61,7 @@ public class StreamCoordinator
         this.previewKind = previewKind;
     }
 
-    public void setConnectionFactory(StreamingChannel.Factory factory)
+    public void setConnectionFactory(StreamConnectionFactory factory)
     {
         this.factory = factory;
     }
@@ -152,19 +148,19 @@ public class StreamCoordinator
             logger.debug("Finished connecting all sessions");
     }
 
-    public synchronized Set<InetSocketAddress> getPeers()
+    public synchronized Set<InetAddressAndPort> getPeers()
     {
         return new HashSet<>(peerSessions.keySet());
     }
 
-    public synchronized StreamSession getOrCreateOutboundSession(InetAddressAndPort peer)
+    public synchronized StreamSession getOrCreateNextSession(InetAddressAndPort peer)
     {
-        return getOrCreateHostData(peer).getOrCreateOutboundSession(peer);
+        return getOrCreateHostData(peer).getOrCreateNextSession(peer);
     }
 
-    public synchronized StreamSession getOrCreateInboundSession(InetAddressAndPort from, StreamingChannel channel, int messagingVersion, int id)
+    public synchronized StreamSession getOrCreateSessionById(InetAddressAndPort peer, int id, InetAddressAndPort preferred)
     {
-        return getOrCreateHostData(from).getOrCreateInboundSession(from, channel, messagingVersion, id);
+        return getOrCreateHostData(peer).getOrCreateSessionById(peer, id, preferred);
     }
 
     public StreamSession getSessionById(InetAddressAndPort peer, int id)
@@ -203,13 +199,13 @@ public class StreamCoordinator
 
             for (Collection<OutgoingStream> bucket : buckets)
             {
-                StreamSession session = sessionList.getOrCreateOutboundSession(to);
+                StreamSession session = sessionList.getOrCreateNextSession(to);
                 session.addTransferStreams(bucket);
             }
         }
         else
         {
-            StreamSession session = sessionList.getOrCreateOutboundSession(to);
+            StreamSession session = sessionList.getOrCreateNextSession(to);
             session.addTransferStreams(streams);
         }
     }
@@ -246,7 +242,7 @@ public class StreamCoordinator
         return data;
     }
 
-    private HostStreamingData getOrCreateHostData(InetSocketAddress peer)
+    private HostStreamingData getOrCreateHostData(InetAddressAndPort peer)
     {
         HostStreamingData data = peerSessions.get(peer);
         if (data == null)
@@ -257,7 +253,7 @@ public class StreamCoordinator
         return data;
     }
 
-    public TimeUUID getPendingRepair()
+    public UUID getPendingRepair()
     {
         return pendingRepair;
     }
@@ -285,12 +281,12 @@ public class StreamCoordinator
             return false;
         }
 
-        public StreamSession getOrCreateOutboundSession(InetAddressAndPort peer)
+        public StreamSession getOrCreateNextSession(InetAddressAndPort peer)
         {
             // create
             if (streamSessions.size() < connectionsPerHost)
             {
-                StreamSession session = new StreamSession(streamOperation, peer, factory, null, current_version, isFollower(), streamSessions.size(),
+                StreamSession session = new StreamSession(streamOperation, peer, factory, isFollower(), streamSessions.size(),
                                                           pendingRepair, previewKind);
                 streamSessions.put(++lastReturned, session);
                 sessionInfos.put(lastReturned, session.getSessionInfo());
@@ -319,12 +315,12 @@ public class StreamCoordinator
             return Collections.unmodifiableCollection(streamSessions.values());
         }
 
-        public StreamSession getOrCreateInboundSession(InetAddressAndPort from, StreamingChannel channel, int messagingVersion, int id)
+        public StreamSession getOrCreateSessionById(InetAddressAndPort peer, int id, InetAddressAndPort preferred)
         {
             StreamSession session = streamSessions.get(id);
             if (session == null)
             {
-                session = new StreamSession(streamOperation, from, factory, channel, messagingVersion, isFollower(), id, pendingRepair, previewKind);
+                session = new StreamSession(streamOperation, peer, preferred, factory, isFollower(), id, pendingRepair, previewKind);
                 streamSessions.put(id, session);
                 sessionInfos.put(id, session.getSessionInfo());
             }

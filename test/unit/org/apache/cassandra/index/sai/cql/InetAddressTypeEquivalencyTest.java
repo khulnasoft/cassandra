@@ -18,7 +18,6 @@
 package org.apache.cassandra.index.sai.cql;
 
 import java.net.InetAddress;
-
 import org.junit.Before;
 import org.junit.Test;
 
@@ -27,7 +26,7 @@ import org.apache.cassandra.index.sai.cql.types.InetTest;
 
 /**
  * This is testing that we can query ipv4 addresses using ipv6 equivalent addresses.
- *
+ * </p>
  * The remaining InetAddressType tests are now handled by {@link InetTest}
  */
 public class InetAddressTypeEquivalencyTest extends SAITester
@@ -51,8 +50,14 @@ public class InetAddressTypeEquivalencyTest extends SAITester
         execute("INSERT INTO %s (pk, ck, ip) VALUES (1, 2, '127.0.0.1')");
         execute("INSERT INTO %s (pk, ck, ip) VALUES (1, 3, '127.0.0.2')");
         execute("INSERT INTO %s (pk, ck, ip) VALUES (1, 4, '::ffff:7f00:3')");
+
+        flush();
+
         execute("INSERT INTO %s (pk, ck, ip) VALUES (1, 5, '2002:4559:1fe2::4559:1fe2')");
         execute("INSERT INTO %s (pk, ck, ip) VALUES (1, 6, '2002:4559:1fe2::4559:1fe2')");
+
+        flush();
+
         execute("INSERT INTO %s (pk, ck, ip) VALUES (1, 7, '2002:4559:1fe2::4559:1fe2')");
         execute("INSERT INTO %s (pk, ck, ip) VALUES (1, 8, '2002:4559:1fe2::4559:1fe3')");
 

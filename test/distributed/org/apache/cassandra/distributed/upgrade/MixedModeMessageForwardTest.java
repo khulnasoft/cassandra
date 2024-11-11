@@ -30,10 +30,12 @@ import org.apache.cassandra.distributed.UpgradeableCluster;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
 import org.apache.cassandra.distributed.api.Feature;
 import org.apache.cassandra.distributed.api.IUpgradeableInstance;
+import org.apache.cassandra.utils.Shared;
 import org.awaitility.Awaitility;
 
 import static org.apache.cassandra.distributed.shared.AssertUtils.*;
 
+@Shared
 public class MixedModeMessageForwardTest extends UpgradeTestBase
 {
     private static final Logger logger = LoggerFactory.getLogger(MixedModeMessageForwardTest.class);
@@ -103,7 +105,7 @@ public class MixedModeMessageForwardTest extends UpgradeTestBase
         .withConfig(c -> c.with(Feature.GOSSIP, Feature.NETWORK))
         .withBuilder(b -> b.withRacks(numDCs, 1, nodesPerDc))
         .nodes(numDCs * nodesPerDc)
-        .upgradesToCurrentFrom(v40)
+        .singleUpgrade(v30, v40)
         .setup(cluster -> {
             cluster.schemaChange("ALTER KEYSPACE " + KEYSPACE +
                 " WITH replication = {'class': 'NetworkTopologyStrategy', " + ntsArgs + " };");

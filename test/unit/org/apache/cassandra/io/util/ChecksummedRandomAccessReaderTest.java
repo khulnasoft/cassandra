@@ -19,17 +19,17 @@
 package org.apache.cassandra.io.util;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
+import java.io.RandomAccessFile;
 import java.util.Arrays;
 import java.util.concurrent.ThreadLocalRandom;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import static org.junit.Assert.*;
-
 import org.apache.cassandra.config.DatabaseDescriptor;
+
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertTrue;
 
 public class ChecksummedRandomAccessReaderTest
 {
@@ -119,10 +119,10 @@ public class ChecksummedRandomAccessReaderTest
         assert data.exists();
 
         // simulate corruption of file
-        try (FileChannel dataFile = data.newReadWriteChannel())
+        try (RandomAccessFile dataFile = new RandomAccessFile(data.toJavaIOFile(), "rw"))
         {
-            dataFile.position(1024);
-            dataFile.write(ByteBuffer.wrap(new byte[] {5}));
+            dataFile.seek(1024);
+            dataFile.write((byte) 5);
         }
 
         try (RandomAccessReader reader = ChecksummedRandomAccessReader.open(data, crc))

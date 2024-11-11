@@ -23,21 +23,20 @@ import org.apache.cassandra.net.Message;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class GossipShutdownVerbHandler implements IVerbHandler<GossipShutdown>
+public class GossipShutdownVerbHandler implements IVerbHandler
 {
     public static final GossipShutdownVerbHandler instance = new GossipShutdownVerbHandler();
 
     private static final Logger logger = LoggerFactory.getLogger(GossipShutdownVerbHandler.class);
 
-    public void doVerb(Message<GossipShutdown> message)
+    public void doVerb(Message message)
     {
         if (!Gossiper.instance.isEnabled())
         {
             logger.debug("Ignoring shutdown message from {} because gossip is disabled", message.from());
             return;
         }
-        if (message.payload == null) Gossiper.instance.markAsShutdown(message.from());
-        else                         Gossiper.instance.markAsShutdown(message.from(), message.payload.state);
+        Gossiper.instance.markAsShutdown(message.from());
     }
 
 }

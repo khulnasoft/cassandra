@@ -40,11 +40,9 @@ import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.tcm.ClusterMetadataService;
 
 /**
  * Create a decent leveling for the given keyspace/column family
@@ -89,12 +87,13 @@ public class SSTableOfflineRelevel
         }
 
         Util.initDatabaseDescriptor();
-        ClusterMetadataService.initializeForTools(false);
+
         boolean dryRun = args[0].equals("--dry-run");
         String keyspace = args[args.length - 2];
         String columnfamily = args[args.length - 1];
+        Schema.instance.loadFromDisk();
 
-        if (Schema.instance.getTableMetadata(keyspace, columnfamily) == null)
+        if (Schema.instance.getTableMetadataRef(keyspace, columnfamily) == null)
             throw new IllegalArgumentException(String.format("Unknown keyspace/table %s.%s",
                     keyspace,
                     columnfamily));
@@ -117,14 +116,13 @@ public class SSTableOfflineRelevel
             {
                 try
                 {
-                    SSTableReader reader = SSTableReader.open(cfs, sstable.getKey());
+                    SSTableReader reader = sstable.getKey().getFormat().getReaderFactory().open(sstable.getKey());
                     sstableMultimap.put(reader.descriptor.directory, reader);
                 }
                 catch (Throwable t)
                 {
-                    out.println("Couldn't open sstable: "+sstable.getKey().fileFor(Components.DATA));
-                    Throwables.throwIfUnchecked(t);
-                    throw new RuntimeException(t);
+                    out.println("Couldn't open sstable: "+sstable.getKey().fileFor(Component.DATA));
+                    Throwables.propagate(t);
                 }
             }
         }
@@ -179,7 +177,7 @@ public class SSTableOfflineRelevel
                 @Override
                 public int compare(SSTableReader o1, SSTableReader o2)
                 {
-                    return o1.getLast().compareTo(o2.getLast());
+                    return o1.last.compareTo(o2.last);
                 }
             });
 
@@ -193,10 +191,10 @@ public class SSTableOfflineRelevel
                 while (it.hasNext())
                 {
                     SSTableReader sstable = it.next();
-                    if (lastLast == null || lastLast.compareTo(sstable.getFirst()) < 0)
+                    if (lastLast == null || lastLast.compareTo(sstable.first) < 0)
                     {
                         level.add(sstable);
-                        lastLast = sstable.getLast();
+                        lastLast = sstable.last;
                         it.remove();
                     }
                 }

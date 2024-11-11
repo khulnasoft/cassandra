@@ -32,22 +32,19 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.util.concurrent.FastThreadLocal;
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Pair;
-import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.UUIDGen;
-import org.apache.cassandra.utils.memory.MemoryUtil;
-
-import static org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_NETTY_USE_HEAP_ALLOCATOR;
-import static org.apache.cassandra.utils.LocalizeString.toUpperCaseLocalized;
 
 /**
  * ByteBuf utility methods.
@@ -58,7 +55,7 @@ import static org.apache.cassandra.utils.LocalizeString.toUpperCaseLocalized;
  */
 public abstract class CBUtil
 {
-    public static final boolean USE_HEAP_ALLOCATOR = CASSANDRA_NETTY_USE_HEAP_ALLOCATOR.getBoolean();
+    public static final boolean USE_HEAP_ALLOCATOR = Boolean.getBoolean(Config.PROPERTY_PREFIX + "netty_use_heap_allocator");
     public static final ByteBufAllocator allocator = USE_HEAP_ALLOCATOR ? new UnpooledByteBufAllocator(false) : new PooledByteBufAllocator(true);
     private static final int UUID_SIZE = 16;
 
@@ -68,15 +65,6 @@ public abstract class CBUtil
         protected CharsetDecoder initialValue()
         {
             return StandardCharsets.UTF_8.newDecoder();
-        }
-    };
-
-    private final static FastThreadLocal<ByteBuffer> localDirectBuffer = new FastThreadLocal<ByteBuffer>()
-    {
-        @Override
-        protected ByteBuffer initialValue()
-        {
-            return MemoryUtil.getHollowDirectByteBuffer();
         }
     };
 
@@ -150,7 +138,7 @@ public abstract class CBUtil
 
     /**
      * Write US-ASCII strings. It does not work if containing any char > 0x007F (127)
-     * @param str satisfies {@link org.apache.cassandra.db.marshal.AsciiType}
+     * @param str, satisfies {@link org.apache.cassandra.db.marshal.AsciiType},
      *             i.e. seven-bit ASCII, a.k.a. ISO646-US
      */
     public static void writeAsciiString(String str, ByteBuf cb)
@@ -173,7 +161,7 @@ public abstract class CBUtil
 
     /**
      * Returns the ecoding size of a US-ASCII string. It does not work if containing any char > 0x007F (127)
-     * @param str satisfies {@link org.apache.cassandra.db.marshal.AsciiType}
+     * @param str, satisfies {@link org.apache.cassandra.db.marshal.AsciiType},
      *             i.e. seven-bit ASCII, a.k.a. ISO646-US
      */
     public static int sizeOfAsciiString(String str)
@@ -286,7 +274,7 @@ public abstract class CBUtil
         String value = CBUtil.readString(cb);
         try
         {
-            return Enum.valueOf(enumType, toUpperCaseLocalized(value));
+            return Enum.valueOf(enumType, value.toUpperCase());
         }
         catch (IllegalArgumentException e)
         {
@@ -313,22 +301,9 @@ public abstract class CBUtil
         return UUIDGen.getUUID(buffer);
     }
 
-    public static TimeUUID readTimeUUID(ByteBuf cb)
-    {
-        long msb = cb.readLong();
-        long lsb = cb.readLong();
-        return TimeUUID.fromBytes(msb, lsb);
-    }
-
     public static void writeUUID(UUID uuid, ByteBuf cb)
     {
         cb.writeBytes(UUIDGen.decompose(uuid));
-    }
-
-    public static void writeUUID(TimeUUID uuid, ByteBuf cb)
-    {
-        cb.writeLong(uuid.msb());
-        cb.writeLong(uuid.lsb());
     }
 
     public static int sizeOfUUID(UUID uuid)
@@ -400,7 +375,7 @@ public abstract class CBUtil
         Map<String, List<String>> m = new HashMap<String, List<String>>(length);
         for (int i = 0; i < length; i++)
         {
-            String k = toUpperCaseLocalized(readString(cb));
+            String k = readString(cb).toUpperCase();
             List<String> v = readStringList(cb);
             m.put(k, v);
         }
@@ -489,35 +464,7 @@ public abstract class CBUtil
         cb.writeInt(remaining);
 
         if (remaining > 0)
-            addBytes(bytes, cb);
-    }
-
-    public static void addBytes(ByteBuffer src, ByteBuf dest)
-    {
-        if (src.remaining() == 0)
-            return;
-
-        int length = src.remaining();
-
-        if (src.hasArray())
-        {
-            // Heap buffers are copied using a raw array instead of shared heap buffer and MemoryUtil.unsafe to avoid a CMS bug, which causes the JVM to crash with the follwing:
-            // # Problematic frame:
-            // # V  [libjvm.dylib+0x63e858]  void ParScanClosure::do_oop_work<unsigned int>(unsigned int*, bool, bool)+0x94
-            // More details can be found here: https://bugs.openjdk.org/browse/JDK-8222798
-            byte[] array = src.array();
-            dest.writeBytes(array, src.arrayOffset() + src.position(), length);
-        }
-        else if (src.isDirect())
-        {
-            ByteBuffer local = getLocalDirectBuffer();
-            MemoryUtil.duplicateDirectByteBuffer(src, local);
-            dest.writeBytes(local);
-        }
-        else
-        {
-            dest.writeBytes(src.duplicate());
-        }
+            cb.writeBytes(bytes.duplicate());
     }
 
     public static int sizeOfValue(byte[] bytes)
@@ -653,8 +600,4 @@ public abstract class CBUtil
         return bytes;
     }
 
-    private static ByteBuffer getLocalDirectBuffer()
-    {
-        return localDirectBuffer.get();
-    }
 }

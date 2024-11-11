@@ -145,7 +145,7 @@ public class MerkleTrees implements Iterable<Map.Entry<Range<Token>, MerkleTree>
     /**
      * Dereference all merkle trees and release direct memory for all off-heap trees.
      */
-    public synchronized void release()
+    public void release()
     {
         merkleTrees.values().forEach(MerkleTree::release);
         merkleTrees.clear();
@@ -381,15 +381,15 @@ public class MerkleTrees implements Iterable<Map.Entry<Range<Token>, MerkleTree>
     /**
      * Get the differences between the two sets of MerkleTrees.
      *
-     * @param ltrees
-     * @param rtrees
+     * @param ltree
+     * @param rtree
      * @return
      */
-    public static List<Range<Token>> difference(MerkleTrees ltrees, MerkleTrees rtrees)
+    public static List<Range<Token>> difference(MerkleTrees ltree, MerkleTrees rtree)
     {
         List<Range<Token>> differences = new ArrayList<>();
-        for (MerkleTree tree : ltrees.merkleTrees.values())
-            differences.addAll(MerkleTree.difference(tree, rtrees.getMerkleTree(tree.fullRange)));
+        for (MerkleTree tree : ltree.merkleTrees.values())
+            differences.addAll(MerkleTree.difference(tree, rtree.getMerkleTree(tree.fullRange)));
         return differences;
     }
 

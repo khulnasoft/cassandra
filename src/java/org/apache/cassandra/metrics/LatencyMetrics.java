@@ -89,7 +89,7 @@ public class LatencyMetrics
         this.aliasFactory = aliasFactory;
         this.namePrefix = namePrefix;
 
-        LatencyMetricsTimer timer = new LatencyMetrics.LatencyMetricsTimer(CassandraMetricsRegistry.createReservoir(TimeUnit.MICROSECONDS));
+        LatencyMetricsTimer timer = new LatencyMetrics.LatencyMetricsTimer(new DecayingEstimatedHistogramReservoir());
         Counter counter = new LatencyMetricsCounter();
 
         if (aliasFactory == null)
@@ -99,8 +99,8 @@ public class LatencyMetrics
         }
         else
         {
-            latency = Metrics.register(factory.createMetricName(namePrefix + "Latency"), timer, aliasFactory.createMetricName(namePrefix + "Latency"));
-            totalLatency = Metrics.register(factory.createMetricName(namePrefix + "TotalLatency"), counter, aliasFactory.createMetricName(namePrefix + "TotalLatency"));
+            latency = Metrics.register(factory.createMetricName(namePrefix + "Latency"), aliasFactory.createMetricName(namePrefix + "Latency"), timer);
+            totalLatency = Metrics.register(factory.createMetricName(namePrefix + "TotalLatency"), aliasFactory.createMetricName(namePrefix + "TotalLatency"), counter);
         }
     }
     
@@ -164,9 +164,16 @@ public class LatencyMetrics
         {
             parent.removeChildren(this);
         }
-        // Aliases are already known to the parent metrics, so we don't need to remove them here.
-        Metrics.remove(factory.createMetricName(namePrefix + "Latency"));
-        Metrics.remove(factory.createMetricName(namePrefix + "TotalLatency"));
+        if (aliasFactory == null)
+        {
+            Metrics.remove(factory.createMetricName(namePrefix + "Latency"));
+            Metrics.remove(factory.createMetricName(namePrefix + "TotalLatency"));
+        }
+        else
+        {
+            Metrics.remove(factory.createMetricName(namePrefix + "Latency"), aliasFactory.createMetricName(namePrefix + "Latency"));
+            Metrics.remove(factory.createMetricName(namePrefix + "TotalLatency"), aliasFactory.createMetricName(namePrefix + "TotalLatency"));
+        }
     }
 
     public class LatencyMetricsTimer extends Timer

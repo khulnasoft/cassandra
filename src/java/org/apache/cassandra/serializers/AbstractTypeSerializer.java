@@ -40,11 +40,13 @@ public class AbstractTypeSerializer
 
     public void serializeList(List<AbstractType<?>> types, DataOutputPlus out) throws IOException
     {
-        out.writeUnsignedVInt32(types.size());
+        out.writeUnsignedVInt(types.size());
         for (AbstractType<?> type : types)
             serialize(type, out);
     }
 
+    // Used only in serialization header, when deserializing a type from the sstable header,
+    // not used in commit log or internode transport.
     public AbstractType<?> deserialize(DataInputPlus in) throws IOException
     {
         ByteBuffer raw = ByteBufferUtil.readWithVIntLength(in);

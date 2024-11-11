@@ -23,8 +23,8 @@ import java.util.List;
 
 import javax.annotation.Nullable;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.PartitionPosition;
+import org.apache.cassandra.db.SortedLocalRanges;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Splitter;
 import org.apache.cassandra.dht.Token;
@@ -39,14 +39,14 @@ public class ShardManagerDiskAware extends ShardManagerNoDisks
     private final int[] diskStartRangeIndex;
     private final List<Token> diskBoundaries;
 
-    public ShardManagerDiskAware(ColumnFamilyStore.VersionedLocalRanges localRanges, List<Token> diskBoundaries)
+    public ShardManagerDiskAware(SortedLocalRanges localRanges, List<Token> diskBoundaries)
     {
         super(localRanges);
         assert diskBoundaries != null && !diskBoundaries.isEmpty();
         this.diskBoundaries = diskBoundaries;
 
         double position = 0;
-        final List<Splitter.WeightedRange> ranges = localRanges;
+        final List<Splitter.WeightedRange> ranges = localRanges.getRanges();
         int diskIndex = 0;
         diskBoundaryPositions = new double[diskBoundaries.size()];
         diskStartRangeIndex = new int[diskBoundaryPositions.length];
@@ -110,7 +110,7 @@ public class ShardManagerDiskAware extends ShardManagerNoDisks
         public BoundaryTrackerDiskAware(int countPerDisk)
         {
             this.countPerDisk = countPerDisk;
-            currentStart = localRanges.get(0).left();
+            currentStart = localRanges.getRanges().get(0).left();
             diskIndex = -1;
         }
 
@@ -133,7 +133,7 @@ public class ShardManagerDiskAware extends ShardManagerNoDisks
                 right = localRangePositions[++currentRange];
             }
 
-            final Range<Token> range = localRanges.get(currentRange).range();
+            final Range<Token> range = localRanges.getRanges().get(currentRange).range();
             return currentStart.getPartitioner().split(range.left, range.right, (toPos - left) / (right - left));
         }
 

@@ -32,31 +32,31 @@ import org.apache.cassandra.index.IndexRegistry;
 public interface Restriction
 {
     /**
-     * Checks if this restriction is a token restriction.
-     * @return {@code true} if this restriction is a token restriction, {@code false} otherwise
+     * Check if the restriction is on a partition key
+     * @return <code>true</code> if the restriction is on a partition key, <code>false</code>
      */
-    default boolean isOnToken()
+    public default boolean isOnToken()
     {
         return false;
     }
 
     /**
-     * Returns the column metadata in position order.
-     * @return the column metadata in position order.
+     * Returns the definition of the first column.
+     * @return the definition of the first column.
      */
-    List<ColumnMetadata> columns();
+    public ColumnMetadata getFirstColumn();
 
     /**
-     * Returns the metadata of the first column.
-     * @return the metadata of the first column.
+     * Returns the definition of the last column.
+     * @return the definition of the last column.
      */
-    ColumnMetadata firstColumn();
+    public ColumnMetadata getLastColumn();
 
     /**
-     * Returns the metadata of the last column.
-     * @return the metadata of the last column.
+     * Returns the column definitions in position order.
+     * @return the column definitions in position order.
      */
-    ColumnMetadata lastColumn();
+    public List<ColumnMetadata> getColumnDefs();
 
     /**
      * Adds all functions (native and user-defined) used by any component of the restriction
@@ -66,38 +66,28 @@ public interface Restriction
     void addFunctionsTo(List<Function> functions);
 
     /**
-     * Checks if this restriction requires filtering or indexing.
-     * @return {@code true} if the restriction will require either filtering or indexing, {@code false} otherwise.
+     * Check if the restriction is on indexed columns.
+     *
+     * @param indexRegistry the index registry
+     * @return <code>true</code> if the restriction is on indexed columns, <code>false</code>
      */
-    boolean needsFilteringOrIndexing();
+    public boolean hasSupportingIndex(IndexRegistry indexRegistry);
+
+    /**
+     * Find first supporting index for current restriction
+     *
+     * @param indexRegistry the index registry
+     * @return <code>index</code> if the restriction is on indexed columns, <code>null</code>
+     */
+    public Index findSupportingIndex(IndexRegistry indexRegistry);
 
     /**
      * Returns whether this restriction would need filtering if the specified index group were used.
-     * Find the first index supporting this restriction.
      *
      * @param indexGroup an index group
      * @return {@code true} if this would need filtering if {@code indexGroup} were used, {@code false} otherwise
      */
-    boolean needsFiltering(Index.Group indexGroup);
-
-    /**
-     * Check if the restriction is on indexed columns.
-     *
-     * @param indexes the available indexes
-     * @return <code>true</code> if the restriction is on indexed columns, <code>false</code> otherwise
-     */
-    default boolean hasSupportingIndex(Iterable<Index> indexes)
-    {
-        return findSupportingIndex(indexes) != null;
-    }
-
-    /**
-     * Find the first index supporting this restriction.
-     *
-     * @param indexes the available indexes
-     * @return an {@code Index} if the restriction is on indexed columns, {@code null} otherwise.
-     */
-    Index findSupportingIndex(Iterable<Index> indexes);
+    public boolean needsFiltering(Index.Group indexGroup);
 
     /**
      * Adds to the specified row filter the expressions corresponding to this <code>Restriction</code>.
@@ -106,7 +96,7 @@ public interface Restriction
      * @param indexRegistry the index registry
      * @param options the query options
      */
-    void addToRowFilter(RowFilter filter,
-                        IndexRegistry indexRegistry,
-                        QueryOptions options);
+    public void addToRowFilter(RowFilter.Builder filter,
+                               IndexRegistry indexRegistry,
+                               QueryOptions options);
 }

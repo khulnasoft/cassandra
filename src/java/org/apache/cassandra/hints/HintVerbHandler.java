@@ -31,8 +31,9 @@ import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.tcm.membership.NodeId;
+import org.apache.cassandra.utils.FBUtilities;
+
+import static org.apache.cassandra.config.CassandraRelevantProperties.CUSTOM_HINTS_HANDLER;
 
 /**
  * Verb handler used both for hint dispatch and streaming.
@@ -43,15 +44,19 @@ import org.apache.cassandra.tcm.membership.NodeId;
  */
 public final class HintVerbHandler implements IVerbHandler<HintMessage>
 {
-    public static final HintVerbHandler instance = new HintVerbHandler();
+    public static final IVerbHandler<HintMessage> instance = CUSTOM_HINTS_HANDLER.isPresent()
+                                                             ? FBUtilities.construct(CUSTOM_HINTS_HANDLER.getString(),
+                                                                                     "Custom Hint Verb Handler")
+                                                             : new HintVerbHandler();
 
     private static final Logger logger = LoggerFactory.getLogger(HintVerbHandler.class);
 
+    @Override
     public void doVerb(Message<HintMessage> message)
     {
         UUID hostId = message.payload.hostId;
         Hint hint = message.payload.hint;
-        InetAddressAndPort address = StorageService.instance.getEndpointForHostId(hostId);
+        InetAddressAndPort address = HintsEndpointProvider.instance.endpointForHost(hostId);
 
         // If we see an unknown table id, it means the table, or one of the tables in the mutation, had been dropped.
         // In that case there is nothing we can really do, or should do, other than log it go on.
@@ -59,11 +64,10 @@ public final class HintVerbHandler implements IVerbHandler<HintMessage>
         // is schema agreement between the sender and the receiver.
         if (hint == null)
         {
-            if (logger.isTraceEnabled())
-                logger.trace("Failed to decode and apply a hint for {}: {} - table with id {} is unknown",
-                             address,
-                             hostId,
-                             message.payload.unknownTableID);
+            logger.trace("Failed to decode and apply a hint for {}: {} - table with id {} is unknown",
+                         address,
+                         hostId,
+                         message.payload.unknownTableID);
             respond(message);
             return;
         }
@@ -80,14 +84,10 @@ public final class HintVerbHandler implements IVerbHandler<HintMessage>
             return;
         }
 
-        ClusterMetadata metadata = ClusterMetadata.current();
-        NodeId localId = metadata.myNodeId();
-        if (!hostId.equals(localId.toUUID()) && !hostId.equals(metadata.directory.hostId(localId)))
+        if (!hostId.equals(StorageService.instance.getLocalHostUUID()))
         {
-            // the hint may have been written prior to upgrading, in which case it would be addressing the old
-            // host id for its target node. If the id in the hint matches neither the pre-upgrade host id nor the
-            // post-upgrade node id for this peer, the node is not the final destination of the hint (must have gotten
-            // it from a decommissioning node), so just store it locally, to be delivered later.
+            // the node is not the final destination of the hint (must have gotten it from a decommissioning node),
+            // so just store it locally, to be delivered later.
             HintsService.instance.write(hostId, hint);
             respond(message);
         }
@@ -101,7 +101,7 @@ public final class HintVerbHandler implements IVerbHandler<HintMessage>
         else
         {
             // the common path - the node is both the destination and a valid replica for the hint.
-            hint.applyFuture().addCallback(o -> respond(message), e -> logger.debug("Failed to apply hint", e));
+            hint.applyFuture().thenAccept(o -> respond(message)).exceptionally(e -> {logger.debug("Failed to apply hint", e); return null;});
         }
     }
 

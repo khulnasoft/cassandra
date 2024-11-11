@@ -17,70 +17,73 @@
  */
 package org.apache.cassandra.locator;
 
-import java.util.IdentityHashMap;
-import java.util.List;
+import java.util.Collections;
+import java.util.Collection;
 import java.util.Map;
 
-import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.dht.RingPosition;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.tcm.Epoch;
-import org.apache.cassandra.tcm.ownership.DataPlacement;
-import org.apache.cassandra.tcm.ownership.ReplicaGroups;
-import org.apache.cassandra.tcm.ownership.VersionedEndpoints;
 import org.apache.cassandra.utils.FBUtilities;
 
-public class LocalStrategy extends SystemStrategy
+public class LocalStrategy extends AbstractReplicationStrategy
 {
     private static final ReplicationFactor RF = ReplicationFactor.fullOnly(1);
-    private static final Map<IPartitioner, EntireRange> perPartitionerRanges = new IdentityHashMap<>();
+    private final EndpointsForRange replicas;
 
-    public LocalStrategy(String keyspaceName, Map<String, String> configOptions)
+    public LocalStrategy(String keyspaceName, TokenMetadata tokenMetadata, IEndpointSnitch snitch, Map<String, String> configOptions)
     {
-        super(keyspaceName, configOptions);
+        super(keyspaceName, tokenMetadata, snitch, configOptions);
+        replicas = EndpointsForRange.of(
+                new Replica(FBUtilities.getBroadcastAddressAndPort(),
+                        DatabaseDescriptor.getPartitioner().getMinimumToken(),
+                        DatabaseDescriptor.getPartitioner().getMinimumToken(),
+                        true
+                )
+        );
     }
 
+    /**
+     * We need to override this even if we override calculateNaturalReplicas,
+     * because the default implementation depends on token calculations but
+     * LocalStrategy may be used before tokens are set up.
+     */
     @Override
-    public EndpointsForRange calculateNaturalReplicas(Token token, ClusterMetadata metadata)
+    public EndpointsForRange getNaturalReplicas(RingPosition<?> searchPosition)
     {
-        return getRange(token.getPartitioner()).localReplicas;
+        return replicas;
     }
 
-    @Override
-    public DataPlacement calculateDataPlacement(Epoch epoch, List<Range<Token>> ranges, ClusterMetadata metadata)
+    public EndpointsForRange calculateNaturalReplicas(Token token, TokenMetadata metadata)
     {
-        return getRange(ranges.get(0).left.getPartitioner()).placement;
+        return replicas;
     }
 
-    @Override
     public ReplicationFactor getReplicationFactor()
     {
         return RF;
     }
 
-    private EntireRange getRange(IPartitioner partitioner)
+    public void validateOptions() throws ConfigurationException
     {
-        return perPartitionerRanges.computeIfAbsent(partitioner, EntireRange::new);
     }
 
-    /**
-     * For lazy initialisation. In some circumstances, we may want to instantiate LocalStrategy without initialising
-     * DatabaseDescriptor; FQL replay is one such usage as we initialise the KeyspaceMetadata objects, which now eagerly
-     * creates the replication strategy.
-     */
-    static class EntireRange
+    @Override
+    public void maybeWarnOnOptions()
     {
-        public final Range<Token> entireRange;
-        public final EndpointsForRange localReplicas;
-        public final DataPlacement placement;
+    }
 
-        private EntireRange(IPartitioner partitioner)
-        {
-            entireRange = new Range<>(partitioner.getMinimumToken(), partitioner.getMinimumToken());
-            localReplicas = EndpointsForRange.of(new Replica(FBUtilities.getBroadcastAddressAndPort(), entireRange, true));
-            ReplicaGroups rg = ReplicaGroups.builder(1).withReplicaGroup(VersionedEndpoints.forRange(Epoch.FIRST, localReplicas)).build();
-            placement = new DataPlacement(rg, rg);
-        }
+    @Override
+    public Collection<String> recognizedOptions()
+    {
+        // LocalStrategy doesn't expect any options.
+        return Collections.emptySet();
+    }
+
+    @Override
+    public boolean isPartitioned()
+    {
+        return false;
     }
 }

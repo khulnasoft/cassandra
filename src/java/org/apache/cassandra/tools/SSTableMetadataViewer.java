@@ -17,11 +17,14 @@
  */
 package org.apache.cassandra.tools;
 
+import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -48,13 +51,14 @@ import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.compress.CompressionMetadata;
-import org.apache.cassandra.io.compress.ICompressor;
+import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
-import org.apache.cassandra.io.sstable.format.CompressionInfoComponent;
+import org.apache.cassandra.io.sstable.IndexSummary;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.StatsComponent;
 import org.apache.cassandra.io.sstable.metadata.CompactionMetadata;
+import org.apache.cassandra.io.sstable.metadata.MetadataComponent;
+import org.apache.cassandra.io.sstable.metadata.MetadataType;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.sstable.metadata.ValidationMetadata;
 import org.apache.cassandra.io.util.File;
@@ -68,7 +72,6 @@ import static org.apache.cassandra.tools.Util.BLUE;
 import static org.apache.cassandra.tools.Util.CYAN;
 import static org.apache.cassandra.tools.Util.RESET;
 import static org.apache.cassandra.tools.Util.WHITE;
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 import static org.apache.commons.lang3.time.DurationFormatUtils.formatDurationWords;
 
 /**
@@ -83,12 +86,11 @@ public class SSTableMetadataViewer
     private static final String GCGS_KEY = "g";
     private static final String TIMESTAMP_UNIT = "t";
     private static final String SCAN = "s";
-    private static final String HELP = "h";
-    private static final Comparator<ValuedByteBuffer> VCOMP = Comparator.comparingLong(ValuedByteBuffer::getValue).reversed();
+    private static Comparator<ValuedByteBuffer> VCOMP = Comparator.comparingLong(ValuedByteBuffer::getValue).reversed();
 
     static
     {
-        DatabaseDescriptor.toolInitialization();
+        DatabaseDescriptor.clientInitialization();
     }
 
     boolean color;
@@ -114,7 +116,7 @@ public class SSTableMetadataViewer
 
     public static String deletion(long time)
     {
-        if (time == 0 || time == Long.MAX_VALUE)
+        if (time == 0 || time == Integer.MAX_VALUE)
         {
             return "no tombstones";
         }
@@ -172,7 +174,7 @@ public class SSTableMetadataViewer
     private void printScannedOverview(Descriptor descriptor, StatsMetadata stats) throws IOException
     {
         TableMetadata cfm = Util.metadataFromSSTable(descriptor);
-        SSTableReader reader = SSTableReader.openNoValidation(null, descriptor, TableMetadataRef.forOfflineTools(cfm));
+        SSTableReader reader = descriptor.getFormat().getReaderFactory().openNoValidation(descriptor, TableMetadataRef.forOfflineTools(cfm));
         try (ISSTableScanner scanner = reader.getScanner())
         {
             long bytes = scanner.getLengthInBytes();
@@ -230,9 +232,9 @@ public class SSTableMetadataViewer
                                     cellCount++;
                                     double percentComplete = Math.min(1.0, cellCount / totalCells);
                                     if (lastPercent != (int) (percentComplete * 100) &&
-                                        (currentTimeMillis() - lastPercentTime) > 1000)
+                                        (System.currentTimeMillis() - lastPercentTime) > 1000)
                                     {
-                                        lastPercentTime = currentTimeMillis();
+                                        lastPercentTime = System.currentTimeMillis();
                                         lastPercent = (int) (percentComplete * 100);
                                         if (color)
                                             out.printf("\r%sAnalyzing SSTable...  %s%s %s(%%%s)", BLUE, CYAN,
@@ -313,22 +315,23 @@ public class SSTableMetadataViewer
         }
     }
 
-    private void printSStableMetadata(File file, boolean scan) throws IOException
+    private void printSStableMetadata(File dataFile, boolean scan) throws IOException
     {
-        Descriptor descriptor = Descriptor.fromFileWithComponent(file, false).left;
-        StatsComponent statsComponent = StatsComponent.load(descriptor);
-        ValidationMetadata validation = statsComponent.validationMetadata();
-        StatsMetadata stats = statsComponent.statsMetadata();
-        CompactionMetadata compaction = statsComponent.compactionMetadata();
-        SerializationHeader.Component header = statsComponent.serializationHeader();
-        Class<? extends ICompressor> compressorClass = null;
-        try (CompressionMetadata compression = CompressionInfoComponent.loadIfExists(descriptor))
-        {
-            compressorClass = compression != null ? compression.compressor().getClass() : null;
-        }
+        Descriptor descriptor = Descriptor.fromFilename(dataFile);
+        Map<MetadataType, MetadataComponent> metadata = descriptor.getMetadataSerializer()
+                .deserialize(descriptor, EnumSet.allOf(MetadataType.class));
+        ValidationMetadata validation = (ValidationMetadata) metadata.get(MetadataType.VALIDATION);
+        StatsMetadata stats = (StatsMetadata) metadata.get(MetadataType.STATS);
+        CompactionMetadata compaction = (CompactionMetadata) metadata.get(MetadataType.COMPACTION);
+        CompressionMetadata compression = null;
+        File compressionFile = descriptor.fileFor(Component.COMPRESSION_INFO);
+        if (compressionFile.exists())
+            compression = CompressionMetadata.create(dataFile, stats.zeroCopyMetadata);
+        SerializationHeader.Component header = (SerializationHeader.Component) metadata
+                .get(MetadataType.HEADER);
 
         field("SSTable", descriptor);
-        if (scan && descriptor.version.version.compareTo("ma") >= 0)
+        if (scan && descriptor.version.getVersion().compareTo("ma") >= 0)
         {
             printScannedOverview(descriptor, stats);
         }
@@ -339,28 +342,26 @@ public class SSTableMetadataViewer
         }
         if (stats != null)
         {
-            TimeUnit tsUnit = TimeUnit.MICROSECONDS;
-            field("Minimum timestamp", toDateString(stats.minTimestamp, tsUnit), Long.toString(stats.minTimestamp));
-            field("Maximum timestamp", toDateString(stats.maxTimestamp, tsUnit), Long.toString(stats.maxTimestamp));
-            field("Duration", durationString(stats.maxTimestamp - stats.minTimestamp));
-            field("SSTable min local deletion time", deletion(stats.minLocalDeletionTime), Long.toString(stats.minLocalDeletionTime));
-            field("SSTable max local deletion time", deletion(stats.maxLocalDeletionTime), Long.toString(stats.maxLocalDeletionTime));
-            field("Compressor", compressorClass != null ? compressorClass.getName() : "-");
-            if (compressorClass != null)
+            field("Minimum timestamp", stats.minTimestamp, toDateString(stats.minTimestamp, tsUnit));
+            field("Maximum timestamp", stats.maxTimestamp, toDateString(stats.maxTimestamp, tsUnit));
+            field("SSTable min local deletion time", stats.minLocalDeletionTime, deletion(stats.minLocalDeletionTime));
+            field("SSTable max local deletion time", stats.maxLocalDeletionTime, deletion(stats.maxLocalDeletionTime));
+            field("Compressor", compression != null ? compression.compressor().getClass().getName() : "-");
+            if (compression != null)
                 field("Compression ratio", stats.compressionRatio);
             field("TTL min", stats.minTTL, toDurationString(stats.minTTL, TimeUnit.SECONDS));
             field("TTL max", stats.maxTTL, toDurationString(stats.maxTTL, TimeUnit.SECONDS));
 
             if (validation != null && header != null)
-                printMinMaxToken(descriptor, FBUtilities.newPartitioner(descriptor), header.getKeyType(), stats);
+                printMinMaxToken(descriptor, FBUtilities.newPartitioner(descriptor), header.getKeyType());
 
             if (header != null)
             {
                 ClusteringComparator comparator = new ClusteringComparator(header.getClusteringTypes());
-                field("Covered clusterings", stats.coveredClustering.toString(comparator));
+                field("covered clusterings", stats.coveredClustering.toString(comparator));
             }
             field("Estimated droppable tombstones",
-                  stats.getEstimatedDroppableTombstoneRatio((int) (currentTimeMillis() / 1000) - this.gc));
+                  stats.getEstimatedDroppableTombstoneRatio((int) (System.currentTimeMillis() / 1000) - this.gc));
             field("SSTable Level", stats.sstableLevel);
             field("Repaired at", stats.repairedAt, toDateString(stats.repairedAt, TimeUnit.MILLISECONDS));
             field("Originating host id", stats.originatingHostId);
@@ -414,16 +415,15 @@ public class SSTableMetadataViewer
 
             field("EncodingStats minTTL", encodingStats.minTTL,
                     toDurationString(encodingStats.minTTL, TimeUnit.SECONDS));
-            field("EncodingStats minLocalDeletionTime", toDateString(encodingStats.minLocalDeletionTime,
-                    TimeUnit.SECONDS), Long.toString(encodingStats.minLocalDeletionTime));
-            field("EncodingStats minTimestamp", toDateString(encodingStats.minTimestamp, tsUnit),
-                    Long.toString(encodingStats.minTimestamp));
+            field("EncodingStats minLocalDeletionTime", encodingStats.minLocalDeletionTime,
+                    toDateString(encodingStats.minLocalDeletionTime, TimeUnit.SECONDS));
+            field("EncodingStats minTimestamp", encodingStats.minTimestamp,
+                    toDateString(encodingStats.minTimestamp, tsUnit));
             field("KeyType", keyType.toString());
             field("ClusteringTypes", clusteringTypes.toString());
             field("StaticColumns", FBUtilities.toString(statics));
             field("RegularColumns", FBUtilities.toString(regulars));
-            if (stats != null)
-                field("IsTransient", stats.isTransient);
+            field("IsTransient", stats.isTransient);
         }
     }
 
@@ -447,20 +447,10 @@ public class SSTableMetadataViewer
             if (color) sb.append(WHITE);
             sb.append(" (");
             sb.append(comment);
-            sb.append(')');
+            sb.append(")");
             if (color) sb.append(RESET);
         }
-        this.out.println(sb);
-    }
-
-    public static String durationString(Long value)
-    {
-        long seconds  = TimeUnit.MICROSECONDS.toSeconds(value);
-        long day = TimeUnit.SECONDS.toDays(seconds);
-        long hours = TimeUnit.SECONDS.toHours(seconds) - (day * 24);
-        long minute = TimeUnit.SECONDS.toMinutes(seconds) - (TimeUnit.SECONDS.toHours(seconds) * 60);
-        long second = TimeUnit.SECONDS.toSeconds(seconds) - (TimeUnit.SECONDS.toMinutes(seconds) * 60);
-        return "Days: " + day + " Hours: " + hours + " Minutes: " + minute + " Seconds: " + second;
+        this.out.println(sb.toString());
     }
 
     private static void printUsage()
@@ -475,23 +465,17 @@ public class SSTableMetadataViewer
         }
     }
 
-    private void printMinMaxToken(Descriptor descriptor, IPartitioner partitioner, AbstractType<?> keyType, StatsMetadata statsMetadata)
-    throws IOException
+    private void printMinMaxToken(Descriptor descriptor, IPartitioner partitioner, AbstractType<?> keyType)
+            throws IOException
     {
-        if (descriptor.version.hasKeyRange())
-        {
-            if (statsMetadata.firstKey == null || statsMetadata.lastKey == null)
-                return;
+        File summariesFile = descriptor.fileFor(Component.SUMMARY);
+        if (!summariesFile.exists())
+            return;
 
-            field("First token", partitioner.getToken(statsMetadata.firstKey), keyType.getString(statsMetadata.firstKey));
-            field("Last token", partitioner.getToken(statsMetadata.lastKey), keyType.getString(statsMetadata.lastKey));
-        }
-        else
+        try (DataInputStream iStream = new DataInputStream(Files.newInputStream(summariesFile.toPath())))
         {
-            Pair<DecoratedKey, DecoratedKey> firstLast = descriptor.getFormat().getReaderFactory().readKeyRange(descriptor, partitioner);
-            if (firstLast == null)
-                return;
-
+            Pair<DecoratedKey, DecoratedKey> firstLast = new IndexSummary.IndexSummarySerializer()
+                    .deserializeFirstLastKey(iStream, partitioner);
             field("First token", firstLast.left.getToken(), keyType.getString(firstLast.left.getKey()));
             field("Last token", firstLast.right.getToken(), keyType.getString(firstLast.right.getKey()));
         }
@@ -518,10 +502,6 @@ public class SSTableMetadataViewer
         Option tsUnit = new Option(TIMESTAMP_UNIT, "timestamp_unit", true, "Time unit that cell timestamps are written with");
         tsUnit.setOptionalArg(true);
         options.addOption(tsUnit);
-
-        Option help = new Option(HELP, "help", false, "Help");
-        help.setOptionalArg(true);
-        options.addOption(help);
 
         Option scanEnabled = new Option(SCAN, "scan", false,
                 "Full sstable scan for additional details. Only available in 3.0+ sstables. Defaults: false");

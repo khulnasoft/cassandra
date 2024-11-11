@@ -22,9 +22,9 @@ package org.apache.cassandra.cql3;
 
 import org.junit.Test;
 
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.SimpleStatement;
-import com.datastax.driver.core.Statement;
+import com.khulnasoft.driver.core.Session;
+import com.khulnasoft.driver.core.SimpleStatement;
+import com.khulnasoft.driver.core.Statement;
 
 import static org.junit.Assert.assertEquals;
 

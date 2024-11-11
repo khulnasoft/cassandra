@@ -25,9 +25,9 @@ import java.io.IOException;
 import java.util.Random;
 import java.util.stream.Collectors;
 
-import com.datastax.driver.core.BoundStatement;
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.ResultSet;
+import com.khulnasoft.driver.core.BoundStatement;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.ResultSet;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.stress.generate.*;
 import org.apache.cassandra.stress.report.Timer;

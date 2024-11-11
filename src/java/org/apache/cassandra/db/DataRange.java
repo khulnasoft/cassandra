@@ -27,7 +27,6 @@ import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.dht.*;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 
 /**
  * Groups both the range of partitions to query, and the clustering index filter to
@@ -140,34 +139,6 @@ public class DataRange
     }
 
     /**
-     * The start of the partition key range queried by this {@code DataRange}.
-     *
-     * @return the start of the partition key range expressed as a ByteComparable.
-     */
-    public ByteComparable startAsByteComparable()
-    {
-        PartitionPosition bound = keyRange.left;
-        if (bound.isMinimum())
-            return null;
-
-        return bound.asComparableBound(keyRange.inclusiveLeft());
-    }
-
-    /**
-     * The end of the partition key range queried by this {@code DataRange}.
-     *
-     * @return the end of the partition key range expressed as a ByteComparable.
-     */
-    public ByteComparable stopAsByteComparable()
-    {
-        PartitionPosition bound = keyRange.right;
-        if (bound.isMinimum())
-            return null;
-
-        return bound.asComparableBound(!keyRange.inclusiveRight());
-    }
-
-    /**
      * Whether the underlying clustering index filter is a names filter or not.
      *
      * @return Whether the underlying clustering index filter is a names filter or not.
@@ -214,10 +185,9 @@ public class DataRange
      *
      * @return Whether this {@code DataRange} queries everything.
      */
-    public boolean isUnrestricted(TableMetadata metadata)
+    public boolean isUnrestricted()
     {
-        return startKey().isMinimum() && stopKey().isMinimum() &&
-               (clusteringIndexFilter.selectsAllPartition() || metadata.clusteringColumns().isEmpty());
+        return startKey().isMinimum() && stopKey().isMinimum() && clusteringIndexFilter.selectsAllPartition();
     }
 
     public boolean selectsAllPartition()
@@ -286,10 +256,10 @@ public class DataRange
         return String.format("range=%s pfilter=%s", keyRange.getString(metadata.partitionKeyType), clusteringIndexFilter.toString(metadata));
     }
 
-    public String toCQLString(TableMetadata metadata, RowFilter rowFilter)
+    public String toCQLString(TableMetadata metadata)
     {
-        if (isUnrestricted(metadata))
-            return rowFilter.toCQLString();
+        if (isUnrestricted())
+            return "UNRESTRICTED";
 
         StringBuilder sb = new StringBuilder();
 
@@ -307,7 +277,7 @@ public class DataRange
             needAnd = true;
         }
 
-        String filterString = clusteringIndexFilter.toCQLString(metadata, rowFilter);
+        String filterString = clusteringIndexFilter.toCQLString(metadata);
         if (!filterString.isEmpty())
             sb.append(needAnd ? " AND " : "").append(filterString);
 
@@ -341,18 +311,20 @@ public class DataRange
              : (isInclusive ? "<=" : "<");
     }
 
+    // TODO: this is reused in SinglePartitionReadCommand but this should not really be here. Ideally
+    // we need a more "native" handling of composite partition keys.
     public static void appendKeyString(StringBuilder sb, AbstractType<?> type, ByteBuffer key)
     {
         if (type instanceof CompositeType)
         {
             CompositeType ct = (CompositeType)type;
             ByteBuffer[] values = ct.split(key);
-            for (int i = 0; i < ct.types.size(); i++)
-                sb.append(i == 0 ? "" : ", ").append(ct.types.get(i).toCQLString(values[i]));
+            for (int i = 0; i < ct.subTypes().size(); i++)
+                sb.append(i == 0 ? "" : ", ").append(ct.subTypes().get(i).getString(values[i]));
         }
         else
         {
-            sb.append(type.toCQLString(key));
+            sb.append(type.getString(key));
         }
     }
 
@@ -420,7 +392,7 @@ public class DataRange
         }
 
         @Override
-        public boolean isUnrestricted(TableMetadata metadata)
+        public boolean isUnrestricted()
         {
             return false;
         }

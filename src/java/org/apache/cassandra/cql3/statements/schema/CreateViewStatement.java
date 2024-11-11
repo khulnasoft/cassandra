@@ -18,9 +18,11 @@
 package org.apache.cassandra.cql3.statements.schema;
 
 import java.util.*;
+import java.util.function.UnaryOperator;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 
 import org.apache.cassandra.audit.AuditLogContext;
@@ -31,17 +33,18 @@ import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.cql3.restrictions.StatementRestrictions;
 import org.apache.cassandra.cql3.selection.RawSelector;
 import org.apache.cassandra.cql3.selection.Selectable;
+import org.apache.cassandra.cql3.statements.RawKeyspaceAwareStatement;
 import org.apache.cassandra.cql3.statements.StatementType;
-import org.apache.cassandra.db.guardrails.Guardrails;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.ReversedType;
 import org.apache.cassandra.db.view.View;
 import org.apache.cassandra.exceptions.AlreadyExistsException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.guardrails.Guardrails;
 import org.apache.cassandra.schema.*;
 import org.apache.cassandra.schema.Keyspaces.KeyspacesDiff;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.Event.SchemaChange;
 import org.apache.cassandra.transport.Event.SchemaChange.Change;
 import org.apache.cassandra.transport.Event.SchemaChange.Target;
@@ -51,7 +54,6 @@ import static java.lang.String.join;
 import static com.google.common.collect.Iterables.concat;
 import static com.google.common.collect.Iterables.filter;
 import static com.google.common.collect.Iterables.transform;
-import static org.apache.cassandra.config.CassandraRelevantProperties.MV_ALLOW_FILTERING_NONKEY_COLUMNS_UNSAFE;
 
 public final class CreateViewStatement extends AlterSchemaStatement
 {
@@ -68,10 +70,10 @@ public final class CreateViewStatement extends AlterSchemaStatement
     private final TableAttributes attrs;
 
     private final boolean ifNotExists;
+    private QueryState state;
 
-    private ClientState state;
-
-    public CreateViewStatement(String keyspaceName,
+    public CreateViewStatement(String queryString,
+                               String keyspaceName,
                                String tableName,
                                String viewName,
 
@@ -86,7 +88,7 @@ public final class CreateViewStatement extends AlterSchemaStatement
 
                                boolean ifNotExists)
     {
-        super(keyspaceName);
+        super(queryString, keyspaceName);
         this.tableName = tableName;
         this.viewName = viewName;
 
@@ -103,7 +105,7 @@ public final class CreateViewStatement extends AlterSchemaStatement
     }
 
     @Override
-    public void validate(ClientState state)
+    public void validate(QueryState state)
     {
         super.validate(state);
 
@@ -111,22 +113,20 @@ public final class CreateViewStatement extends AlterSchemaStatement
         this.state = state;
     }
 
-    @Override
-    public Keyspaces apply(ClusterMetadata metadata)
+    public Keyspaces apply(Keyspaces schema)
     {
-        if (!DatabaseDescriptor.getMaterializedViewsEnabled())
+        if (!DatabaseDescriptor.getEnableMaterializedViews())
             throw ire("Materialized views are disabled. Enable in cassandra.yaml to use.");
 
         /*
          * Basic dependency validations
          */
 
-        Keyspaces schema = metadata.schema.getKeyspaces();
         KeyspaceMetadata keyspace = schema.getNullable(keyspaceName);
         if (null == keyspace)
             throw ire("Keyspace '%s' doesn't exist", keyspaceName);
 
-        if (keyspace.replicationStrategy.hasTransientReplicas())
+        if (keyspace.createReplicationStrategy().hasTransientReplicas())
             throw new InvalidRequestException("Materialized views are not supported on transiently replicated keyspaces");
 
         TableMetadata table = keyspace.tables.getNullable(tableName);
@@ -155,11 +155,13 @@ public final class CreateViewStatement extends AlterSchemaStatement
             throw ire("Materialized views cannot be created against other materialized views");
 
         // Guardrails on table properties
-        Guardrails.tableProperties.guard(attrs.updatedProperties(), attrs::removeProperty, state);
+        Guardrails.disallowedTableProperties.ensureAllowed(attrs.updatedProperties(), state);
+        Guardrails.ignoredTableProperties.maybeIgnoreAndWarn(attrs.updatedProperties(), attrs::removeProperty, state);
 
-        // Guardrail to limit number of mvs per table
-        Iterable<ViewMetadata> tableViews = keyspace.views.forTable(table.id);
-        Guardrails.materializedViewsPerTable.guard(Iterables.size(tableViews) + 1,
+        // guardrails to limit number of mvs per table.
+        Set<ViewMetadata> baseTableViews = StreamSupport.stream(keyspace.views.forTable(table.id).spliterator(), false)
+                                                        .collect(Collectors.toCollection(HashSet::new));
+        Guardrails.materializedViewsPerTable.guard(baseTableViews.size() + 1,
                                                    String.format("%s on table %s", viewName, table.name),
                                                    false,
                                                    state);
@@ -192,8 +194,7 @@ public final class CreateViewStatement extends AlterSchemaStatement
                 throw ire("Can only select columns by name when defining a materialized view (got %s)", selector.selectable);
 
             // will throw IRE if the column doesn't exist in the base table
-            Selectable.RawIdentifier rawIdentifier = (Selectable.RawIdentifier) selector.selectable;
-            ColumnMetadata column = rawIdentifier.columnMetadata(table);
+            ColumnMetadata column = (ColumnMetadata) selector.selectable.prepare(table);
 
             selectedColumns.add(column.name);
         });
@@ -276,17 +277,15 @@ public final class CreateViewStatement extends AlterSchemaStatement
         if (whereClause.containsCustomExpressions())
             throw ire("WHERE clause for materialized view '%s' cannot contain custom index expressions", viewName);
 
-        StatementRestrictions restrictions =
-            new StatementRestrictions(state,
-                                      StatementType.SELECT,
-                                      table,
-                                      whereClause,
-                                      VariableSpecifications.empty(),
-                                      Collections.emptyList(),
-                                      false,
-                                      false,
-                                      true,
-                                      true);
+        StatementRestrictions restrictions = StatementRestrictions.create(StatementType.SELECT,
+                                                                          table,
+                                                                          whereClause,
+                                                                          VariableSpecifications.empty(),
+                                                                          Collections.emptyList(),
+                                                                          false,
+                                                                          false,
+                                                                          true,
+                                                                          true);
 
         List<ColumnIdentifier> nonRestrictedPrimaryKeyColumns =
             Lists.newArrayList(filter(primaryKeyColumns, name -> !restrictions.isRestricted(table.getColumn(name))));
@@ -299,7 +298,7 @@ public final class CreateViewStatement extends AlterSchemaStatement
 
         // See CASSANDRA-13798
         Set<ColumnMetadata> restrictedNonPrimaryKeyColumns = restrictions.nonPKRestrictedColumns(false);
-        if (!restrictedNonPrimaryKeyColumns.isEmpty() && !MV_ALLOW_FILTERING_NONKEY_COLUMNS_UNSAFE.getBoolean())
+        if (!restrictedNonPrimaryKeyColumns.isEmpty() && !Boolean.getBoolean("cassandra.mv.allow_filtering_nonkey_columns_unsafe"))
         {
             throw ire("Non-primary key columns can only be restricted with 'IS NOT NULL' (got: %s restricted illegally)",
                       join(",", transform(restrictedNonPrimaryKeyColumns, ColumnMetadata::toString)));
@@ -327,24 +326,16 @@ public final class CreateViewStatement extends AlterSchemaStatement
 
         if (attrs.hasProperty(TableAttributes.ID))
             builder.id(attrs.getId());
-        else if (!builder.hasId())
-            builder.id(TableId.get(metadata));
 
         builder.params(attrs.asNewTableParams())
                .kind(TableMetadata.Kind.VIEW);
 
-        partitionKeyColumns.stream()
-                           .map(table::getColumn)
-                           .forEach(column -> builder.addPartitionKeyColumn(column.name, getType(column), column.getMask()));
-
-        clusteringColumns.stream()
-                         .map(table::getColumn)
-                         .forEach(column -> builder.addClusteringColumn(column.name, getType(column), column.getMask()));
+        partitionKeyColumns.forEach(name -> builder.addPartitionKeyColumn(name, getType(table, name)));
+        clusteringColumns.forEach(name -> builder.addClusteringColumn(name, getType(table, name)));
 
         selectedColumns.stream()
                        .filter(name -> !primaryKeyColumns.contains(name))
-                       .map(table::getColumn)
-                       .forEach(column -> builder.addRegularColumn(column.name, getType(column), column.getMask()));
+                       .forEach(name -> builder.addRegularColumn(name, getType(table, name)));
 
         ViewMetadata view = new ViewMetadata(table.id, table.name, rawColumns.isEmpty(), whereClause, builder.build());
         view.metadata.validate();
@@ -362,15 +353,15 @@ public final class CreateViewStatement extends AlterSchemaStatement
         client.ensureTablePermission(keyspaceName, tableName, Permission.ALTER);
     }
 
-    private AbstractType<?> getType(ColumnMetadata column)
+    private AbstractType<?> getType(TableMetadata table, ColumnIdentifier name)
     {
-        AbstractType<?> type = column.type;
-        if (clusteringOrder.containsKey(column.name))
+        AbstractType<?> type = table.getColumn(name).type;
+        if (clusteringOrder.containsKey(name))
         {
-            boolean reverse = !clusteringOrder.get(column.name);
+            boolean reverse = !clusteringOrder.get(name);
 
             if (type.isReversed() && !reverse)
-                return ((ReversedType<?>) type).baseType;
+                return ((ReversedType) type).baseType;
 
             if (!type.isReversed() && reverse)
                 return ReversedType.getInstance(type);
@@ -395,7 +386,7 @@ public final class CreateViewStatement extends AlterSchemaStatement
         return String.format("%s (%s, %s)", getClass().getSimpleName(), keyspaceName, viewName);
     }
 
-    public final static class Raw extends CQLStatement.Raw
+    public static final class Raw extends RawKeyspaceAwareStatement<CreateViewStatement>
     {
         private final QualifiedName tableName;
         private final QualifiedName viewName;
@@ -419,7 +410,8 @@ public final class CreateViewStatement extends AlterSchemaStatement
             this.ifNotExists = ifNotExists;
         }
 
-        public CreateViewStatement prepare(ClientState state)
+        @Override
+        public CreateViewStatement prepare(ClientState state, UnaryOperator<String> keyspaceMapper)
         {
             String keyspaceName = viewName.hasKeyspace() ? viewName.getKeyspace() : state.getKeyspace();
 
@@ -432,7 +424,8 @@ public final class CreateViewStatement extends AlterSchemaStatement
             if (null == partitionKeyColumns)
                 throw ire("No PRIMARY KEY specifed for view '%s' (exactly one required)", viewName);
 
-            return new CreateViewStatement(keyspaceName,
+            return new CreateViewStatement(rawCQLStatement,
+                                           keyspaceMapper.apply(keyspaceName),
                                            tableName.getName(),
                                            viewName.getName(),
 

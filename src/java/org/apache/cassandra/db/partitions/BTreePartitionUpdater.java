@@ -20,8 +20,6 @@ package org.apache.cassandra.db.partitions;
 
 import org.apache.cassandra.db.DeletionInfo;
 import org.apache.cassandra.db.RegularAndStaticColumns;
-import org.apache.cassandra.db.rows.Cell;
-import org.apache.cassandra.db.rows.ColumnData;
 import org.apache.cassandra.db.rows.EncodingStats;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Rows;
@@ -36,74 +34,42 @@ import org.apache.cassandra.utils.memory.MemtableAllocator;
 /**
  *  the function we provide to the trie and btree utilities to perform any row and column replacements
  */
-public class BTreePartitionUpdater implements UpdateFunction<Row, Row>, ColumnData.PostReconciliationFunction
+public class BTreePartitionUpdater extends BasePartitionUpdater implements UpdateFunction<Row, Row>
 {
     final MemtableAllocator allocator;
     final OpOrder.Group writeOp;
-    final Cloner cloner;
     final UpdateTransaction indexer;
-    public long dataSize;
-    long heapSize;
-    public long colUpdateTimeDelta = Long.MAX_VALUE;
+    public int partitionsAdded = 0;
 
     public BTreePartitionUpdater(MemtableAllocator allocator, Cloner cloner, OpOrder.Group writeOp, UpdateTransaction indexer)
     {
+        super(cloner);
         this.allocator = allocator;
-        this.cloner = cloner;
         this.writeOp = writeOp;
         this.indexer = indexer;
-        this.heapSize = 0;
-        this.dataSize = 0;
     }
 
-    public BTreePartitionData mergePartitions(BTreePartitionData current, final PartitionUpdate update)
+    @Override
+    public Row insert(Row insert)
     {
-        if (current == null)
-        {
-            current = BTreePartitionData.EMPTY;
-            onAllocatedOnHeap(BTreePartitionData.UNSHARED_HEAP_SIZE);
-        }
+        Row data = insert.clone(cloner);
+        indexer.onInserted(insert);
 
-        try
-        {
-            indexer.start();
-
-            return makeMergedPartition(current, update);
-        }
-        finally
-        {
-            indexer.commit();
-            reportAllocatedMemory();
-        }
+        this.dataSize += data.dataSize();
+        this.heapSize += data.unsharedHeapSizeExcludingData();
+        return data;
     }
 
-    protected BTreePartitionData makeMergedPartition(BTreePartitionData current, PartitionUpdate update)
+    @Override
+    public Row merge(Row existing, Row update)
     {
-        DeletionInfo newDeletionInfo = merge(current.deletionInfo, update.deletionInfo());
+        Row reconciled = Rows.merge(existing, update, this);
+        indexer.onUpdated(existing, reconciled);
 
-        RegularAndStaticColumns columns = current.columns;
-        RegularAndStaticColumns newColumns = update.columns().mergeTo(columns);
-        onAllocatedOnHeap(newColumns.unsharedHeapSize() - columns.unsharedHeapSize());
-        Row newStatic = mergeStatic(current.staticRow, update.staticRow());
-
-        Object[] tree = BTree.update(current.tree, update.holder().tree, update.metadata().comparator, this);
-        EncodingStats newStats = current.stats.mergeWith(update.stats());
-        onAllocatedOnHeap(newStats.unsharedHeapSize() - current.stats.unsharedHeapSize());
-
-        return new BTreePartitionData(newColumns, tree, newDeletionInfo, newStatic, newStats);
+        return reconciled;
     }
 
-    private Row mergeStatic(Row current, Row update)
-    {
-        if (update.isEmpty())
-            return current;
-        if (current.isEmpty())
-            return insert(update);
-
-        return merge(current, update);
-    }
-
-    private DeletionInfo merge(DeletionInfo existing, DeletionInfo update)
+    private DeletionInfo apply(DeletionInfo existing, DeletionInfo update)
     {
         if (update.isLive() || !update.mayModify(existing))
             return existing;
@@ -122,59 +88,47 @@ public class BTreePartitionUpdater implements UpdateFunction<Row, Row>, ColumnDa
         return newInfo;
     }
 
-    @Override
-    public Row insert(Row insert)
+    public BTreePartitionData mergePartitions(BTreePartitionData current, final BTreePartitionUpdate update)
     {
-        Row data = insert.clone(cloner);
-        indexer.onInserted(insert);
+        if (current == null)
+        {
+            current = BTreePartitionData.EMPTY;
+            this.onAllocatedOnHeap(BTreePartitionData.UNSHARED_HEAP_SIZE);
+            ++partitionsAdded;
+        }
 
-        dataSize += data.dataSize();
-        heapSize += data.unsharedHeapSizeExcludingData();
-        return data;
+        try
+        {
+            indexer.start();
+
+            return makeMergedPartition(current, update);
+        }
+        finally
+        {
+            indexer.commit();
+            reportAllocatedMemory();
+        }
     }
 
-    public Row merge(Row existing, Row update)
+    protected BTreePartitionData makeMergedPartition(BTreePartitionData current, BTreePartitionUpdate update)
     {
-        Row reconciled = Rows.merge(existing, update, this);
-        indexer.onUpdated(existing, reconciled);
+        DeletionInfo newDeletionInfo = apply(current.deletionInfo, update.deletionInfo());
 
-        return reconciled;
-    }
+        RegularAndStaticColumns columns = current.columns;
+        RegularAndStaticColumns newColumns = update.columns().mergeTo(columns);
+        onAllocatedOnHeap(newColumns.unsharedHeapSize() - columns.unsharedHeapSize());
+        Row newStatic = update.staticRow();
+        newStatic = newStatic.isEmpty()
+                    ? current.staticRow
+                    : (current.staticRow.isEmpty()
+                       ? this.insert(newStatic)
+                       : this.merge(current.staticRow, newStatic));
 
-    public Cell<?> merge(Cell<?> previous, Cell<?> insert)
-    {
-        if (insert == previous)
-            return insert;
+        Object[] tree = BTree.update(current.tree, update.holder().tree, update.metadata().comparator, this);
+        EncodingStats newStats = current.stats.mergeWith(update.stats());
+        onAllocatedOnHeap(newStats.unsharedHeapSize() - current.stats.unsharedHeapSize());
 
-        long timeDelta = Math.abs(insert.timestamp() - previous.timestamp());
-        if (timeDelta < colUpdateTimeDelta)
-            colUpdateTimeDelta = timeDelta;
-        if (cloner != null)
-            insert = cloner.clone(insert);
-        dataSize += insert.dataSize() - previous.dataSize();
-        heapSize += insert.unsharedHeapSizeExcludingData() - previous.unsharedHeapSizeExcludingData();
-        return insert;
-    }
-
-    public ColumnData insert(ColumnData insert)
-    {
-        if (cloner != null)
-            insert = insert.clone(cloner);
-        dataSize += insert.dataSize();
-        heapSize += insert.unsharedHeapSizeExcludingData();
-        return insert;
-    }
-
-    @Override
-    public void delete(ColumnData existing)
-    {
-        dataSize -= existing.dataSize();
-        heapSize -= existing.unsharedHeapSizeExcludingData();
-    }
-
-    public void onAllocatedOnHeap(long heapSize)
-    {
-        this.heapSize += heapSize;
+        return new BTreePartitionData(newColumns, tree, newDeletionInfo, newStatic, newStats);
     }
 
     public void reportAllocatedMemory()

@@ -24,13 +24,13 @@ import java.util.concurrent.TimeUnit;
 import org.junit.Assert;
 import org.junit.Test;
 
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
-import org.apache.cassandra.Util;
+import com.khulnasoft.driver.core.ResultSet;
+import com.khulnasoft.driver.core.Row;
+import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.assertj.core.api.Assertions;
+import org.apache.cassandra.utils.FBUtilities;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
@@ -53,14 +53,15 @@ public class ViewTimesTest extends ViewAbstractTest
                     "c int, " +
                     "val int)");
 
-        createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s " +
-                   "WHERE k IS NOT NULL AND c IS NOT NULL " +
-                   "PRIMARY KEY (k,c)");
+        execute("USE " + keyspace());
+        executeNet("USE " + keyspace());
+
+        createView("mv_rctstest", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (k,c)");
 
         updateView("UPDATE %s SET c = ?, val = ? WHERE k = ?", 0, 0, 0);
         updateView("UPDATE %s SET val = ? WHERE k = ?", 1, 0);
         updateView("UPDATE %s SET c = ? WHERE k = ?", 1, 0);
-        assertRows(executeView("SELECT c, k, val FROM %s"), row(1, 0, 1));
+        assertRows(execute("SELECT c, k, val FROM mv_rctstest"), row(1, 0, 1));
 
         updateView("TRUNCATE %s");
 
@@ -70,8 +71,8 @@ public class ViewTimesTest extends ViewAbstractTest
         updateView("UPDATE %s USING TIMESTAMP 4 SET c = ? WHERE k = ?", 2, 0);
         updateView("UPDATE %s USING TIMESTAMP 3 SET val = ? WHERE k = ?", 2, 0);
 
-        assertRows(executeView("SELECT c, k, val FROM %s"), row(2, 0, 2));
-        assertRows(executeView("SELECT c, k, val FROM %s limit 1"), row(2, 0, 2));
+        assertRows(execute("SELECT c, k, val FROM mv_rctstest"), row(2, 0, 2));
+        assertRows(execute("SELECT c, k, val FROM mv_rctstest limit 1"), row(2, 0, 2));
     }
 
     @Test
@@ -90,34 +91,34 @@ public class ViewTimesTest extends ViewAbstractTest
     {
         createTable("CREATE TABLE %s (a int, b int, c int, d int, e int, PRIMARY KEY (a, b))");
 
+        execute("USE " + keyspace());
+        executeNet("USE " + keyspace());
         Keyspace ks = Keyspace.open(keyspace());
 
-        createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s " +
-                   "WHERE a IS NOT NULL AND b IS NOT NULL AND c IS NOT NULL " +
-                   "PRIMARY KEY (c, a, b)");
-        ks.getColumnFamilyStore(currentView()).disableAutoCompaction();
+        createView("mv", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE a IS NOT NULL AND b IS NOT NULL AND c IS NOT NULL PRIMARY KEY (c, a, b)");
+        ks.getColumnFamilyStore("mv").disableAutoCompaction();
 
         //Set initial values TS=0, leaving e null and verify view
         executeNet("INSERT INTO %s (a, b, c, d) VALUES (0, 0, 1, 0) USING TIMESTAMP 0");
-        assertRows(executeView("SELECT d from %s WHERE c = ? and a = ? and b = ?", 1, 0, 0), row(0));
+        assertRows(execute("SELECT d from mv WHERE c = ? and a = ? and b = ?", 1, 0, 0), row(0));
 
         //update c's timestamp TS=2
         executeNet("UPDATE %s USING TIMESTAMP 2 SET c = ? WHERE a = ? and b = ? ", 1, 0, 0);
-        assertRows(executeView("SELECT d from %s WHERE c = ? and a = ? and b = ?", 1, 0, 0), row(0));
+        assertRows(execute("SELECT d from mv WHERE c = ? and a = ? and b = ?", 1, 0, 0), row(0));
 
         if (flush)
-            Util.flush(ks);
+            FBUtilities.waitOnFutures(ks.flush(UNIT_TESTS));
 
         // change c's value and TS=3, tombstones c=1 and adds c=0 record
         executeNet("UPDATE %s USING TIMESTAMP 3 SET c = ? WHERE a = ? and b = ? ", 0, 0, 0);
         if (flush)
-            Util.flush(ks);
-        assertRows(executeView("SELECT d from %s WHERE c = ? and a = ? and b = ?", 1, 0, 0));
+            FBUtilities.waitOnFutures(ks.flush(UNIT_TESTS));
+        assertRows(execute("SELECT d from mv WHERE c = ? and a = ? and b = ?", 1, 0, 0));
 
         if(flush)
         {
-            ks.getColumnFamilyStore(currentView()).forceMajorCompaction();
-            Util.flush(ks);
+            ks.getColumnFamilyStore("mv").forceMajorCompaction();
+            FBUtilities.waitOnFutures(ks.flush(UNIT_TESTS));
         }
 
 
@@ -125,41 +126,43 @@ public class ViewTimesTest extends ViewAbstractTest
         executeNet("UPDATE %s USING TIMESTAMP 4 SET c = ? WHERE a = ? and b = ? ", 1, 0, 0);
         if (flush)
         {
-            ks.getColumnFamilyStore(currentView()).forceMajorCompaction();
-            Util.flush(ks);
+            ks.getColumnFamilyStore("mv").forceMajorCompaction();
+            FBUtilities.waitOnFutures(ks.flush(UNIT_TESTS));
         }
 
-        assertRows(executeView("SELECT d,e from %s WHERE c = ? and a = ? and b = ?", 1, 0, 0), row(0, null));
+        assertRows(execute("SELECT d,e from mv WHERE c = ? and a = ? and b = ?", 1, 0, 0), row(0, null));
+
 
         //Add e value @ TS=1
         executeNet("UPDATE %s USING TIMESTAMP 1 SET e = ? WHERE a = ? and b = ? ", 1, 0, 0);
-        assertRows(executeView("SELECT d,e from %s WHERE c = ? and a = ? and b = ?", 1, 0, 0), row(0, 1));
+        assertRows(execute("SELECT d,e from mv WHERE c = ? and a = ? and b = ?", 1, 0, 0), row(0, 1));
 
         if (flush)
-            Util.flush(ks);
+            FBUtilities.waitOnFutures(ks.flush(UNIT_TESTS));
 
 
         //Change d value @ TS=2
         executeNet("UPDATE %s USING TIMESTAMP 2 SET d = ? WHERE a = ? and b = ? ", 2, 0, 0);
-        assertRows(executeView("SELECT d from %s WHERE c = ? and a = ? and b = ?", 1, 0, 0), row(2));
+        assertRows(execute("SELECT d from mv WHERE c = ? and a = ? and b = ?", 1, 0, 0), row(2));
 
         if (flush)
-            Util.flush(ks);
+            FBUtilities.waitOnFutures(ks.flush(UNIT_TESTS));
+
 
         //Change d value @ TS=3
         executeNet("UPDATE %s USING TIMESTAMP 3 SET d = ? WHERE a = ? and b = ? ", 1, 0, 0);
-        assertRows(executeView("SELECT d from %s WHERE c = ? and a = ? and b = ?", 1, 0, 0), row(1));
+        assertRows(execute("SELECT d from mv WHERE c = ? and a = ? and b = ?", 1, 0, 0), row(1));
 
 
         //Tombstone c
         executeNet("DELETE FROM %s WHERE a = ? and b = ?", 0, 0);
-        assertRows(executeView("SELECT d from %s"));
+        assertRows(execute("SELECT d from mv"));
 
         //Add back without D
         executeNet("INSERT INTO %s (a, b, c) VALUES (0, 0, 1)");
 
         //Make sure D doesn't pop back in.
-        assertRows(executeView("SELECT d from %s WHERE c = ? and a = ? and b = ?", 1, 0, 0), row((Object) null));
+        assertRows(execute("SELECT d from mv WHERE c = ? and a = ? and b = ?", 1, 0, 0), row((Object) null));
 
 
         //New partition
@@ -171,17 +174,20 @@ public class ViewTimesTest extends ViewAbstractTest
 
         // delete with timestamp 0 (which should only delete d)
         executeNet("DELETE FROM %s USING TIMESTAMP 0 WHERE a = ? AND b = ?", 1, 0);
-        assertRows(executeView("SELECT a, b, c, d, e from %s WHERE c = ? and a = ? and b = ?", 0, 1, 0),
-                   row(1, 0, 0, null, 0));
+        assertRows(execute("SELECT a, b, c, d, e from mv WHERE c = ? and a = ? and b = ?", 0, 1, 0),
+                   row(1, 0, 0, null, 0)
+        );
 
         executeNet("UPDATE %s USING TIMESTAMP 2 SET c = ? WHERE a = ? AND b = ?", 1, 1, 0);
         executeNet("UPDATE %s USING TIMESTAMP 3 SET c = ? WHERE a = ? AND b = ?", 0, 1, 0);
-        assertRows(executeView("SELECT a, b, c, d, e from %s WHERE c = ? and a = ? and b = ?", 0, 1, 0),
-                   row(1, 0, 0, null, 0));
+        assertRows(execute("SELECT a, b, c, d, e from mv WHERE c = ? and a = ? and b = ?", 0, 1, 0),
+                   row(1, 0, 0, null, 0)
+        );
 
         executeNet("UPDATE %s USING TIMESTAMP 3 SET d = ? WHERE a = ? AND b = ?", 0, 1, 0);
-        assertRows(executeView("SELECT a, b, c, d, e from %s WHERE c = ? and a = ? and b = ?", 0, 1, 0),
-                   row(1, 0, 0, 0, 0));
+        assertRows(execute("SELECT a, b, c, d, e from mv WHERE c = ? and a = ? and b = ?", 0, 1, 0),
+                   row(1, 0, 0, 0, 0)
+        );
     }
 
     @Test
@@ -196,7 +202,7 @@ public class ViewTimesTest extends ViewAbstractTest
 
         executeNet("USE " + keyspace());
 
-        createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s WHERE c IS NOT NULL AND a IS NOT NULL AND b IS NOT NULL PRIMARY KEY (c, a, b)");
+        createView("mv", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE c IS NOT NULL AND a IS NOT NULL AND b IS NOT NULL PRIMARY KEY (c, a, b)");
 
         updateView("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?) USING TTL 3", 1, 1, 1, 1);
 
@@ -204,8 +210,8 @@ public class ViewTimesTest extends ViewAbstractTest
         updateView("INSERT INTO %s (a, b, c) VALUES (?, ?, ?)", 1, 1, 2);
 
         Thread.sleep(TimeUnit.SECONDS.toMillis(5));
-        List<Row> results = executeViewNet("SELECT d FROM %s WHERE c = 2 AND a = 1 AND b = 1").all();
-        Assert.assertEquals(1, results.size());
+        List<Row> results = executeNet("SELECT d FROM mv WHERE c = 2 AND a = 1 AND b = 1").all();
+        assertEquals(1, results.size());
         Assert.assertTrue("There should be a null result given back due to ttl expiry", results.get(0).isNull(0));
     }
 
@@ -221,12 +227,12 @@ public class ViewTimesTest extends ViewAbstractTest
 
         executeNet("USE " + keyspace());
 
-        createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s WHERE c IS NOT NULL AND a IS NOT NULL AND b IS NOT NULL PRIMARY KEY (c, a, b)");
+        createView("mv", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE c IS NOT NULL AND a IS NOT NULL AND b IS NOT NULL PRIMARY KEY (c, a, b)");
 
         updateView("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?) USING TTL 3", 1, 1, 1, 1);
 
         Thread.sleep(TimeUnit.SECONDS.toMillis(4));
-        Assert.assertEquals(0, executeViewNet("SELECT * FROM %s WHERE c = 1 AND a = 1 AND b = 1").all().size());
+        assertEquals(0, executeNet("SELECT * FROM mv WHERE c = 1 AND a = 1 AND b = 1").all().size());
     }
 
     @Test
@@ -240,14 +246,14 @@ public class ViewTimesTest extends ViewAbstractTest
 
         executeNet("USE " + keyspace());
 
-        createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s WHERE c IS NOT NULL AND a IS NOT NULL AND b IS NOT NULL PRIMARY KEY (c, a, b)");
+        createView("mv", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE c IS NOT NULL AND a IS NOT NULL AND b IS NOT NULL PRIMARY KEY (c, a, b)");
 
         for (int i = 0; i < 50; i++)
         {
             updateView("INSERT INTO %s (a, b, c) VALUES (?, ?, ?) USING TIMESTAMP 1", 1, 1, i);
         }
 
-        ResultSet mvRows = executeViewNet("SELECT c FROM %s");
+        ResultSet mvRows = executeNet("SELECT c FROM mv");
         List<Row> rows = executeNet("SELECT c FROM %s").all();
         assertEquals("There should be exactly one row in base", 1, rows.size());
         int expected = rows.get(0).getInt("c");
@@ -255,25 +261,27 @@ public class ViewTimesTest extends ViewAbstractTest
     }
 
     @Test
-    public void testCreateMvWithTTL()
+    public void testCreateMvWithTTL() throws Throwable
     {
         createTable("CREATE TABLE %s (" +
                     "k int PRIMARY KEY, " +
                     "c int, " +
                     "val int) WITH default_time_to_live = 60");
 
+        execute("USE " + keyspace());
+        executeNet("USE " + keyspace());
+
         // Must NOT include "default_time_to_live" for Materialized View creation
         try
         {
-            createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s " +
-                       "WHERE k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (k,c) WITH default_time_to_live = 30");
+            createView("mv_ttl1", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (k,c) WITH default_time_to_live = 30");
             fail("Should fail if TTL is provided for materialized view");
         }
-        catch (RuntimeException e)
+        catch (Exception e)
         {
-            Throwable cause = e.getCause();
-            Assertions.assertThat(cause).isInstanceOf(InvalidRequestException.class);
-            Assertions.assertThat(cause.getMessage()).contains("Cannot set default_time_to_live for a materialized view");
+            assertEquals("Cannot set default_time_to_live for a materialized view. Data in a materialized " +
+                         "view always expire at the same time than the corresponding data in the parent table.",
+                         e.getMessage());
         }
     }
 
@@ -285,25 +293,27 @@ public class ViewTimesTest extends ViewAbstractTest
                     "c int, " +
                     "val int) WITH default_time_to_live = 60");
 
-        createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s WHERE k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (k,c)");
+        createView("mv_ttl2", "CREATE MATERIALIZED VIEW " + keyspace() + ".%s AS SELECT * FROM %%s WHERE k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (k,c)");
 
         // Must NOT include "default_time_to_live" on alter Materialized View
         try
         {
-            executeNet("ALTER MATERIALIZED VIEW " + currentView() + " WITH default_time_to_live = 30");
+            executeNet("ALTER MATERIALIZED VIEW " + keyspace() + ".mv_ttl2 WITH default_time_to_live = 30");
             fail("Should fail if TTL is provided while altering materialized view");
         }
         catch (Exception e)
         {
             // Make sure the message is clear. See CASSANDRA-16960
-            assertEquals("Forbidden default_time_to_live detected for a materialized view. Data in a materialized view always expire at the same time than the corresponding "
-                         + "data in the parent table. default_time_to_live must be set to zero, see CASSANDRA-12868 for more information",
+            assertEquals("Forbidden default_time_to_live detected for a materialized view. " +
+                         "Data in a materialized view always expires at the same time as " +
+                         "the corresponding data in the parent table. default_time_to_live " +
+                         "must be set to zero, see CASSANDRA-12868 for more information",
                          e.getMessage());
         }
     }
 
     @Test
-    public void testMvWithZeroTTL()
+    public void testMvWithZeroTTL() throws Throwable
     {
         createTable("CREATE TABLE %s (" +
                     "k int PRIMARY KEY, " +
@@ -312,7 +322,7 @@ public class ViewTimesTest extends ViewAbstractTest
 
         try
         {
-            createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s WHERE k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (k,c) WITH default_time_to_live = 0");
+            createView("mv_ttl3", "CREATE MATERIALIZED VIEW " + keyspace() + ".%s AS SELECT * FROM %%s WHERE k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (k,c) WITH default_time_to_live = 0");
         }
         catch (Exception e)
         {
@@ -328,11 +338,11 @@ public class ViewTimesTest extends ViewAbstractTest
                     "c int, " +
                     "val int) WITH default_time_to_live = 60");
 
-        createView("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s WHERE k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (k,c)");
+        createView("mv_ttl4", "CREATE MATERIALIZED VIEW " + keyspace() + ".%s AS SELECT * FROM %%s WHERE k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (k,c)");
 
         try
         {
-            executeNet("ALTER MATERIALIZED VIEW " + currentView() + " WITH default_time_to_live = 0");
+            executeNet("ALTER MATERIALIZED VIEW " + keyspace() + ".mv_ttl4 WITH default_time_to_live = 0");
         }
         catch (Exception e)
         {

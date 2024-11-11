@@ -41,11 +41,7 @@ import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static junit.framework.Assert.*;
 
 import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
 import static org.apache.cassandra.utils.FBUtilities.updateChecksum;
@@ -67,6 +63,7 @@ public class HintsBufferTest
     }
 
     @Test
+    @SuppressWarnings("resource")
     public void testOverlyLargeAllocation()
     {
         // create a small, 128 bytes buffer
@@ -119,7 +116,7 @@ public class HintsBufferTest
         // create HINT_THREADS_COUNT, start them, and wait for them to finish
         List<Thread> threads = new ArrayList<>(HINT_THREADS_COUNT);
         for (int i = 0; i < HINT_THREADS_COUNT; i ++)
-            threads.add(NamedThreadFactory.createAnonymousThread(new Writer(buffer, load, hintSize, i, baseTimestamp)));
+            threads.add(NamedThreadFactory.createThread(new Writer(buffer, load, hintSize, i, baseTimestamp)));
         threads.forEach(java.lang.Thread::start);
         for (Thread thread : threads)
             thread.join();
@@ -182,7 +179,7 @@ public class HintsBufferTest
         int idx = (int) (hint.creationTime - baseTimestamp);
         assertEquals(hostId, load[idx]);
 
-        Row row = hint.mutation.getPartitionUpdates().iterator().next().iterator().next();
+        Row row = hint.mutation().getPartitionUpdates().iterator().next().rowIterator().next();
         assertEquals(1, Iterables.size(row.cells()));
 
         ValueAccessors.assertDataEquals(bytes(idx), row.clustering().get(0));

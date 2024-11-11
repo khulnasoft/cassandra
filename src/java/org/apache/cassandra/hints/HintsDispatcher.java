@@ -33,14 +33,10 @@ import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.metrics.HintsServiceMetrics;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.utils.concurrent.Condition;
+import org.apache.cassandra.utils.concurrent.SimpleCondition;
 
-
-import static org.apache.cassandra.hints.HintsDispatcher.Callback.Outcome.*;
-import static org.apache.cassandra.metrics.HintsServiceMetrics.updateDelayMetrics;
 import static org.apache.cassandra.net.Verb.HINT_REQ;
-import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
-import static org.apache.cassandra.utils.concurrent.Condition.newOneTimeCondition;
+import static org.apache.cassandra.utils.MonotonicClock.approxTime;
 
 /**
  * Dispatches a single hints file to a specified node in a batched manner.
@@ -73,10 +69,14 @@ final class HintsDispatcher implements AutoCloseable
         this.abortRequested = abortRequested;
     }
 
-    static HintsDispatcher create(File file, RateLimiter rateLimiter, InetAddressAndPort address, UUID hostId, BooleanSupplier abortRequested)
+    static HintsDispatcher create(File file,
+                                  RateLimiter rateLimiter,
+                                  InetAddressAndPort address,
+                                  UUID hostId,
+                                  int peerMessagingVersion,
+                                  BooleanSupplier abortRequested)
     {
-        int messagingVersion = MessagingService.instance().versions.get(address);
-        HintsDispatcher dispatcher = new HintsDispatcher(HintsReader.open(file, rateLimiter), hostId, address, messagingVersion, abortRequested);
+        HintsDispatcher dispatcher = new HintsDispatcher(HintsReader.open(file, rateLimiter), hostId, address, peerMessagingVersion, abortRequested);
         HintDiagnostics.dispatcherCreated(dispatcher);
         return dispatcher;
     }
@@ -209,12 +209,12 @@ final class HintsDispatcher implements AutoCloseable
         return callback;
     }
 
-    static final class Callback implements RequestCallback
+    private static final class Callback implements RequestCallback
     {
         enum Outcome { SUCCESS, TIMEOUT, FAILURE, INTERRUPTED }
 
         private final long start = approxTime.now();
-        private final Condition condition = newOneTimeCondition();
+        private final SimpleCondition condition = new SimpleCondition();
         private volatile Outcome outcome;
         private final long hintCreationNanoTime;
 
@@ -233,10 +233,10 @@ final class HintsDispatcher implements AutoCloseable
             catch (InterruptedException e)
             {
                 logger.warn("Hint dispatch was interrupted", e);
-                return INTERRUPTED;
+                return Outcome.INTERRUPTED;
             }
 
-            return timedOut ? TIMEOUT : outcome;
+            return timedOut ? Outcome.TIMEOUT : outcome;
         }
 
         @Override
@@ -248,15 +248,15 @@ final class HintsDispatcher implements AutoCloseable
         @Override
         public void onFailure(InetAddressAndPort from, RequestFailureReason failureReason)
         {
-            outcome = FAILURE;
+            outcome = Outcome.FAILURE;
             condition.signalAll();
         }
 
         @Override
         public void onResponse(Message msg)
         {
-            updateDelayMetrics(msg.from(), approxTime.now() - this.hintCreationNanoTime);
-            outcome = SUCCESS;
+            HintsServiceMetrics.updateDelayMetrics(msg.from(), approxTime.now() - this.hintCreationNanoTime);
+            outcome = Outcome.SUCCESS;
             condition.signalAll();
         }
     }

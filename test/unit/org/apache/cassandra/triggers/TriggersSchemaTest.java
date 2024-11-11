@@ -32,16 +32,15 @@ import org.apache.cassandra.schema.Tables;
 import org.apache.cassandra.schema.TriggerMetadata;
 import org.apache.cassandra.schema.Triggers;
 
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class TriggersSchemaTest
 {
-    String ksName = "ks" + nanoTime();
-    String cfName = "cf" + nanoTime();
-    String triggerName = "trigger_" + nanoTime();
+    String ksName = "ks" + System.nanoTime();
+    String cfName = "cf" + System.nanoTime();
+    String triggerName = "trigger_" + System.nanoTime();
     String triggerClass = "org.apache.cassandra.triggers.NoSuchTrigger.class";
 
     @BeforeClass

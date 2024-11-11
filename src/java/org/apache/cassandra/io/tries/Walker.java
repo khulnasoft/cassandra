@@ -17,36 +17,30 @@
  */
 package org.apache.cassandra.io.tries;
 
-import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.ByteBuffer;
-import java.util.Arrays;
-import javax.annotation.concurrent.NotThreadSafe;
 
-import org.apache.cassandra.io.sstable.format.Version;
-import org.apache.cassandra.io.util.PageAware;
 import org.apache.cassandra.io.util.Rebufferer;
 import org.apache.cassandra.io.util.Rebufferer.BufferHolder;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.PageAware;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 import org.apache.cassandra.utils.bytecomparable.ByteSource;
 import org.apache.lucene.util.ArrayUtil;
 
 /**
- * Thread-unsafe trie walking helper. This is analogous to {@link org.apache.cassandra.io.util.RandomAccessReader} for
- * tries -- takes an on-disk trie accessible via a supplied Rebufferer and lets user seek to nodes and work with them.
+ * Thread-unsafe trie walking helper. This is analogous to RandomAccessReader for tries -- takes an on-disk trie
+ * accessible via a supplied Rebufferer and lets user seek to nodes and work with them.
  * <p>
  * Assumes data was written using page-aware builder and thus no node crosses a page and thus a buffer boundary.
- * <p>
- * See {@code org/apache/cassandra/io/sstable/format/bti/BtiFormat.md} for a description of the mechanisms of writing
- * and reading an on-disk trie.
  */
-@NotThreadSafe
-public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
+// TODO STAR-247: unit test are insufficient - they did not catch a problem fixed in STAR-247
+public class Walker<VALUE extends Walker<VALUE>> implements AutoCloseable
 {
     /** Value used to indicate a branch (e.g. lesser/greaterBranch) does not exist. */
-    public static int NONE = TrieNode.NONE;
+    public static int NONE = -1;
 
-    private final Rebufferer source;
+    protected final Rebufferer source;
     protected final long root;
 
     // State relating to current node.
@@ -60,16 +54,17 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
     protected long greaterBranch;
     protected long lesserBranch;
 
-    // Version of the byte comparable conversion to use
-    public static final ByteComparable.Version BYTE_COMPARABLE_VERSION = ByteComparable.Version.OSS50;
+    // Version of the byte comparable conversion to use -- trie-based indices use the 6.0 conversion
+    public final ByteComparable.Version byteComparableVersion;
 
     /**
      * Creates a walker. Rebufferer must be aligned and with a buffer size that is at least 4k.
      */
-    public Walker(Rebufferer source, long root)
+    public Walker(Rebufferer source, long root, ByteComparable.Version version)
     {
         this.source = source;
         this.root = root;
+        this.byteComparableVersion = version;
         try
         {
             bh = source.rebuffer(root);
@@ -182,16 +177,13 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
             if (payloadBits > 0)
                 return;
 
-            long firstChild = transition(0);
-            if (firstChild == NONE)
-                return;
-            go(firstChild);
+            go(transition(0));
         }
     }
 
     public interface Extractor<RESULT, VALUE>
     {
-        RESULT extract(VALUE walker, int payloadPosition, int payloadFlags) throws IOException;
+        RESULT extract(VALUE walker, int payloadPosition, int payloadFlags);
     }
 
     /**
@@ -201,7 +193,7 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
      */
     public int follow(ByteComparable key)
     {
-        ByteSource stream = key.asComparableBytes(BYTE_COMPARABLE_VERSION);
+        ByteSource stream = key.asComparableBytes(byteComparableVersion);
         go(root);
         while (true)
         {
@@ -226,7 +218,7 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
     {
         greaterBranch = NONE;
 
-        ByteSource stream = key.asComparableBytes(BYTE_COMPARABLE_VERSION);
+        ByteSource stream = key.asComparableBytes(byteComparableVersion);
         go(root);
         while (true)
         {
@@ -252,7 +244,7 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
     {
         lesserBranch = NONE;
 
-        ByteSource stream = key.asComparableBytes(BYTE_COMPARABLE_VERSION);
+        ByteSource stream = key.asComparableBytes(byteComparableVersion);
         go(root);
         while (true)
         {
@@ -275,14 +267,13 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
      * is in the trie when looking for 'abc' or 'ac', but accepted when looking for 'aa').
      * In order to not have to go back to data that may have exited cache, payloads are extracted when the node is
      * visited (instead of saving the node's position), which requires an extractor to be passed as parameter.
-     * @throws IOException 
      */
     @SuppressWarnings("unchecked")
-    public <RESULT> RESULT prefix(ByteComparable key, Extractor<RESULT, CONCRETE> extractor) throws IOException
+    public <RESULT> RESULT prefix(ByteComparable key, Extractor<RESULT, VALUE> extractor)
     {
         RESULT payload = null;
 
-        ByteSource stream = key.asComparableBytes(BYTE_COMPARABLE_VERSION);
+        ByteSource stream = key.asComparableBytes(byteComparableVersion);
         go(root);
         while (true)
         {
@@ -295,7 +286,7 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
             {
                 int payloadBits = payloadFlags();
                 if (payloadBits > 0)
-                    payload = extractor.extract((CONCRETE) this, payloadPosition(), payloadBits);
+                    payload = extractor.extract((VALUE) this, payloadPosition(), payloadBits);
                 if (childIndex < 0)
                     return payload;
             }
@@ -312,16 +303,15 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
      * does not take that into account. E.g. if trie contains "abba", "as" and "ask", looking for "asking" will find
      * "ask" as the match, but max(lesserBranch) will point to "abba" instead of the correct "as". This problem can
      * only occur if there is a valid prefix match.
-     * @throws IOException 
      */
     @SuppressWarnings("unchecked")
-    public <RESULT> RESULT prefixAndNeighbours(ByteComparable key, Extractor<RESULT, CONCRETE> extractor) throws IOException
+    public <RESULT> RESULT prefixAndNeighbours(ByteComparable key, Extractor<RESULT, VALUE> extractor)
     {
         RESULT payload = null;
         greaterBranch = NONE;
         lesserBranch = NONE;
 
-        ByteSource stream = key.asComparableBytes(BYTE_COMPARABLE_VERSION);
+        ByteSource stream = key.asComparableBytes(byteComparableVersion);
         go(root);
         while (true)
         {
@@ -334,7 +324,7 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
             {
                 int payloadBits = payloadFlags();
                 if (payloadBits > 0)
-                    payload = extractor.extract((CONCRETE) this, payloadPosition(), payloadBits);
+                    payload = extractor.extract((VALUE) this, payloadPosition(), payloadBits);
             }
             else
             {
@@ -346,38 +336,6 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
                 return payload;
 
             go(transition(searchIndex));
-        }
-    }
-
-    public ByteComparable getMaxTerm()
-    {
-        TransitionBytesCollector collector = new TransitionBytesCollector();
-        go(root);
-        while (true)
-        {
-            int lastIdx = transitionRange() - 1;
-            long lastChild = transition(lastIdx);
-            if (lastIdx < 0)
-            {
-                return collector.toByteComparable();
-            }
-            collector.add(transitionByte(lastIdx));
-            go(lastChild);
-        }
-    }
-
-    public ByteComparable getMinTerm()
-    {
-        TransitionBytesCollector collector = new TransitionBytesCollector();
-        go(root);
-        while (true)
-        {
-            if (hasPayload())
-            {
-                return collector.toByteComparable();
-            }
-            collector.add(transitionByte(0));
-            go(transition(0));
         }
     }
 
@@ -399,20 +357,20 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
 
     public interface PayloadToString
     {
-        String payloadAsString(ByteBuffer buf, int payloadPos, int payloadFlags, Version version) throws IOException;
+        String payloadAsString(ByteBuffer buf, int payloadPos, int payloadFlags);
     }
 
-    public void dumpTrie(PrintStream out, PayloadToString payloadReader, Version version) throws IOException
+    public void dumpTrie(PrintStream out, PayloadToString payloadReader)
     {
         out.print("ROOT");
-        dumpTrie(out, payloadReader, root, "", version);
+        dumpTrie(out, payloadReader, root, "");
     }
 
-    private void dumpTrie(PrintStream out, PayloadToString payloadReader, long node, String indent, Version version) throws IOException
+    private void dumpTrie(PrintStream out, PayloadToString payloadReader, long node, String indent)
     {
         go(node);
         int bits = payloadFlags();
-        out.format(" %s@%x %s%n", nodeType.toString(), node, bits == 0 ? "" : payloadReader.payloadAsString(buf, payloadPosition(), bits, version));
+        out.format(" %s@%x %s%n", nodeType.toString(), node, bits == 0 ? "" : payloadReader.payloadAsString(buf, payloadPosition(), bits));
         int range = transitionRange();
         for (int i = 0; i < range; ++i)
         {
@@ -420,7 +378,7 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
             if (child == NONE)
                 continue;
             out.format("%s%02x %s>", indent, transitionByte(i), PageAware.pageStart(position) == PageAware.pageStart(child) ? "--" : "==");
-            dumpTrie(out, payloadReader, child, indent + "  ", version);
+            dumpTrie(out, payloadReader, child, indent + "  ");
             go(node);
         }
     }
@@ -434,8 +392,14 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
 
     public static class TransitionBytesCollector
     {
+        private final ByteComparable.Version byteComparableVersion;
         protected byte[] bytes = new byte[32];
         protected int pos = 0;
+
+        public TransitionBytesCollector(ByteComparable.Version byteComparableVersion)
+        {
+            this.byteComparableVersion = byteComparableVersion;
+        }
 
         public void add(int b)
         {
@@ -454,17 +418,17 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
 
         public ByteComparable toByteComparable()
         {
-            if (pos <= 0)
+            if (pos < 0)
                 return null;
             byte[] value = new byte[pos];
             System.arraycopy(bytes, 0, value, 0, pos);
-            return v -> ByteSource.fixedLength(value, 0, value.length);
+            return ByteComparable.preencoded(byteComparableVersion, value, 0, value.length);
         }
 
         @Override
         public String toString()
         {
-            return String.format("[Bytes %s, pos %d]", Arrays.toString(bytes), pos);
+            return ByteBufferUtil.bytesToHex(ByteBuffer.wrap(bytes, 0, pos));
         }
     }
 }

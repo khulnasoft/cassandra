@@ -22,19 +22,21 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.UnaryOperator;
 
 import org.apache.cassandra.audit.AuditLogContext;
 import org.apache.cassandra.audit.AuditLogEntryType;
 import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.cql3.*;
-import org.apache.cassandra.db.guardrails.Guardrails;
+import org.apache.cassandra.cql3.statements.RawKeyspaceAwareStatement;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.UserType;
+import org.apache.cassandra.guardrails.Guardrails;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.Event.SchemaChange;
 import org.apache.cassandra.transport.Event.SchemaChange.Change;
 import org.apache.cassandra.transport.Event.SchemaChange.Target;
@@ -51,18 +53,16 @@ import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
 public abstract class AlterTypeStatement extends AlterSchemaStatement
 {
     protected final String typeName;
-    protected final boolean ifExists;
 
-    public AlterTypeStatement(String keyspaceName, String typeName, boolean ifExists)
+    public AlterTypeStatement(String queryString, String keyspaceName, String typeName)
     {
-        super(keyspaceName);
-        this.ifExists = ifExists;
+        super(queryString, keyspaceName);
         this.typeName = typeName;
     }
 
     public void authorize(ClientState client)
     {
-        client.ensureAllTablesPermission(keyspaceName, Permission.ALTER);
+        client.ensureKeyspacePermission(keyspaceName, Permission.ALTER);
     }
 
     SchemaChange schemaChangeEvent(Keyspaces.KeyspacesDiff diff)
@@ -70,10 +70,8 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
         return new SchemaChange(Change.UPDATED, Target.TYPE, keyspaceName, typeName);
     }
 
-    @Override
-    public Keyspaces apply(ClusterMetadata metadata)
+    public Keyspaces apply(Keyspaces schema)
     {
-        Keyspaces schema = metadata.schema.getKeyspaces();
         KeyspaceMetadata keyspace = schema.getNullable(keyspaceName);
 
         UserType type = null == keyspace
@@ -81,13 +79,15 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
                       : keyspace.types.getNullable(bytes(typeName));
 
         if (null == type)
-        {
-            if (!ifExists)
-                throw ire("Type %s.%s doesn't exist", keyspaceName, typeName);
-            return schema;
-        }
+            throw ire("Type %s.%s doesn't exist", keyspaceName, typeName);
 
-        return schema.withAddedOrUpdated(keyspace.withUpdatedUserType(apply(keyspace, type)));
+        UserType updated = apply(keyspace, type);
+        CreateTypeStatement.validate(updated);
+
+        KeyspaceMetadata newKeyspace = keyspace.withUpdatedUserType(updated);
+        newKeyspace.validate();
+
+        return schema.withAddedOrUpdated(newKeyspace);
     }
 
     abstract UserType apply(KeyspaceMetadata keyspace, UserType type);
@@ -107,20 +107,18 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
     {
         private final FieldIdentifier fieldName;
         private final CQL3Type.Raw type;
-        private final boolean ifFieldNotExists;
+        private QueryState state;
 
-        private ClientState state;
-
-        private AddField(String keyspaceName, String typeName, FieldIdentifier fieldName, CQL3Type.Raw type, boolean ifExists, boolean ifFieldNotExists)
+        private AddField(String queryString, String keyspaceName, String typeName,
+                         FieldIdentifier fieldName, CQL3Type.Raw type)
         {
-            super(keyspaceName, typeName, ifExists);
+            super(queryString, keyspaceName, typeName);
             this.fieldName = fieldName;
-            this.ifFieldNotExists = ifFieldNotExists;
             this.type = type;
         }
 
         @Override
-        public void validate(ClientState state)
+        public void validate(QueryState state)
         {
             super.validate(state);
 
@@ -130,18 +128,8 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
 
         UserType apply(KeyspaceMetadata keyspace, UserType userType)
         {
-            if (type.isCounter())
-                throw ire("A user type cannot contain counters");
-
-            if (type.isUDT() && !type.isFrozen())
-                throw ire("A user type cannot contain non-frozen UDTs");
-
             if (userType.fieldPosition(fieldName) >= 0)
-            {
-                if (!ifFieldNotExists)
-                    throw ire("Cannot add field %s to type %s: a field with name %s already exists", fieldName, userType.getCqlTypeName(), fieldName);
-                return userType;
-            }
+                throw ire("Cannot add field %s to type %s: a field with name %s already exists", fieldName, userType.getCqlTypeName(), fieldName);
 
             AbstractType<?> fieldType = type.prepare(keyspaceName, keyspace.types).getType();
             if (fieldType.referencesUserType(userType.name))
@@ -155,11 +143,12 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
                           String.join(", ", transform(tablesWithTypeInPartitionKey, TableMetadata::toString)));
             }
 
-            Guardrails.fieldsPerUDT.guard(userType.size() + 1, userType.getNameAsString(), false, state);
-            type.validate(state, "Field " + fieldName);
-
             List<FieldIdentifier> fieldNames = new ArrayList<>(userType.fieldNames()); fieldNames.add(fieldName);
             List<AbstractType<?>> fieldTypes = new ArrayList<>(userType.fieldTypes()); fieldTypes.add(fieldType);
+
+            int newSize = userType.size() + 1;
+            Guardrails.fieldsPerUDT.guard(newSize, userType.getNameAsString(), false, state);
+            type.validate(state, "Field " + fieldName);
 
             return new UserType(keyspaceName, userType.name, fieldNames, fieldTypes, true);
         }
@@ -177,12 +166,11 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
     private static final class RenameFields extends AlterTypeStatement
     {
         private final Map<FieldIdentifier, FieldIdentifier> renamedFields;
-        private final boolean ifFieldExists;
 
-        private RenameFields(String keyspaceName, String typeName, Map<FieldIdentifier, FieldIdentifier> renamedFields, boolean ifExists, boolean ifFieldExists)
+        private RenameFields(String queryString, String keyspaceName, String typeName,
+                             Map<FieldIdentifier, FieldIdentifier> renamedFields)
         {
-            super(keyspaceName, typeName, ifExists);
-            this.ifFieldExists = ifFieldExists;
+            super(queryString, keyspaceName, typeName);
             this.renamedFields = renamedFields;
         }
 
@@ -208,11 +196,7 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
             {
                 int idx = userType.fieldPosition(oldName);
                 if (idx < 0)
-                {
-                    if (!ifFieldExists)
-                        throw ire("Unkown field %s in user type %s", oldName, userType.getCqlTypeName());
-                    return;
-                }
+                    throw ire("Unkown field %s in user type %s", oldName, keyspaceName, userType.getCqlTypeName());
                 fieldNames.set(idx, newName);
             });
 
@@ -228,9 +212,9 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
 
     private static final class AlterField extends AlterTypeStatement
     {
-        private AlterField(String keyspaceName, String typeName, boolean ifExists)
+        private AlterField(String queryString, String keyspaceName, String typeName)
         {
-            super(keyspaceName, typeName, ifExists);
+            super(queryString, keyspaceName, typeName);
         }
 
         UserType apply(KeyspaceMetadata keyspace, UserType userType)
@@ -239,7 +223,7 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
         }
     }
 
-    public static final class Raw extends CQLStatement.Raw
+    public static final class Raw extends RawKeyspaceAwareStatement<AlterTypeStatement>
     {
         private enum Kind
         {
@@ -247,9 +231,6 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
         }
 
         private final UTName name;
-        private final boolean ifExists;
-        private boolean ifFieldExists;
-        private boolean ifFieldNotExists;
 
         private Kind kind;
 
@@ -260,22 +241,25 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
         // RENAME
         private final Map<FieldIdentifier, FieldIdentifier> renamedFields = new HashMap<>();
 
-        public Raw(UTName name, boolean ifExists)
+        public Raw(UTName name)
         {
-            this.ifExists = ifExists;
             this.name = name;
         }
 
-        public AlterTypeStatement prepare(ClientState state)
+        @Override
+        public AlterTypeStatement prepare(ClientState state, UnaryOperator<String> keyspaceMapper)
         {
-            String keyspaceName = name.hasKeyspace() ? name.getKeyspace() : state.getKeyspace();
+            String keyspaceName = keyspaceMapper.apply(name.hasKeyspace() ? name.getKeyspace() : state.getKeyspace());
             String typeName = name.getStringTypeName();
 
             switch (kind)
             {
-                case     ADD_FIELD: return new AddField(keyspaceName, typeName, newFieldName, newFieldType, ifExists, ifFieldNotExists);
-                case RENAME_FIELDS: return new RenameFields(keyspaceName, typeName, renamedFields, ifExists, ifFieldExists);
-                case   ALTER_FIELD: return new AlterField(keyspaceName, typeName, ifExists);
+                case     ADD_FIELD:
+                    if (keyspaceMapper != Constants.IDENTITY_STRING_MAPPER)
+                        newFieldType.forEachUserType(utName -> utName.updateKeyspaceIfDefined(keyspaceMapper));
+                    return new AddField(rawCQLStatement, keyspaceName, typeName, newFieldName, newFieldType);
+                case RENAME_FIELDS: return new RenameFields(rawCQLStatement, keyspaceName, typeName, renamedFields);
+                case   ALTER_FIELD: return new AlterField(rawCQLStatement, keyspaceName, typeName);
             }
 
             throw new AssertionError();
@@ -288,20 +272,10 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
             newFieldType = type;
         }
 
-        public void ifFieldNotExists(boolean ifNotExists)
-        {
-            this.ifFieldNotExists = ifNotExists;
-        }
-
         public void rename(FieldIdentifier from, FieldIdentifier to)
         {
             kind = Kind.RENAME_FIELDS;
             renamedFields.put(from, to);
-        }
-
-        public void ifFieldExists(boolean ifExists)
-        {
-            this.ifFieldExists = ifExists;
         }
 
         public void alter(FieldIdentifier name, CQL3Type.Raw type)

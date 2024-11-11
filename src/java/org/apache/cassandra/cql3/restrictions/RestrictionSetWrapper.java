@@ -18,20 +18,18 @@
 package org.apache.cassandra.cql3.restrictions;
 
 import java.util.List;
+import java.util.Set;
 
-import org.apache.commons.lang3.builder.ToStringBuilder;
-import org.apache.commons.lang3.builder.ToStringStyle;
-
+import org.apache.cassandra.index.Index;
+import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.db.filter.RowFilter;
-import org.apache.cassandra.index.Index;
 import org.apache.cassandra.index.IndexRegistry;
-import org.apache.cassandra.schema.ColumnMetadata;
 
 /**
- * A {@link RestrictionSet} wrapper that can be extended to allow to modify the {@code RestrictionSet}
- * behaviour without breaking its immutability. Subclasses should be immutable.
+ * A <code>RestrictionSet</code> wrapper that can be extended to allow to modify the <code>RestrictionSet</code>
+ * behaviour without breaking its immutability. Sub-classes should be immutables.
  */
 class RestrictionSetWrapper implements Restrictions
 {
@@ -40,38 +38,29 @@ class RestrictionSetWrapper implements Restrictions
      */
     protected final RestrictionSet restrictions;
 
-    public RestrictionSetWrapper(RestrictionSet restrictions)
+    RestrictionSetWrapper(RestrictionSet restrictions)
     {
         this.restrictions = restrictions;
     }
 
-    public void addToRowFilter(RowFilter filter,
+    @Override
+    public void addToRowFilter(RowFilter.Builder rowFilter,
                                IndexRegistry indexRegistry,
                                QueryOptions options)
     {
-        restrictions.addToRowFilter(filter, indexRegistry, options);
+        restrictions.addToRowFilter(rowFilter, indexRegistry, options);
     }
 
-    public List<ColumnMetadata> columns()
+    @Override
+    public List<ColumnMetadata> getColumnDefs()
     {
-        return restrictions.columns();
+        return restrictions.getColumnDefs();
     }
 
+    @Override
     public void addFunctionsTo(List<Function> functions)
     {
         restrictions.addFunctionsTo(functions);
-    }
-
-    @Override
-    public boolean isRestrictedByEquals(ColumnMetadata column)
-    {
-        return restrictions.isRestrictedByEquals(column);
-    }
-
-    @Override
-    public boolean isRestrictedByEqualsOrIN(ColumnMetadata column)
-    {
-        return restrictions.isRestrictedByEqualsOrIN(column);
     }
 
     public boolean isEmpty()
@@ -79,20 +68,26 @@ class RestrictionSetWrapper implements Restrictions
         return restrictions.isEmpty();
     }
 
+    public List<SingleRestriction> restrictions()
+    {
+        return restrictions.restrictions();
+    }
+
     public int size()
     {
         return restrictions.size();
     }
 
+    @Override
     public boolean hasSupportingIndex(IndexRegistry indexRegistry)
     {
-        return restrictions.hasSupportingIndex(indexRegistry.listIndexes());
+        return restrictions.hasSupportingIndex(indexRegistry);
     }
 
     @Override
-    public Index findSupportingIndex(Iterable<Index> indexes)
+    public Index findSupportingIndex(IndexRegistry indexRegistry)
     {
-        return restrictions.findSupportingIndex(indexes);
+        return restrictions.findSupportingIndex(indexRegistry);
     }
 
     @Override
@@ -102,24 +97,15 @@ class RestrictionSetWrapper implements Restrictions
     }
 
     @Override
-    public boolean needsFilteringOrIndexing()
+    public ColumnMetadata getFirstColumn()
     {
-        return restrictions.needsFilteringOrIndexing();
+        return restrictions.getFirstColumn();
     }
 
-    public ColumnMetadata firstColumn()
+    @Override
+    public ColumnMetadata getLastColumn()
     {
-        return restrictions.firstColumn();
-    }
-
-    public ColumnMetadata lastColumn()
-    {
-        return restrictions.lastColumn();
-    }
-
-    public boolean hasSlice()
-    {
-        return restrictions.hasSlice();
+        return restrictions.getLastColumn();
     }
 
     @Override
@@ -128,19 +114,27 @@ class RestrictionSetWrapper implements Restrictions
         return restrictions.hasIN();
     }
 
-    public boolean hasOnlyEqualityRestrictions()
+    @Override
+    public boolean hasContains()
     {
-        for (ColumnMetadata column : columns())
-        {
-            if (!isRestrictedByEqualsOrIN(column))
-                return false;
-        }
-        return true;
+        return restrictions.hasContains();
     }
 
     @Override
-    public String toString()
+    public boolean hasSlice()
     {
-        return ToStringBuilder.reflectionToString(this, ToStringStyle.SHORT_PREFIX_STYLE);
+        return restrictions.hasSlice();
+    }
+
+    @Override
+    public boolean hasOnlyEqualityRestrictions()
+    {
+        return restrictions.hasOnlyEqualityRestrictions();
+    }
+
+    @Override
+    public Set<Restriction> getRestrictions(ColumnMetadata columnDef)
+    {
+        return restrictions.getRestrictions(columnDef);
     }
 }

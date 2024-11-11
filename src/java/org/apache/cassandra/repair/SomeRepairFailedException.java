@@ -28,9 +28,4 @@ package org.apache.cassandra.repair;
 public class SomeRepairFailedException extends RuntimeException
 {
     public static final SomeRepairFailedException INSTANCE = new SomeRepairFailedException();
-
-    private SomeRepairFailedException()
-    {
-        super(null, null, false, false);
-    }
 }

@@ -27,9 +27,9 @@ import java.util.stream.Collectors;
 
 import com.google.common.collect.AbstractIterator;
 
-import com.datastax.driver.core.ColumnDefinitions;
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
+import com.khulnasoft.driver.core.ColumnDefinitions;
+import com.khulnasoft.driver.core.ResultSet;
+import com.khulnasoft.driver.core.Row;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 

@@ -20,10 +20,8 @@ package org.apache.cassandra.service;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Supplier;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.locator.IEndpointSnitch;
 import org.apache.cassandra.locator.NetworkTopologyStrategy;
 import org.apache.cassandra.locator.Replica;
@@ -31,7 +29,6 @@ import org.apache.cassandra.locator.ReplicaPlan;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.WriteType;
-import org.apache.cassandra.transport.Dispatcher;
 
 /**
  * This class blocks for a quorum of responses _in all datacenters_ (CL.EACH_QUORUM).
@@ -43,14 +40,13 @@ public class DatacenterSyncWriteResponseHandler<T> extends AbstractWriteResponse
     private final Map<String, AtomicInteger> responses = new HashMap<String, AtomicInteger>();
     private final AtomicInteger acks = new AtomicInteger(0);
 
-    public DatacenterSyncWriteResponseHandler(ReplicaPlan.ForWrite replicaPlan,
+    public DatacenterSyncWriteResponseHandler(ReplicaPlan.ForTokenWrite replicaPlan,
                                               Runnable callback,
                                               WriteType writeType,
-                                              Supplier<Mutation> hintOnFailure,
-                                              Dispatcher.RequestTime requestTime)
+                                              long queryStartNanoTime)
     {
         // Response is been managed by the map so make it 1 for the superclass.
-        super(replicaPlan, callback, writeType, hintOnFailure, requestTime);
+        super(replicaPlan, callback, writeType, queryStartNanoTime);
         assert replicaPlan.consistencyLevel() == ConsistencyLevel.EACH_QUORUM;
 
         if (replicaPlan.replicationStrategy() instanceof NetworkTopologyStrategy)
@@ -102,7 +98,7 @@ public class DatacenterSyncWriteResponseHandler<T> extends AbstractWriteResponse
         }
     }
 
-    protected int ackCount()
+    public int ackCount()
     {
         return acks.get();
     }

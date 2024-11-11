@@ -17,13 +17,11 @@
  */
 package org.apache.cassandra.index.sai;
 
-import java.util.Collections;
-
 import com.google.common.base.Objects;
 
 import org.apache.cassandra.index.sai.disk.PrimaryKeyMap;
-import org.apache.cassandra.index.sai.disk.SSTableIndex;
-import org.apache.cassandra.index.sai.disk.format.IndexDescriptor;
+import org.apache.cassandra.index.sai.disk.format.IndexComponents;
+import org.apache.cassandra.index.sai.utils.PrimaryKey;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.utils.Throwables;
@@ -32,26 +30,28 @@ import org.apache.cassandra.utils.concurrent.RefCounted;
 import org.apache.cassandra.utils.concurrent.SharedCloseableImpl;
 
 /**
- * An {@link SSTableContext} is created for an individual sstable and is shared across column indexes to track per-sstable
- * index files.
- * <p>
- * The {@link SSTableContext} will be released when receiving a sstable removed notification, but its shared copies in
- * individual {@link SSTableIndex}es will be released when in-flight read requests complete.
+ * SSTableContext is created for individual sstable shared across indexes to track per-sstable index files.
+ *
+ * SSTableContext itself will be released when receiving sstable removed notification, but its shared copies in individual
+ * SSTableIndex will be released when in-flight read requests complete.
  */
 public class SSTableContext extends SharedCloseableImpl
 {
     public final SSTableReader sstable;
-    public final IndexDescriptor indexDescriptor;
+    private final IndexComponents.ForRead perSSTableComponents;
+    public final PrimaryKey.Factory primaryKeyFactory;
     public final PrimaryKeyMap.Factory primaryKeyMapFactory;
 
     private SSTableContext(SSTableReader sstable,
-                           IndexDescriptor indexDescriptor,
+                           IndexComponents.ForRead perSSTableComponents,
+                           PrimaryKey.Factory primaryKeyFactory,
                            PrimaryKeyMap.Factory primaryKeyMapFactory,
                            Cleanup cleanup)
     {
         super(cleanup);
         this.sstable = sstable;
-        this.indexDescriptor = indexDescriptor;
+        this.perSSTableComponents = perSSTableComponents;
+        this.primaryKeyFactory = primaryKeyFactory;
         this.primaryKeyMapFactory = primaryKeyMapFactory;
     }
 
@@ -59,16 +59,20 @@ public class SSTableContext extends SharedCloseableImpl
     {
         super(copy);
         this.sstable = copy.sstable;
-        this.indexDescriptor = copy.indexDescriptor;
+        this.perSSTableComponents = copy.perSSTableComponents;
+        this.primaryKeyFactory = copy.primaryKeyFactory;
         this.primaryKeyMapFactory = copy.primaryKeyMapFactory;
     }
 
-    public static SSTableContext create(SSTableReader sstable)
+    @SuppressWarnings("resource")
+    public static SSTableContext create(SSTableReader sstable, IndexComponents.ForRead perSSTableComponents)
     {
+        var onDiskFormat = perSSTableComponents.version().onDiskFormat();
+        PrimaryKey.Factory primaryKeyFactory = onDiskFormat.newPrimaryKeyFactory(sstable.metadata().comparator);
+
         Ref<? extends SSTableReader> sstableRef = null;
         PrimaryKeyMap.Factory primaryKeyMapFactory = null;
 
-        IndexDescriptor indexDescriptor = IndexDescriptor.create(sstable);
         try
         {
             sstableRef = sstable.tryRef();
@@ -78,11 +82,11 @@ public class SSTableContext extends SharedCloseableImpl
                 throw new IllegalStateException("Couldn't acquire reference to the sstable: " + sstable);
             }
 
-            primaryKeyMapFactory = indexDescriptor.newPrimaryKeyMapFactory(sstable);
+            primaryKeyMapFactory = onDiskFormat.newPrimaryKeyMapFactory(perSSTableComponents, primaryKeyFactory, sstable);
 
-            Cleanup cleanup = new Cleanup(primaryKeyMapFactory, indexDescriptor, sstableRef);
+            Cleanup cleanup = new Cleanup(primaryKeyMapFactory, sstableRef);
 
-            return new SSTableContext(sstable, indexDescriptor, primaryKeyMapFactory, cleanup);
+            return new SSTableContext(sstable, perSSTableComponents, primaryKeyFactory, primaryKeyMapFactory, cleanup);
         }
         catch (Throwable t)
         {
@@ -91,22 +95,22 @@ public class SSTableContext extends SharedCloseableImpl
                 sstableRef.release();
             }
 
-            throw Throwables.unchecked(Throwables.close(t, Collections.singleton(primaryKeyMapFactory)));
+            throw Throwables.unchecked(Throwables.close(t, primaryKeyMapFactory));
         }
+    }
+
+    /**
+     * Returns the concrete on-disk perSStable components used by this context instance.
+     */
+    public IndexComponents.ForRead usedPerSSTableComponents()
+    {
+        return perSSTableComponents;
     }
 
     @Override
     public SSTableContext sharedCopy()
     {
         return new SSTableContext(this);
-    }
-
-    /**
-     * Returns a new {@link SSTableIndex} for a per-column index
-     */
-    public SSTableIndex newSSTableIndex(StorageAttachedIndex index)
-    {
-        return indexDescriptor.newSSTableIndex(this, index);
     }
 
     /**
@@ -117,12 +121,19 @@ public class SSTableContext extends SharedCloseableImpl
         return sstable.descriptor;
     }
 
-    /**
-     * @return disk usage (in bytes) of per-sstable index files
-     */
-    public long diskUsage()
+    public SSTableReader sstable()
     {
-        return indexDescriptor.sizeOnDiskOfPerSSTableComponents();
+        return sstable;
+    }
+
+    public PrimaryKey.Factory primaryKeyFactory()
+    {
+        return primaryKeyFactory;
+    }
+
+    public PrimaryKeyMap.Factory primaryKeyMapFactory()
+    {
+        return primaryKeyMapFactory;
     }
 
     /**
@@ -130,7 +141,7 @@ public class SSTableContext extends SharedCloseableImpl
      */
     public int openFilesPerSSTable()
     {
-        return indexDescriptor.version.onDiskFormat().openFilesPerSSTableIndex(indexDescriptor.hasClustering());
+        return perSSTableComponents.version().onDiskFormat().openFilesPerSSTable();
     }
 
     @Override
@@ -159,15 +170,11 @@ public class SSTableContext extends SharedCloseableImpl
     private static class Cleanup implements RefCounted.Tidy
     {
         private final PrimaryKeyMap.Factory primaryKeyMapFactory;
-        private final IndexDescriptor indexDescriptor;
         private final Ref<? extends SSTableReader> sstableRef;
 
-        private Cleanup(PrimaryKeyMap.Factory primaryKeyMapFactory,
-                        IndexDescriptor indexDescriptor,
-                        Ref<? extends SSTableReader> sstableRef)
+        private Cleanup(PrimaryKeyMap.Factory primaryKeyMapFactory, Ref<? extends SSTableReader> sstableRef)
         {
             this.primaryKeyMapFactory = primaryKeyMapFactory;
-            this.indexDescriptor = indexDescriptor;
             this.sstableRef = sstableRef;
         }
 
@@ -175,7 +182,7 @@ public class SSTableContext extends SharedCloseableImpl
         public void tidy()
         {
             Throwable t = sstableRef.ensureReleased(null);
-            t = Throwables.close(t, Collections.singleton(primaryKeyMapFactory));
+            t = Throwables.close(t, primaryKeyMapFactory);
 
             Throwables.maybeFail(t);
         }
@@ -183,7 +190,7 @@ public class SSTableContext extends SharedCloseableImpl
         @Override
         public String name()
         {
-            return indexDescriptor.toString();
+            return null;
         }
     }
 }

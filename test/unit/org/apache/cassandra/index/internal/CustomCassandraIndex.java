@@ -21,63 +21,49 @@
 package org.apache.cassandra.index.internal;
 
 import java.nio.ByteBuffer;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
+import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
 import com.google.common.collect.ImmutableSet;
+
+import org.apache.cassandra.db.compaction.TableOperation;
+import org.apache.cassandra.db.memtable.Memtable;
+import org.apache.cassandra.index.TargetParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.Util;
+import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.cql3.statements.schema.IndexTarget;
-import org.apache.cassandra.db.CBuilder;
-import org.apache.cassandra.db.Clustering;
-import org.apache.cassandra.db.ClusteringComparator;
-import org.apache.cassandra.db.ClusteringPrefix;
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.DeletionTime;
-import org.apache.cassandra.db.LivenessInfo;
-import org.apache.cassandra.db.RangeTombstone;
-import org.apache.cassandra.db.ReadCommand;
-import org.apache.cassandra.db.RegularAndStaticColumns;
-import org.apache.cassandra.db.SystemKeyspace;
-import org.apache.cassandra.db.WriteContext;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.db.lifecycle.View;
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.memtable.Memtable;
+import org.apache.cassandra.db.partitions.PartitionIterator;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
-import org.apache.cassandra.db.rows.BTreeRow;
-import org.apache.cassandra.db.rows.Cell;
-import org.apache.cassandra.db.rows.CellPath;
-import org.apache.cassandra.db.rows.ComplexColumnData;
-import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.index.Index;
 import org.apache.cassandra.index.IndexRegistry;
 import org.apache.cassandra.index.SecondaryIndexBuilder;
-import org.apache.cassandra.index.TargetParser;
 import org.apache.cassandra.index.transactions.IndexTransaction;
+import org.apache.cassandra.index.transactions.UpdateTransaction;
 import org.apache.cassandra.io.sstable.ReducingKeyIterator;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.IndexMetadata;
-import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.concurrent.Refs;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.apache.cassandra.index.internal.CassandraIndex.getFunctions;
 import static org.apache.cassandra.index.internal.CassandraIndex.indexCfsMetadata;
 
@@ -152,7 +138,7 @@ public class CustomCassandraIndex implements Index
     public Callable<Void> getBlockingFlushTask()
     {
         return () -> {
-            Util.flush(indexCfs);
+            indexCfs.forceBlockingFlush(UNIT_TESTS);
             return null;
         };
     }
@@ -182,7 +168,7 @@ public class CustomCassandraIndex implements Index
         TableMetadata cfm = indexCfsMetadata(baseCfs.metadata(), indexDef);
         indexCfs = ColumnFamilyStore.createColumnFamilyStore(baseCfs.keyspace,
                                                              cfm.name,
-                                                             cfm.ref.get(),
+                                                             TableMetadataRef.forOfflineTools(cfm),
                                                              baseCfs.getTracker().loadsstables);
         indexedColumn = target.left;
     }
@@ -226,6 +212,14 @@ public class CustomCassandraIndex implements Index
         return indexCfs.getMeanEstimatedCellPerPartitionCount();
     }
 
+    /**
+     * No post processing of query results, just return them unchanged
+     */
+    public BiFunction<PartitionIterator, ReadCommand, PartitionIterator> postProcessorFor(ReadCommand command)
+    {
+        return (partitionIterator, readCommand) -> partitionIterator;
+    }
+
     public RowFilter getPostIndexQueryFilter(RowFilter filter)
     {
         return getTargetExpression(filter.getExpressions()).map(filter::without)
@@ -242,8 +236,7 @@ public class CustomCassandraIndex implements Index
         return null;
     }
 
-    @Override
-    public void validate(PartitionUpdate update, ClientState state) throws InvalidRequestException
+    public void validate(PartitionUpdate update) throws InvalidRequestException
     {
         switch (indexedColumn.kind)
         {
@@ -254,7 +247,7 @@ public class CustomCassandraIndex implements Index
                 validateClusterings(update);
                 break;
             case REGULAR:
-                validateRows(update);
+                validateRows(update.rows());
                 break;
             case STATIC:
                 validateRows(Collections.singleton(update.staticRow()));
@@ -262,11 +255,11 @@ public class CustomCassandraIndex implements Index
         }
     }
 
-    protected CBuilder buildIndexClusteringPrefix(ByteBuffer partitionKey,
-                                               ClusteringPrefix<?> prefix,
-                                               CellPath path)
+    protected ClusteringBuilder buildIndexClusteringPrefix(ByteBuffer partitionKey,
+                                                           ClusteringPrefix<?> prefix,
+                                                           CellPath path)
     {
-        CBuilder builder = CBuilder.create(getIndexComparator());
+        ClusteringBuilder builder = ClusteringBuilder.create(getIndexComparator());
         builder.add(partitionKey);
         return builder;
     }
@@ -283,7 +276,7 @@ public class CustomCassandraIndex implements Index
         throw new UnsupportedOperationException("KEYS indexes do not use a specialized index entry format");
     }
 
-    public boolean isStale(Row row, ByteBuffer indexValue, long nowInSec)
+    public boolean isStale(Row row, ByteBuffer indexValue, int nowInSec)
     {
         if (row == null)
             return true;
@@ -297,7 +290,7 @@ public class CustomCassandraIndex implements Index
 
     public Indexer indexerFor(final DecoratedKey key,
                               final RegularAndStaticColumns columns,
-                              final long nowInSec,
+                              final int nowInSec,
                               final WriteContext ctx,
                               final IndexTransaction.Type transactionType,
                               final Memtable memtable)
@@ -483,14 +476,14 @@ public class CustomCassandraIndex implements Index
                         Clustering<?> clustering,
                         Cell<?> cell,
                         WriteContext ctx,
-                        long nowInSec)
+                        int nowInSec)
     {
         DecoratedKey valueKey = getIndexKeyFor(getIndexedValue(rowKey,
                                                                clustering,
                                                                cell));
         doDelete(valueKey,
                  buildIndexClustering(rowKey, clustering, cell),
-                 DeletionTime.build(cell.timestamp(), nowInSec),
+                 new DeletionTime(cell.timestamp(), nowInSec),
                  ctx);
     }
 
@@ -531,7 +524,7 @@ public class CustomCassandraIndex implements Index
     private void validateClusterings(PartitionUpdate update) throws InvalidRequestException
     {
         assert indexedColumn.isClusteringColumn();
-        for (Row row : update)
+        for (Row row : update.rows())
             validateIndexedValue(getIndexedValue(null, row.clustering(), null));
     }
 
@@ -605,17 +598,17 @@ public class CustomCassandraIndex implements Index
     {
         // interrupt in-progress compactions
         Collection<ColumnFamilyStore> cfss = Collections.singleton(indexCfs);
-        CompactionManager.instance.interruptCompactionForCFs(cfss, (sstable) -> true, true);
+        CompactionManager.instance.interruptCompactionForCFs(cfss, (sstable) -> true, true, TableOperation.StopTrigger.INVALIDATE_INDEX);
         CompactionManager.instance.waitForCessation(cfss, (sstable) -> true);
         indexCfs.keyspace.writeOrder.awaitNewBarrier();
-        Util.flush(indexCfs);
+        indexCfs.forceBlockingFlush(UNIT_TESTS);
         indexCfs.readOrdering.awaitNewBarrier();
         indexCfs.invalidate();
     }
 
     private boolean isBuilt()
     {
-        return SystemKeyspace.isIndexBuilt(baseCfs.getKeyspaceName(), metadata.name);
+        return SystemKeyspace.isIndexBuilt(baseCfs.keyspace.getName(), metadata.name);
     }
 
     private boolean isPrimaryKeyIndex()
@@ -633,7 +626,7 @@ public class CustomCassandraIndex implements Index
 
     private void buildBlocking()
     {
-        Util.flush(baseCfs);
+        baseCfs.forceBlockingFlush(UNIT_TESTS);
 
         try (ColumnFamilyStore.RefViewFragment viewFragment = baseCfs.selectAndReference(View.selectFunction(SSTableSet.CANONICAL));
              Refs<SSTableReader> sstables = viewFragment.refs)
@@ -657,7 +650,7 @@ public class CustomCassandraIndex implements Index
                                                                          ImmutableSet.copyOf(sstables));
             Future<?> future = CompactionManager.instance.submitIndexBuild(builder);
             FBUtilities.waitOnFuture(future);
-            Util.flush(indexCfs);
+            indexCfs.forceBlockingFlush(UNIT_TESTS);
         }
         logger.info("Index build of {} complete", metadata.name);
     }

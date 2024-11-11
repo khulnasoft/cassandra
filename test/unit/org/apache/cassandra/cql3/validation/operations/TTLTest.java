@@ -18,15 +18,12 @@
 
 package org.apache.cassandra.cql3.validation.operations;
 
-
 import java.io.IOException;
 
 import org.junit.After;
-import org.junit.Assume;
 import org.junit.Before;
 import org.junit.Test;
 
-import org.apache.cassandra.Util;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.Attributes;
@@ -34,25 +31,19 @@ import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.ExpirationDateOverflowHandling;
-import org.apache.cassandra.db.ExpirationDateOverflowHandling.ExpirationDateOverflowPolicy;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.rows.AbstractCell;
-import org.apache.cassandra.db.rows.Cell;
-import org.apache.cassandra.distributed.shared.WithProperties;
 import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.apache.cassandra.io.sstable.IScrubber;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileInputStreamPlus;
 import org.apache.cassandra.io.util.FileOutputStreamPlus;
 import org.apache.cassandra.tools.StandaloneScrubber;
 import org.apache.cassandra.tools.ToolRunner;
 import org.apache.cassandra.tools.ToolRunner.ToolResult;
-import org.apache.cassandra.utils.Clock;
-import org.apache.cassandra.utils.StorageCompatibilityMode;
-import org.assertj.core.data.Offset;
+import org.apache.cassandra.utils.FBUtilities;
+import org.assertj.core.api.Assertions;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_UTIL_ALLOW_TOOL_REINIT_FOR_TEST;
-import static org.assertj.core.api.Assertions.assertThat;
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -68,9 +59,6 @@ public class TTLTest extends CQLTester
     public static final String COMPLEX_NOCLUSTERING = "table3";
     public static final String COMPLEX_CLUSTERING = "table4";
     private Config.CorruptedTombstoneStrategy corruptTombstoneStrategy;
-
-    // We should start applying overflow policies depending on supported sstable formats. Either in year 2038 or 2086
-    boolean overflowPoliciesApply = (Clock.Global.currentTimeMillis() / 1000) > (Cell.getVersionedMaxDeletiontionTime() - MAX_TTL);
 
     @Before
     public void before()
@@ -172,7 +160,6 @@ public class TTLTest extends CQLTester
     @Test
     public void testCapWarnExpirationOverflowPolicy() throws Throwable
     {
-        Assume.assumeTrue(overflowPoliciesApply);
         // We don't test that the actual warn is logged here, only on dtest
         testCapExpirationDateOverflowPolicy(ExpirationDateOverflowHandling.ExpirationDateOverflowPolicy.CAP);
     }
@@ -180,34 +167,27 @@ public class TTLTest extends CQLTester
     @Test
     public void testCapNoWarnExpirationOverflowPolicy() throws Throwable
     {
-        Assume.assumeTrue(overflowPoliciesApply);
         testCapExpirationDateOverflowPolicy(ExpirationDateOverflowHandling.ExpirationDateOverflowPolicy.CAP_NOWARN);
     }
 
     @Test
     public void testCapNoWarnExpirationOverflowPolicyDefaultTTL() throws Throwable
     {
-        Assume.assumeTrue(overflowPoliciesApply);
-        ExpirationDateOverflowPolicy origPolicy = ExpirationDateOverflowHandling.policy;
-        ExpirationDateOverflowHandling.policy = ExpirationDateOverflowPolicy.CAP_NOWARN;
+        ExpirationDateOverflowHandling.policy = ExpirationDateOverflowHandling.policy.CAP_NOWARN;
         createTable("CREATE TABLE %s (k int PRIMARY KEY, i int) WITH default_time_to_live=" + MAX_TTL);
         execute("INSERT INTO %s (k, i) VALUES (1, 1)");
         checkTTLIsCapped("i");
-        ExpirationDateOverflowHandling.policy = origPolicy;
+        ExpirationDateOverflowHandling.policy = ExpirationDateOverflowHandling.policy.REJECT;
     }
 
     @Test
     public void testRejectExpirationOverflowPolicy() throws Throwable
     {
-        Assume.assumeTrue(overflowPoliciesApply);
-        ExpirationDateOverflowPolicy origPolicy = ExpirationDateOverflowHandling.policy;
-        ExpirationDateOverflowHandling.policy = ExpirationDateOverflowPolicy.REJECT;
-
+        //ExpirationDateOverflowHandling.expirationDateOverflowPolicy = ExpirationDateOverflowHandling.expirationDateOverflowPolicy.REJECT;
         createTable("CREATE TABLE %s (k int PRIMARY KEY, i int)");
         try
         {
             execute("INSERT INTO %s (k, i) VALUES (1, 1) USING TTL " + MAX_TTL);
-            fail();
         }
         catch (InvalidRequestException e)
         {
@@ -217,31 +197,11 @@ public class TTLTest extends CQLTester
         {
             createTable("CREATE TABLE %s (k int PRIMARY KEY, i int) WITH default_time_to_live=" + MAX_TTL);
             execute("INSERT INTO %s (k, i) VALUES (1, 1)");
-            fail();
         }
         catch (InvalidRequestException e)
         {
             assertTrue(e.getMessage().contains("exceeds maximum supported expiration date"));
         }
-
-        ExpirationDateOverflowHandling.policy = origPolicy;
-    }
-
-    @Test
-    public void testImprovedMaxTTL()
-    {
-        Assume.assumeTrue(DatabaseDescriptor.getStorageCompatibilityMode() != StorageCompatibilityMode.CASSANDRA_4);
-        createTable("CREATE TABLE %s (k int PRIMARY KEY, i int)");
-        disableCompaction();
-        long t0 = Clock.Global.currentTimeMillis();
-        execute("INSERT INTO %s (k, i) VALUES (1, 1) USING TTL " + MAX_TTL);
-        int ttlMemtable = execute("SELECT TTL(i) FROM %s WHERE k = 1").one().getInt("ttl(i)");
-        flush(true);
-        int ttlSSTable = execute("SELECT TTL(i) FROM %s WHERE k = 1").one().getInt("ttl(i)");
-        long t1 = Clock.Global.currentTimeMillis();
-        int delta = (int) Math.max(1, (t1 - t0) / 1000);
-        assertThat(ttlMemtable).isCloseTo(MAX_TTL, Offset.offset(delta));
-        assertThat(ttlSSTable).isCloseTo(MAX_TTL, Offset.offset(delta));
     }
 
     @Test
@@ -260,7 +220,6 @@ public class TTLTest extends CQLTester
 
     public void testCapExpirationDateOverflowPolicy(ExpirationDateOverflowHandling.ExpirationDateOverflowPolicy policy) throws Throwable
     {
-        ExpirationDateOverflowPolicy origPolicy = ExpirationDateOverflowHandling.policy;
         ExpirationDateOverflowHandling.policy = policy;
 
         // simple column, clustering, flush
@@ -281,7 +240,7 @@ public class TTLTest extends CQLTester
         testCapExpirationDateOverflowPolicy(false, false, false);
 
         // Return to previous policy
-        ExpirationDateOverflowHandling.policy = origPolicy;
+        ExpirationDateOverflowHandling.policy = ExpirationDateOverflowHandling.ExpirationDateOverflowPolicy.REJECT;
     }
 
     public void testCapExpirationDateOverflowPolicy(boolean simple, boolean clustering, boolean flush) throws Throwable
@@ -310,7 +269,7 @@ public class TTLTest extends CQLTester
         // Maybe Flush
         Keyspace ks = Keyspace.open(keyspace());
         if (flush)
-            Util.flush(ks);
+            FBUtilities.waitOnFutures(ks.flush(UNIT_TESTS));
 
         // Verify data
         verifyData(simple);
@@ -377,27 +336,27 @@ public class TTLTest extends CQLTester
      */
     private void checkTTLIsCapped(String field) throws Throwable
     {
+
         // TTL is computed dynamically from row expiration time, so if it is
         // equal or higher to the minimum max TTL we compute before the query
         // we are fine.
         UntypedResultSet execute = execute("SELECT ttl(" + field + ") FROM %s WHERE k = 1");
-        long minMaxTTL = computeMaxTTL();
+        int minMaxTTL = computeMaxTTL();
         for (UntypedResultSet.Row row : execute)
         {
-            long ttl = row.getInt("ttl(" + field + ")");
+            int ttl = row.getInt("ttl(" + field + ")");
             assert (ttl >= minMaxTTL) : "ttl must be greater than or equal to minMaxTTL, but " + ttl + " is less than " + minMaxTTL;
         }
     }
 
     /**
      * The max TTL is computed such that the TTL summed with the current time is equal to the maximum
-     * allowed expiration time {@link org.apache.cassandra.db.rows.Cell#MAX_DELETION_TIME}
-     * when this was an int Integer.MAX_VALUE - 1
+     * allowed expiration time {@link org.apache.cassandra.db.rows.Cell#MAX_DELETION_TIME} (2038-01-19T03:14:06+00:00)
      */
-    private long computeMaxTTL()
+    private int computeMaxTTL()
     {
         int nowInSecs = (int) (System.currentTimeMillis() / 1000);
-        return Cell.getVersionedMaxDeletiontionTime() - nowInSecs;
+        return AbstractCell.MAX_DELETION_TIME - nowInSecs;
     }
 
     public void testRecoverOverflowedExpirationWithScrub(boolean simple, boolean clustering, boolean runScrub, boolean runSStableScrub,  boolean reinsertOverflowedTTL) throws Throwable
@@ -420,7 +379,7 @@ public class TTLTest extends CQLTester
 
         if (runScrub)
         {
-            cfs.scrub(true, IScrubber.options().checkData().reinsertOverflowedTTLRows(reinsertOverflowedTTL).build(), 1);
+            cfs.scrub(true, false, true, reinsertOverflowedTTL, 1);
 
             if (reinsertOverflowedTTL)
             {
@@ -443,7 +402,9 @@ public class TTLTest extends CQLTester
         }
         if (runSStableScrub)
         {
-            try (WithProperties properties = new WithProperties().set(TEST_UTIL_ALLOW_TOOL_REINIT_FOR_TEST, true))
+            System.setProperty(org.apache.cassandra.tools.Util.ALLOW_TOOL_REINIT_FOR_TEST, "true"); // Necessary for testing
+
+            try
             {
                 ToolResult tool;
                 if (reinsertOverflowedTTL)
@@ -452,11 +413,15 @@ public class TTLTest extends CQLTester
                     tool = ToolRunner.invokeClass(StandaloneScrubber.class, KEYSPACE, cfs.name);
 
                 tool.assertOnCleanExit();
-                assertThat(tool.getStdout()).contains("Pre-scrub sstables snapshotted into");
+                Assertions.assertThat(tool.getStdout()).contains("Pre-scrub sstables snapshotted into");
                 if (reinsertOverflowedTTL)
-                    assertThat(tool.getStdout()).contains("Fixed 2 rows with overflowed local deletion time.");
+                    Assertions.assertThat(tool.getStdout()).contains("Fixed 2 rows with overflowed local deletion time.");
                 else
-                    assertThat(tool.getStdout()).contains("No valid partitions found while scrubbing");
+                    Assertions.assertThat(tool.getStdout()).contains("No valid partitions found while scrubbing");
+            }
+            finally
+            {
+                System.clearProperty(org.apache.cassandra.tools.Util.ALLOW_TOOL_REINIT_FOR_TEST);
             }
         }
 

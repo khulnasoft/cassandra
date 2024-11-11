@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.dht;
 
+import java.io.DataInput;
 import java.io.IOException;
 import java.io.Serializable;
 import java.nio.ByteBuffer;
@@ -24,20 +25,15 @@ import java.nio.ByteBuffer;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 import org.apache.cassandra.utils.bytecomparable.ByteSource;
-import org.apache.cassandra.tcm.serialization.PartitionerAwareMetadataSerializer;
-import org.apache.cassandra.tcm.serialization.Version;
-import org.apache.cassandra.net.MessagingService;
 
 public abstract class Token implements RingPosition<Token>, Serializable
 {
     private static final long serialVersionUID = 1L;
 
     public static final TokenSerializer serializer = new TokenSerializer();
-    public static final MetadataSerializer metadataSerializer = new MetadataSerializer();
 
     public static abstract class TokenFactory
     {
@@ -94,40 +90,6 @@ public abstract class Token implements RingPosition<Token>, Serializable
         }
     }
 
-    public static class MetadataSerializer implements PartitionerAwareMetadataSerializer<Token>
-    {
-        private static final int SERDE_VERSION = MessagingService.VERSION_40;
-
-        // Convenience method as Token has a reference to its Partitioner
-        public void serialize(Token t, DataOutputPlus out, Version version) throws IOException
-        {
-            serialize(t, out, t.getPartitioner(), version);
-        }
-
-        public void serialize(Token t, DataOutputPlus out, IPartitioner partitioner, Version version) throws IOException
-        {
-            serializer.serialize(t, out, SERDE_VERSION);
-        }
-
-        public Token deserialize(DataInputPlus in, IPartitioner partitioner, Version version) throws IOException
-        {
-            // This is only ever used to deserialize Tokens from this cluster and as the partitioner can
-            // never be changed, it's safe to assume that the right implementation is provided by ClusterMetadata
-            return serializer.deserialize(in, partitioner, SERDE_VERSION);
-        }
-
-        // Convenience method as Token has a reference to its Partitioner
-        public long serializedSize(Token t, Version version)
-        {
-            return serializedSize(t, t.getPartitioner(), version);
-        }
-
-        public long serializedSize(Token t, IPartitioner partitioner, Version version)
-        {
-            return serializer.serializedSize(t, SERDE_VERSION);
-        }
-    }
-
     public static class TokenSerializer implements IPartitionerDependentSerializer<Token>
     {
         public void serialize(Token token, DataOutputPlus out, int version) throws IOException
@@ -137,7 +99,7 @@ public abstract class Token implements RingPosition<Token>, Serializable
             p.getTokenFactory().serialize(token, out);
         }
 
-        public Token deserialize(DataInputPlus in, IPartitioner p, int version) throws IOException
+        public Token deserialize(DataInput in, IPartitioner p, int version) throws IOException
         {
             int size = deserializeSize(in);
             byte[] bytes = new byte[size];
@@ -145,7 +107,7 @@ public abstract class Token implements RingPosition<Token>, Serializable
             return p.getTokenFactory().fromByteArray(ByteBuffer.wrap(bytes));
         }
 
-        public int deserializeSize(DataInputPlus in) throws IOException
+        public int deserializeSize(DataInput in) throws IOException
         {
             return in.readInt();
         }
@@ -175,7 +137,6 @@ public abstract class Token implements RingPosition<Token>, Serializable
     {
         throw new UnsupportedOperationException();
     }
-
 
     /**
      * Produce a weakly prefix-free byte-comparable representation of the token, i.e. such a sequence of bytes that any

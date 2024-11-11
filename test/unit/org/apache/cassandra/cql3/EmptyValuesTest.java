@@ -19,6 +19,7 @@
 package org.apache.cassandra.cql3;
 
 import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.regex.Pattern;
 
@@ -27,9 +28,8 @@ import org.apache.commons.io.IOUtils;
 import org.junit.Assert;
 import org.junit.Test;
 
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
-import org.apache.cassandra.config.CassandraRelevantProperties;
+import com.khulnasoft.driver.core.ResultSet;
+import com.khulnasoft.driver.core.Row;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.DecimalType;
@@ -73,22 +73,19 @@ public class EmptyValuesTest extends CQLTester
         ByteArrayOutputStream buf = new ByteArrayOutputStream();
         for (SSTableReader ssTable : cfs.getLiveSSTables())
         {
-            int exitValue = 0;
-            try
+            try (PrintStream out = new PrintStream(buf, true))
             {
                 ProcessBuilder pb = new ProcessBuilder("tools/bin/sstabledump", ssTable.getFilename());
-                pb.redirectErrorStream(true);
-                if (CassandraRelevantProperties.CASSANDRA_CONFIG.isPresent())
-                    pb.environment().put("JVM_OPTS", "-Dcassandra.config=" + CassandraRelevantProperties.CASSANDRA_CONFIG.getString());
+                String jvmOpts = pb.environment().getOrDefault("JVM_OPTS", "") + " -Dcassandra.disable_tcactive_openssl=true";
+                pb.environment().put("JVM_OPTS", jvmOpts);
                 Process process = pb.start();
-                exitValue = process.waitFor();
+                process.waitFor();
                 IOUtils.copy(process.getInputStream(), buf);
             }
             catch (Throwable t)
             {
                 Assert.fail(t.getClass().getName());
             }
-            Assert.assertEquals(buf.toString(), 0, exitValue);
         }
         
         String outString = new String(buf.toByteArray(), StandardCharsets.UTF_8);
@@ -100,7 +97,7 @@ public class EmptyValuesTest extends CQLTester
         execute("TRUNCATE %s");
 
         // In most cases we cannot insert empty value when we do not bind variables
-        // This is due to the current implementation of org.apache.cassandra.cql3.terms.Constants.Literal.testAssignment
+        // This is due to the current implementation of org.apache.cassandra.cql3.Constants.Literal.testAssignment
         // execute("INSERT INTO %s (id, v) VALUES (1, '" + emptyValue + "')");
         execute("INSERT INTO %s (id, v) VALUES (1, ?)", ByteBufferUtil.EMPTY_BYTE_BUFFER);
         flush();

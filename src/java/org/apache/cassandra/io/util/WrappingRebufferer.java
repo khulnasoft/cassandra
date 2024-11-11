@@ -18,6 +18,7 @@
 package org.apache.cassandra.io.util;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
@@ -26,30 +27,30 @@ import javax.annotation.concurrent.NotThreadSafe;
  * Only one buffer holder can be active at a time. Calling {@link #rebuffer(long)} before the previously obtained
  * buffer holder is released will throw {@link AssertionError}. We will get that exception also in case we try to close
  * the rebufferer without closing the recently obtained buffer holder.
- * <p>
+ *
  * Calling methods of {@link BufferHolder} will also produce {@link AssertionError} if buffer holder is not acquired.
- * <p>
+ *
  * The overriding classes must conform to the aforementioned rules.
  */
 @NotThreadSafe
 public abstract class WrappingRebufferer implements Rebufferer, Rebufferer.BufferHolder
 {
-    protected final Rebufferer wrapped;
+    protected final Rebufferer source;
 
     protected BufferHolder bufferHolder;
     protected ByteBuffer buffer;
     protected long offset;
 
-    public WrappingRebufferer(Rebufferer wrapped)
+    public WrappingRebufferer(Rebufferer source)
     {
-        this.wrapped = wrapped;
+        this.source = source;
     }
 
     @Override
     public BufferHolder rebuffer(long position)
     {
         assert buffer == null;
-        bufferHolder = wrapped.rebuffer(position);
+        bufferHolder = source.rebuffer(position);
         buffer = bufferHolder.buffer();
         offset = bufferHolder.offset();
 
@@ -59,38 +60,38 @@ public abstract class WrappingRebufferer implements Rebufferer, Rebufferer.Buffe
     @Override
     public ChannelProxy channel()
     {
-        return wrapped.channel();
+        return source.channel();
     }
 
     @Override
     public long fileLength()
     {
-        return wrapped.fileLength();
+        return source.fileLength();
     }
 
     @Override
     public double getCrcCheckChance()
     {
-        return wrapped.getCrcCheckChance();
+        return source.getCrcCheckChance();
     }
 
     @Override
     public void close()
     {
         assert buffer == null : "Rebufferer is attempted to be closed but the buffer holder has not been released";
-        wrapped.close();
+        source.close();
     }
 
     @Override
     public void closeReader()
     {
-        wrapped.closeReader();
+        source.closeReader();
     }
 
     @Override
     public String toString()
     {
-        return String.format("%s[]:%s", getClass().getSimpleName(), wrapped.toString());
+        return String.format("%s[]:%s", getClass().getSimpleName(), source.toString());
     }
 
     @Override
@@ -98,6 +99,12 @@ public abstract class WrappingRebufferer implements Rebufferer, Rebufferer.Buffe
     {
         assert buffer != null : "Buffer holder has not been acquired";
         return buffer;
+    }
+
+    @Override
+    public ByteOrder order()
+    {
+        return buffer.order();
     }
 
     @Override
@@ -118,4 +125,5 @@ public abstract class WrappingRebufferer implements Rebufferer, Rebufferer.Buffe
         }
         buffer = null;
     }
+
 }

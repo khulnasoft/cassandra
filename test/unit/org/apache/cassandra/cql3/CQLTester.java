@@ -31,7 +31,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -41,18 +40,19 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
-import java.util.stream.Stream;
-import java.util.stream.StreamSupport;
 import javax.annotation.Nullable;
 import javax.management.MBeanServerConnection;
 import javax.management.remote.JMXConnector;
@@ -60,68 +60,54 @@ import javax.management.remote.JMXConnectorFactory;
 import javax.management.remote.JMXConnectorServer;
 import javax.management.remote.JMXServiceURL;
 import javax.management.remote.rmi.RMIConnectorServer;
-import javax.net.ssl.SSLException;
 
+import com.khulnasoft.shaded.netty.channel.EventLoopGroup;
 import com.google.common.base.Objects;
 import com.google.common.base.Strings;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
-import org.apache.commons.lang3.ArrayUtils;
-import org.apache.commons.lang3.StringUtils;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Rule;
-import org.junit.rules.TestName;
 import org.junit.rules.TestWatcher;
 import org.junit.runner.Description;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import accord.utils.DefaultRandom;
-import accord.utils.Gen;
-import accord.utils.Property;
-import accord.utils.RandomSource;
+import com.carrotsearch.randomizedtesting.generators.RandomInts;
+import com.carrotsearch.randomizedtesting.generators.RandomStrings;
 import com.codahale.metrics.Gauge;
-import com.datastax.driver.core.CloseFuture;
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.ColumnDefinitions;
-import com.datastax.driver.core.DataType;
-import com.datastax.driver.core.NettyOptions;
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.SimpleStatement;
-import com.datastax.driver.core.SocketOptions;
-import com.datastax.driver.core.Statement;
-import com.datastax.driver.core.TypeCodec;
-import com.datastax.driver.core.UDTValue;
-import com.datastax.driver.core.UserType;
-import com.datastax.driver.core.exceptions.UnauthorizedException;
-import com.datastax.shaded.netty.channel.EventLoopGroup;
+import com.khulnasoft.driver.core.CloseFuture;
+import com.khulnasoft.driver.core.Cluster;
+import com.khulnasoft.driver.core.ColumnDefinitions;
+import com.khulnasoft.driver.core.DataType;
+import com.khulnasoft.driver.core.NettyOptions;
+import com.khulnasoft.driver.core.PoolingOptions;
+import com.khulnasoft.driver.core.ResultSet;
+import com.khulnasoft.driver.core.Row;
+import com.khulnasoft.driver.core.Session;
+import com.khulnasoft.driver.core.SimpleStatement;
+import com.khulnasoft.driver.core.SocketOptions;
+import com.khulnasoft.driver.core.Statement;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.ServerTestUtils;
-import org.apache.cassandra.Util;
-import org.apache.cassandra.auth.AuthCacheService;
-import org.apache.cassandra.auth.AuthSchemaChangeListener;
-import org.apache.cassandra.auth.AuthTestUtils;
-import org.apache.cassandra.auth.IAuthenticator;
-import org.apache.cassandra.auth.IRoleManager;
+import org.apache.cassandra.auth.CassandraAuthorizer;
+import org.apache.cassandra.auth.CassandraRoleManager;
+import org.apache.cassandra.auth.PasswordAuthenticator;
+import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.concurrent.Stage;
-import org.apache.cassandra.config.CassandraRelevantProperties;
-import org.apache.cassandra.config.Config;
-import org.apache.cassandra.config.DataStorageSpec;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.EncryptionOptions;
-import org.apache.cassandra.config.YamlConfigurationLoader;
 import org.apache.cassandra.cql3.functions.FunctionName;
 import org.apache.cassandra.cql3.functions.types.ParseUtils;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.BooleanType;
 import org.apache.cassandra.db.marshal.ByteType;
@@ -145,7 +131,7 @@ import org.apache.cassandra.db.marshal.TupleType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.marshal.UUIDType;
 import org.apache.cassandra.db.marshal.VectorType;
-import org.apache.cassandra.db.virtual.VirtualKeyspace;
+import org.apache.cassandra.db.virtual.SystemViewsKeyspace;
 import org.apache.cassandra.db.virtual.VirtualKeyspaceRegistry;
 import org.apache.cassandra.db.virtual.VirtualSchemaKeyspace;
 import org.apache.cassandra.dht.Murmur3Partitioner;
@@ -154,56 +140,42 @@ import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.index.Index;
 import org.apache.cassandra.index.SecondaryIndexManager;
-import org.apache.cassandra.io.filesystem.ListenableFileSystem;
 import org.apache.cassandra.io.util.File;
-import org.apache.cassandra.io.util.FileSystems;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.locator.TokenMetadata;
 import org.apache.cassandra.metrics.CassandraMetricsRegistry;
 import org.apache.cassandra.metrics.ClientMetrics;
-import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.nodes.Nodes;
+import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaConstants;
-import org.apache.cassandra.schema.SchemaKeyspace;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.serializers.TypeSerializer;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.transport.Event;
 import org.apache.cassandra.transport.Message;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.transport.Server;
 import org.apache.cassandra.transport.SimpleClient;
-import org.apache.cassandra.transport.TlsTestUtils;
 import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.ConfigGenBuilder;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.JMXServerUtils;
+import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.TimeUUID;
 import org.assertj.core.api.Assertions;
 import org.awaitility.Awaitility;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_JMX_LOCAL_PORT;
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_DRIVER_CONNECTION_TIMEOUT_MS;
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_DRIVER_READ_TIMEOUT_MS;
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_RANDOM_SEED;
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_REUSE_PREPARED;
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_ROW_CACHE_SIZE;
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_USE_PREPARED;
-import static org.apache.cassandra.cql3.SchemaElement.SchemaElementType.AGGREGATE;
-import static org.apache.cassandra.cql3.SchemaElement.SchemaElementType.FUNCTION;
-import static org.apache.cassandra.cql3.SchemaElement.SchemaElementType.MATERIALIZED_VIEW;
-import static org.apache.cassandra.cql3.SchemaElement.SchemaElementType.TABLE;
-import static org.apache.cassandra.cql3.SchemaElement.SchemaElementType.TYPE;
-import static org.apache.cassandra.metrics.CassandraMetricsRegistry.createMetricsKeyspaceTables;
-import static org.apache.cassandra.schema.SchemaConstants.VIRTUAL_METRICS;
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
+import static com.khulnasoft.driver.core.SocketOptions.DEFAULT_CONNECT_TIMEOUT_MILLIS;
+import static com.khulnasoft.driver.core.SocketOptions.DEFAULT_READ_TIMEOUT_MILLIS;
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
+import static org.apache.cassandra.index.sai.SAITester.vector;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
@@ -214,30 +186,20 @@ import static org.junit.Assert.fail;
  */
 public abstract class CQLTester
 {
-    /**
-     * The super user
-     */
-    private static final User SUPER_USER = new User("cassandra", "cassandra");
-
     protected static final Logger logger = LoggerFactory.getLogger(CQLTester.class);
-
-    // We make the test method name available and also use it when creating KS, table,...
-    @Rule
-    public final TestName testName = new TestName();
-    // Some tests use hardcoded constants so we may want to disable it
-    protected static volatile boolean decorateCQLWithTestNames = true;
 
     public static final String KEYSPACE = "cql_test_keyspace";
     public static final String KEYSPACE_PER_TEST = "cql_test_keyspace_alt";
-    protected static final boolean USE_PREPARED_VALUES = TEST_USE_PREPARED.getBoolean();
-    protected static final boolean REUSE_PREPARED = TEST_REUSE_PREPARED.getBoolean();
-    protected static final long ROW_CACHE_SIZE_IN_MIB = new DataStorageSpec.LongMebibytesBound(TEST_ROW_CACHE_SIZE.getString("0MiB")).toMebibytes();
+    protected static final boolean USE_PREPARED_VALUES = Boolean.valueOf(System.getProperty("cassandra.test.use_prepared", "true"));
+    protected static final boolean REUSE_PREPARED = Boolean.valueOf(System.getProperty("cassandra.test.reuse_prepared", "true"));
+    protected static final long ROW_CACHE_SIZE_IN_MB = Integer.valueOf(System.getProperty("cassandra.test.row_cache_size_in_mb", "0"));
     private static final AtomicInteger seqNumber = new AtomicInteger();
     protected static final ByteBuffer TOO_BIG = ByteBuffer.allocate(FBUtilities.MAX_UNSIGNED_SHORT + 1024);
     public static final String DATA_CENTER = ServerTestUtils.DATA_CENTER;
     public static final String DATA_CENTER_REMOTE = ServerTestUtils.DATA_CENTER_REMOTE;
     public static final String RACK1 = ServerTestUtils.RACK1;
-    protected static final int ASSERTION_TIMEOUT_SECONDS = 15;
+    private static final int ASSERTION_TIMEOUT_SECONDS = 15;
+    private static final User SUPER_USER = new User("cassandra", "cassandra");
 
     private static org.apache.cassandra.transport.Server server;
     private static JMXConnectorServer jmxServer;
@@ -245,13 +207,17 @@ public abstract class CQLTester
     protected static int jmxPort;
     protected static MBeanServerConnection jmxConnection;
 
-    protected static int nativePort;
+    private static Randomization random;
+
+    protected static final int nativePort;
     protected static final InetAddress nativeAddr;
     protected static final Set<InetAddressAndPort> remoteAddrs = new HashSet<>();
-    private static final Map<ClusterSettings, Cluster> clusters = new HashMap<>();
-    private static final Map<ClusterSettings, Session> sessions = new HashMap<>();
+    private static final Map<Pair<User, ProtocolVersion>, Cluster> clusters = new HashMap<>();
+    protected static final Map<Pair<User, ProtocolVersion>, Session> sessions = new HashMap<>();
 
-    private static Consumer<Cluster.Builder> clusterBuilderConfigurator;
+    private static final ThreadPoolExecutor schemaCleanup =
+    new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
+
 
     public static final List<ProtocolVersion> PROTOCOL_VERSIONS = new ArrayList<>(ProtocolVersion.SUPPORTED.size());
 
@@ -291,6 +257,8 @@ public abstract class CQLTester
 
         nativeAddr = InetAddress.getLoopbackAddress();
         nativePort = getAutomaticallyAllocatedPort(nativeAddr);
+
+        ServerTestUtils.daemonInitialization();
     }
 
     private List<String> keyspaces = new ArrayList<>();
@@ -299,12 +267,8 @@ public abstract class CQLTester
     private List<String> types = new ArrayList<>();
     private List<String> functions = new ArrayList<>();
     private List<String> aggregates = new ArrayList<>();
-
+    private List<String> indexes = new ArrayList<>();
     private User user;
-
-    private boolean useEncryption = false;
-
-    private boolean useClientCert = false;
 
     // We don't use USE_PREPARED_VALUES in the code below so some test can foce value preparation (if the result
     // is not expected to be the same without preparation)
@@ -317,30 +281,12 @@ public abstract class CQLTester
     }
 
     /**
-     * Use the specified user for executing the queries over the network.
-     * @param username the user name
-     * @param password the user password
-     */
-    public void useUser(String username, String password)
-    {
-        this.user = new User(username, password);
-    }
-
-    /**
-     * Use the super user for executing the queries over the network.
-     */
-    public void useSuperUser()
-    {
-        this.user = SUPER_USER;
-    }
-
-    /**
      * Returns a port number that is automatically allocated,
      * typically from an ephemeral port range.
      *
      * @return a port number
      */
-    public static int getAutomaticallyAllocatedPort(InetAddress address)
+    private static int getAutomaticallyAllocatedPort(InetAddress address)
     {
         try
         {
@@ -365,7 +311,7 @@ public abstract class CQLTester
         {
             try
             {
-                com.datastax.driver.core.ProtocolVersion.fromInt(version.asInt());
+                com.khulnasoft.driver.core.ProtocolVersion.fromInt(version.asInt());
                 PROTOCOL_VERSIONS.add(version);
             }
             catch (IllegalArgumentException e)
@@ -417,34 +363,25 @@ public abstract class CQLTester
         return new JMXServiceURL(String.format("service:jmx:rmi:///jndi/rmi://%s:%d/jmxrmi", jmxHost, jmxPort));
     }
 
-    /**
-     * If a fixture needs to use a specific partitioner other than M3P, it should shadow this method
-     * with an implementation like:
-     *     @BeforeClass
-     *     public static void setUpClass()     // overrides CQLTester.setUpClass()
-     *     {
-     *         daemonInitialization();
-     *         DatabaseDescriptor.setPartitionerUnsafe(ByteOrderedPartitioner.instance);
-     *         prepareServer();
-     *     }
-     */
+    public static Randomization getRandom()
+    {
+        if (random == null)
+            random = new Randomization();
+        return random;
+    }
+
+    @Rule
+    public FailureWatcher failureRule = new FailureWatcher();
+
     @BeforeClass
     public static void setUpClass()
     {
-        prePrepareServer();
+        if (ROW_CACHE_SIZE_IN_MB > 0)
+            DatabaseDescriptor.setRowCacheSizeInMB(ROW_CACHE_SIZE_IN_MB);
+        StorageService.instance.setPartitionerUnsafe(Murmur3Partitioner.instance);
 
         // Once per-JVM is enough
         prepareServer();
-    }
-
-    protected static void prePrepareServer()
-    {
-        CassandraRelevantProperties.SUPERUSER_SETUP_DELAY_MS.setLong(0);
-        ServerTestUtils.daemonInitialization();
-        if (ROW_CACHE_SIZE_IN_MIB > 0)
-            DatabaseDescriptor.setRowCacheSizeInMiB(ROW_CACHE_SIZE_IN_MIB);
-        StorageService.instance.registerMBeans();
-        StorageService.instance.setPartitionerUnsafe(Murmur3Partitioner.instance);
     }
 
     @AfterClass
@@ -463,11 +400,14 @@ public abstract class CQLTester
         if (reusePrepared)
             QueryProcessor.clearInternalStatementsCache();
 
+        TokenMetadata metadata = StorageService.instance.getTokenMetadata();
+        metadata.clearUnsafe();
+
         if (jmxServer != null && jmxServer instanceof RMIConnectorServer)
         {
             try
             {
-                jmxServer.stop();
+                ((RMIConnectorServer) jmxServer).stop();
             }
             catch (IOException e)
             {
@@ -486,11 +426,18 @@ public abstract class CQLTester
     @After
     public void afterTest() throws Throwable
     {
-        ServerTestUtils.resetCMS();
+        dropPerTestKeyspace();
+
         // Restore standard behavior in case it was changed
         usePrepared = USE_PREPARED_VALUES;
         reusePrepared = REUSE_PREPARED;
 
+        final List<String> keyspacesToDrop = copy(keyspaces);
+        final List<String> tablesToDrop = copy(tables);
+        final List<String> viewsToDrop = copy(views);
+        final List<String> typesToDrop = copy(types);
+        final List<String> functionsToDrop = copy(functions);
+        final List<String> aggregatesToDrop = copy(aggregates);
         keyspaces = null;
         tables = null;
         views = null;
@@ -498,25 +445,65 @@ public abstract class CQLTester
         functions = null;
         aggregates = null;
         user = null;
+
+        // We want to clean up after the test, but dropping a table is rather long so just do that asynchronously
+        schemaCleanup.execute(() -> {
+            try
+            {
+                logger.debug("Dropping {} materialized view created in previous test", viewsToDrop.size());
+                for (int i = viewsToDrop.size() - 1; i >= 0; i--)
+                    schemaChange(String.format("DROP MATERIALIZED VIEW IF EXISTS %s.%s", KEYSPACE, viewsToDrop.get(i)));
+
+                for (int i = tablesToDrop.size() - 1; i >= 0; i--)
+                    schemaChange(String.format("DROP TABLE IF EXISTS %s.%s", KEYSPACE, tablesToDrop.get(i)));
+
+                for (int i = aggregatesToDrop.size() - 1; i >= 0; i--)
+                    schemaChange(String.format("DROP AGGREGATE IF EXISTS %s", aggregatesToDrop.get(i)));
+
+                for (int i = functionsToDrop.size() - 1; i >= 0; i--)
+                    schemaChange(String.format("DROP FUNCTION IF EXISTS %s", functionsToDrop.get(i)));
+
+                for (int i = typesToDrop.size() - 1; i >= 0; i--)
+                    schemaChange(String.format("DROP TYPE IF EXISTS %s.%s", KEYSPACE, typesToDrop.get(i)));
+
+                for (int i = keyspacesToDrop.size() - 1; i >= 0; i--)
+                    schemaChange(String.format("DROP KEYSPACE IF EXISTS %s", keyspacesToDrop.get(i)));
+
+                // Dropping doesn't delete the sstables. It's not a huge deal but it's cleaner to cleanup after us
+                // Thas said, we shouldn't delete blindly before the TransactionLogs.SSTableTidier for the table we drop
+                // have run or they will be unhappy. Since those taks are scheduled on StorageService.tasks and that's
+                // mono-threaded, just push a task on the queue to find when it's empty. No perfect but good enough.
+
+                final CountDownLatch latch = new CountDownLatch(1);
+                ScheduledExecutors.nonPeriodicTasks.execute(new Runnable()
+                {
+                    public void run()
+                    {
+                        latch.countDown();
+                    }
+                });
+                latch.await(2, TimeUnit.SECONDS);
+
+                removeAllSSTables(KEYSPACE, tablesToDrop);
+            }
+            catch (Exception e)
+            {
+                throw new RuntimeException(e);
+            }
+        });
     }
 
-    protected static void addMetricsKeyspace()
+    /**
+     * Blocks until the previous schema cleanup task finished.
+     */
+    public void waitForSchemaCleanupCompleted(long timeout, TimeUnit unit)
     {
-        VirtualKeyspaceRegistry.instance.register(new VirtualKeyspace(VIRTUAL_METRICS, createMetricsKeyspaceTables()));
-    }
-
-    protected void resetSchema() throws Throwable
-    {
-        for (TableMetadata table : SchemaKeyspace.metadata().tables)
-            execute(String.format("TRUNCATE %s", table));
-        // TODO Fix this by resetting schema via CMS
-//        Schema.instance.loadFromDisk();
-        beforeTest();
+        Awaitility.await().atMost(timeout, unit).until(() -> schemaCleanup.getActiveCount() == 0);
     }
 
     public static List<String> buildNodetoolArgs(List<String> args)
     {
-        int port = jmxPort == 0 ? CASSANDRA_JMX_LOCAL_PORT.getInt(7199) : jmxPort;
+        int port = jmxPort == 0 ? Integer.getInteger("cassandra.jmx.local.port", 7199) : jmxPort;
         String host = jmxHost == null ? "127.0.0.1" : jmxHost;
         List<String> allArgs = new ArrayList<>();
         allArgs.add("bin/nodetool");
@@ -552,117 +539,52 @@ public abstract class CQLTester
         return allArgs;
     }
 
+    protected static void requireNetworkWithoutDriver()
+    {
+        startServices();
+        startServer(server -> {});
+    }
+
     protected static void requireAuthentication()
     {
-        requireAuthentication(new AuthTestUtils.LocalPasswordAuthenticator());
+        System.setProperty("cassandra.superuser_setup_delay_ms", "-1");
+
+        DatabaseDescriptor.setAuthenticator(new PasswordAuthenticator());
+        DatabaseDescriptor.setRoleManager(new CassandraRoleManager());
+        DatabaseDescriptor.setAuthorizer(new CassandraAuthorizer());
     }
 
-    protected static void requireAuthentication(final IAuthenticator authenticator)
+    // lazy initialization for all tests that require Java Driver
+    protected static void requireNetwork() throws ConfigurationException
     {
-        DatabaseDescriptor.setAuthenticator(authenticator);
-        DatabaseDescriptor.setAuthorizer(new AuthTestUtils.LocalCassandraAuthorizer());
-        DatabaseDescriptor.setNetworkAuthorizer(new AuthTestUtils.LocalCassandraNetworkAuthorizer());
-        DatabaseDescriptor.setCIDRAuthorizer(new AuthTestUtils.LocalCassandraCIDRAuthorizer());
-
-        // The CassandraRoleManager constructor set the supported and alterable options based on
-        // DatabaseDescriptor authenticator type so it needs to be created only after the authenticator is set.
-        IRoleManager roleManager =  new AuthTestUtils.LocalCassandraRoleManager()
-        {
-            public void setup()
-            {
-                loadRoleStatement();
-                loadIdentityStatement();
-                QueryProcessor.executeInternal(createDefaultRoleQuery());
-            }
-        };
-
-        DatabaseDescriptor.setRoleManager(roleManager);
-        //TODO
-        //MigrationManager.announceNewKeyspace(AuthKeyspace.metadata(), true);
-        DatabaseDescriptor.getRoleManager().setup();
-        DatabaseDescriptor.getAuthenticator().setup();
-        DatabaseDescriptor.getAuthorizer().setup();
-        DatabaseDescriptor.getNetworkAuthorizer().setup();
-        DatabaseDescriptor.getCIDRAuthorizer().setup();
-        Schema.instance.registerListener(new AuthSchemaChangeListener());
-
-        AuthCacheService.initializeAndRegisterCaches();
+        requireNetwork(server -> {});
     }
 
-    /**
-     * @param useEncryption Whether created clients should use encryption.
-     */
-    public void shouldUseEncryption(boolean useEncryption)
-    {
-        this.useEncryption = useEncryption;
-    }
-
-    /**
-     * @param useClientCert Whether created clients should provide a client cert if encryption is enabled.
-     */
-    public void shouldUseClientCertificate(boolean useClientCert)
-    {
-        this.useClientCert = useClientCert;
-    }
-
-    /**
-     * Configures the server to require client encryption for CQL.  Useful for tests which exercise TLS specific
-     * behavior.
-     * <p>
-     * Note to use this appropriately, {@link #requireNetwork} should be given a server configurator configured
-     * with {@link Server.Builder#withTlsEncryptionPolicy(EncryptionOptions.TlsEncryptionPolicy)} using
-     * {@link org.apache.cassandra.config.EncryptionOptions.TlsEncryptionPolicy#ENCRYPTED}.
-     */
-    public static void requireNativeProtocolClientEncryption()
-    {
-        DatabaseDescriptor.updateNativeProtocolEncryptionOptions((encryptionOptions) ->
-                                                                 encryptionOptions.withEnabled(true)
-                                                                                  .withKeyStore(TlsTestUtils.SERVER_KEYSTORE_PATH)
-                                                                                  .withKeyStorePassword(TlsTestUtils.SERVER_KEYSTORE_PASSWORD)
-                                                                                  .withTrustStore(TlsTestUtils.SERVER_TRUSTSTORE_PATH)
-                                                                                  .withTrustStorePassword(TlsTestUtils.SERVER_TRUSTSTORE_PASSWORD)
-                                                                                  .withRequireEndpointVerification(false)
-                                                                                  .withRequireClientAuth(EncryptionOptions.ClientAuth.OPTIONAL));
-    }
-
-    /**
-     *  Initialize Native Transport for test that need it.
-     */
-    public static void requireNetwork() throws ConfigurationException
-    {
-        requireNetwork(server -> {}, cluster -> {});
-    }
-
-    /**
-     *  Initialize Native Transport for the tests that need it.
-     */
-    protected static void requireNetwork(Consumer<Server.Builder> serverConfigurator,
-                                         Consumer<Cluster.Builder> clusterConfigurator) throws ConfigurationException
+    // lazy initialization for all tests that require Java Driver
+    protected static void requireNetwork(Consumer<Server.Builder> decorator) throws ConfigurationException
     {
         if (server != null)
             return;
 
-        clusterBuilderConfigurator = clusterConfigurator;
-
         startServices();
-        startServer(serverConfigurator);
+        initializeNetwork(decorator, null);
+        Nodes.Instance.persistLocalMetadata();
     }
 
     private static void startServices()
     {
         VirtualKeyspaceRegistry.instance.register(VirtualSchemaKeyspace.instance);
-        MessagingService.instance().waitUntilListeningUnchecked();
+        VirtualKeyspaceRegistry.instance.register(SystemViewsKeyspace.instance);
         StorageService.instance.initServer();
         SchemaLoader.startGossiper();
     }
 
     protected static void reinitializeNetwork()
     {
-        reinitializeNetwork(server -> {}, cluster -> {});
+        reinitializeNetwork(null);
     }
 
-    protected static void reinitializeNetwork(Consumer<Server.Builder> serverConfigurator,
-                                              Consumer<Cluster.Builder> clusterConfigurator)
+    protected static void reinitializeNetwork(Consumer<Cluster.Builder> clusterConfigurator)
     {
         if (server != null && server.isRunning())
         {
@@ -678,65 +600,21 @@ public abstract class CQLTester
         clusters.clear();
         sessions.clear();
 
-        clusterBuilderConfigurator = clusterConfigurator;
+        initializeNetwork(server -> {}, clusterConfigurator);
+    }
 
-        startServer(serverConfigurator);
+    private static void initializeNetwork(Consumer<Server.Builder> decorator, Consumer<Cluster.Builder> clusterConfigurator)
+    {
+        startServer(decorator);
     }
 
     private static void startServer(Consumer<Server.Builder> decorator)
     {
-        nativePort = getAutomaticallyAllocatedPort(nativeAddr);
         Server.Builder serverBuilder = new Server.Builder().withHost(nativeAddr).withPort(nativePort);
         decorator.accept(serverBuilder);
         server = serverBuilder.build();
-        ClientMetrics.instance.init(server);
+        ClientMetrics.instance.init(Collections.singleton(server));
         server.start();
-    }
-
-    private static Cluster initClientCluster(User user, ProtocolVersion version, boolean useEncryption, boolean useClientCert)
-    {
-        SocketOptions socketOptions =
-                new SocketOptions().setConnectTimeoutMillis(TEST_DRIVER_CONNECTION_TIMEOUT_MS.getInt()) // default is 5000
-                                   .setReadTimeoutMillis(TEST_DRIVER_READ_TIMEOUT_MS.getInt()); // default is 12000
-
-        logger.info("Timeouts: {} / {}", socketOptions.getConnectTimeoutMillis(), socketOptions.getReadTimeoutMillis());
-
-        Cluster.Builder builder = Cluster.builder()
-                                         .withoutJMXReporting()
-                                         .addContactPoints(nativeAddr)
-                                         .withClusterName("Test Cluster")
-                                         .withPort(nativePort)
-                                         .withSocketOptions(socketOptions)
-                                         .withNettyOptions(IMMEDIATE_CONNECTION_SHUTDOWN_NETTY_OPTIONS);
-
-        if (user != null)
-            builder.withCredentials(user.username, user.password);
-
-        if (useEncryption)
-        {
-            try
-            {
-                builder.withSSL(TlsTestUtils.getSSLOptions(useClientCert));
-            }
-            catch (SSLException e)
-            {
-                // generally this should work.
-                throw new RuntimeException(e);
-            }
-        }
-
-        if (version.isBeta())
-            builder = builder.allowBetaProtocolVersion();
-        else
-            builder = builder.withProtocolVersion(com.datastax.driver.core.ProtocolVersion.fromInt(version.asInt()));
-
-        clusterBuilderConfigurator.accept(builder);
-
-        Cluster cluster = builder.build();
-
-        logger.info("Started Java Driver instance for protocol version {}", version);
-
-        return cluster;
     }
 
     protected void dropPerTestKeyspace() throws Throwable
@@ -771,6 +649,16 @@ public abstract class CQLTester
         return Keyspace.open(keyspace).getColumnFamilyStore(table);
     }
 
+    public ColumnMetadata getColumn(String name)
+    {
+        return getCurrentColumnFamilyStore().metadata.get().getColumn(ColumnIdentifier.getInterned(name, true));
+    }
+
+    public ColumnMetadata getDroppedColumn(String name)
+    {
+        return getCurrentColumnFamilyStore().metadata.get().getDroppedColumn(ColumnIdentifier.getInterned(name, true).bytes);
+    }
+
     public void flush(boolean forceFlush)
     {
         if (forceFlush)
@@ -784,57 +672,19 @@ public abstract class CQLTester
 
     public void flush(String keyspace)
     {
-        ColumnFamilyStore store = getCurrentColumnFamilyStore(keyspace);
+        flush(keyspace, currentTable());
+    }
+
+    public void flush(String keyspace, String table)
+    {
+        ColumnFamilyStore store = getColumnFamilyStore(keyspace, table);
         if (store != null)
-            Util.flush(store);
-    }
-
-    public void flush(String keyspace, String table1, String... tables)
-    {
-        tables = ArrayUtils.add(tables, table1);
-        for (ColumnFamilyStore store : getTables(keyspace, tables))
-            Util.flush(store);
-    }
-
-    private List<ColumnFamilyStore> getTables(String keyspace, String[] tables)
-    {
-        List<ColumnFamilyStore> stores = new ArrayList<>(tables.length);
-        for (String name : tables)
-            stores.add(getColumnFamilyStore(keyspace, name));
-        return stores;
+            store.forceBlockingFlush(UNIT_TESTS);
     }
 
     public void disableCompaction(String keyspace)
     {
-        ColumnFamilyStore store = getCurrentColumnFamilyStore(keyspace);
-        if (store != null)
-            store.disableAutoCompaction();
-    }
-
-    public void compact()
-    {
-         ColumnFamilyStore store = getCurrentColumnFamilyStore();
-         if (store != null)
-             store.forceMajorCompaction();
-    }
-
-    public void compact(String keyspace, String table1, String... tables)
-    {
-        tables = ArrayUtils.add(tables, table1);
-        for (ColumnFamilyStore store : getTables(keyspace, tables))
-            store.forceMajorCompaction();
-    }
-
-    public void forceCompactAll()
-    {
-        ColumnFamilyStore store = getCurrentColumnFamilyStore();
-        if (store != null)
-            FBUtilities.waitOnFuture(Util.compactAll(store, FBUtilities.nowInSeconds()));
-    }
-
-    public void disableCompaction()
-    {
-        disableCompaction(KEYSPACE);
+        disableCompaction(keyspace, currentTable());
     }
 
     public void disableCompaction(String keyspace, String table)
@@ -842,6 +692,30 @@ public abstract class CQLTester
         ColumnFamilyStore store = getColumnFamilyStore(keyspace, table);
         if (store != null)
             store.disableAutoCompaction();
+    }
+
+    public void compact()
+    {
+        compact(KEYSPACE, currentTable());
+    }
+
+    public void compact(String keyspace, String table)
+    {
+        ColumnFamilyStore store = getColumnFamilyStore(keyspace, table);
+        if (store != null)
+            store.forceMajorCompaction();
+    }
+
+    public void compact(String keyspace)
+    {
+        ColumnFamilyStore store = getCurrentColumnFamilyStore(keyspace);
+        if (store != null)
+            store.forceMajorCompaction();
+    }
+
+    public void disableCompaction()
+    {
+        disableCompaction(KEYSPACE);
     }
 
     public void enableCompaction(String keyspace)
@@ -922,6 +796,21 @@ public abstract class CQLTester
         return keyspaces.get(keyspaces.size() - 1);
     }
 
+    protected String currentIndex()
+    {
+        if (indexes.isEmpty())
+            return null;
+        return indexes.get(indexes.size() - 1);
+    }
+
+    protected Collection<String> currentTables()
+    {
+        if (tables == null || tables.isEmpty())
+            return ImmutableList.of();
+
+        return new ArrayList<>(tables);
+    }
+
     protected ByteBuffer unset()
     {
         return ByteBufferUtil.UNSET_BYTE_BUFFER;
@@ -958,14 +847,14 @@ public abstract class CQLTester
 
     protected String createTypeName()
     {
-        String typeName = createSchemaElementName(TYPE, null);
+        String typeName = String.format("type_%02d", seqNumber.getAndIncrement());
         types.add(typeName);
         return typeName;
     }
 
     protected String createFunctionName(String keyspace)
     {
-        return createSchemaElementName(FUNCTION, keyspace);
+        return String.format("%s.function_%02d", keyspace, seqNumber.getAndIncrement());
     }
 
     protected void registerFunction(String functionName, String argTypes)
@@ -990,7 +879,7 @@ public abstract class CQLTester
 
     protected String createAggregateName(String keyspace)
     {
-        return createSchemaElementName(AGGREGATE, keyspace);
+        return String.format("%s.aggregate_%02d", keyspace, seqNumber.getAndIncrement());
     }
 
     protected void registerAggregate(String aggregateName, String argTypes)
@@ -1038,30 +927,21 @@ public abstract class CQLTester
 
     protected String createKeyspaceName()
     {
-        String currentKeyspace = createSchemaElementName(SchemaElement.SchemaElementType.KEYSPACE, null);
+        String currentKeyspace = String.format("keyspace_%02d", seqNumber.getAndIncrement());
         keyspaces.add(currentKeyspace);
         return currentKeyspace;
     }
 
-    private String createSchemaElementName(SchemaElement.SchemaElementType type, String keyspace)
-    {
-        String prefix = keyspace == null ? "" : keyspace + '.';
-        String typeName = type == MATERIALIZED_VIEW ? "mv" : toLowerCaseLocalized(type.name());
-        int sequence = seqNumber.getAndIncrement();
-        int usedSpaceSoFar = prefix.length() + typeName.length() + Math.max(2, numberOfDigits(sequence)) + 1;
-        String testMethodName = StringUtils.truncate(getTestMethodName(), SchemaConstants.NAME_LENGTH - usedSpaceSoFar);
-        return String.format("%s%s%s_%02d", prefix, typeName, testMethodName, sequence);
-    }
-
-    private int numberOfDigits(int i)
-    {
-        assert i >= 0;
-        return i == 0 ? 1 : (int) (Math.log10(i) + 1);
-    }
-
-    protected String createTable(String query)
+    public String createTable(String query)
     {
         return createTable(KEYSPACE, query);
+    }
+
+    protected String createViewName()
+    {
+        String currentView = "view_" + seqNumber.getAndIncrement();
+        views.add(currentView);
+        return currentView;
     }
 
     protected String createTable(String keyspace, String query)
@@ -1085,7 +965,7 @@ public abstract class CQLTester
 
     protected String createTableName(String tableName)
     {
-        String currentTable = tableName == null ? createSchemaElementName(TABLE, null) : tableName;
+        String currentTable = tableName == null ? String.format("table_%02d", seqNumber.getAndIncrement()) : tableName;
         tables.add(currentTable);
         return currentTable;
     }
@@ -1096,119 +976,6 @@ public abstract class CQLTester
         String fullQuery = formatQuery(query);
         logger.info(fullQuery);
         QueryProcessor.executeOnceInternal(fullQuery);
-    }
-
-    /**
-     * Creates a materialized view, waiting for the completion of its builder tasks.
-     *
-     * @param query the {@code CREATE VIEW} query, with {@code %s} placeholders for the view and table names
-     * @return the name of the created view
-     */
-    protected String createView(String query)
-    {
-        return createView(null, query);
-    }
-
-    /**
-     * Creates a materialized view, waiting for the completion of its builder tasks.
-     *
-     * @param viewName the name of the view to be created, or {@code null} for using an automatically generated a name
-     * @param query the {@code CREATE VIEW} query, with {@code %s} placeholders for the view and table names
-     * @return the name of the created view
-     */
-    protected String createView(String viewName, String query)
-    {
-        String currentView = createViewAsync(viewName, query);
-        waitForViewBuild(currentView);
-        return currentView;
-    }
-
-    /**
-     * Creates a materialized view, without waiting for the completion of its builder tasks.
-     *
-     * @param query the {@code CREATE VIEW} query, with {@code %s} placeholders for the view and table names
-     * @return the name of the created view
-     */
-    protected String createViewAsync(String query)
-    {
-        return createViewAsync(null, query);
-    }
-
-    /**
-     * Creates a materialized view, without waiting for the completion of its builder tasks.
-     *
-     * @param viewName the name of the view to be created, or {@code null} for using an automatically generated a name
-     * @param query the {@code CREATE VIEW} query, with {@code %s} placeholders for the view and table names
-     * @return the name of the created view
-     */
-    protected String createViewAsync(String viewName, String query)
-    {
-        String currentView = viewName == null ? createViewName() : viewName;
-        String fullQuery = String.format(query, KEYSPACE + "." + currentView, KEYSPACE + "." + currentTable());
-        logger.info(fullQuery);
-        schemaChange(fullQuery);
-        return currentView;
-    }
-
-    protected void dropView()
-    {
-        dropView(currentView());
-    }
-
-    protected void dropView(String view)
-    {
-        dropFormattedTable(String.format("DROP MATERIALIZED VIEW IF EXISTS %s.%s", KEYSPACE, view));
-        views.remove(view);
-    }
-
-    protected String createViewName()
-    {
-        String currentView = createSchemaElementName(MATERIALIZED_VIEW, null);
-        views.add(currentView);
-        return currentView;
-    }
-
-    protected List<String> getViews()
-    {
-        return copy(views);
-    }
-
-    protected void updateView(String query, Object... params) throws Throwable
-    {
-        updateView(getDefaultVersion(), query, params);
-    }
-
-    protected void updateView(ProtocolVersion version, String query, Object... params) throws Throwable
-    {
-        executeNet(version, query, params);
-        waitForViewMutations();
-    }
-
-    /**
-     * Waits for any pending asynchronous materialized view mutations.
-     */
-    protected static void waitForViewMutations()
-    {
-        Awaitility.await()
-                  .atMost(10, TimeUnit.MINUTES)
-                  .pollDelay(0, TimeUnit.MILLISECONDS)
-                  .pollInterval(1, TimeUnit.MILLISECONDS)
-                  .until(() -> Stage.VIEW_MUTATION.executor().getPendingTaskCount() == 0 &&
-                               Stage.VIEW_MUTATION.executor().getActiveTaskCount() == 0);
-    }
-
-    /**
-     * Waits for the building tasks of the specified materialized view.
-     *
-     * @param view the name of the view
-     */
-    protected void waitForViewBuild(String view)
-    {
-        Awaitility.await()
-                  .atMost(10, TimeUnit.MINUTES)
-                  .pollDelay(0, TimeUnit.MILLISECONDS)
-                  .pollInterval(10, TimeUnit.MILLISECONDS)
-                  .until(() -> SystemKeyspace.isViewBuilt(keyspace(), view));
     }
 
     protected void alterTable(String query)
@@ -1227,15 +994,16 @@ public abstract class CQLTester
 
     protected void dropTable(String query)
     {
-        dropTable(KEYSPACE, query);
+        dropFormattedTable(String.format(query, KEYSPACE + "." + currentTable()));
     }
 
-    protected void dropTable(String keyspace, String query)
+    public void dropView(String view)
     {
-        dropFormattedTable(String.format(query, keyspace + "." + currentTable()));
+        dropFormattedTable(String.format("DROP MATERIALIZED VIEW IF EXISTS %s.%s", KEYSPACE, view));
+        views.remove(view);
     }
 
-    private void dropFormattedTable(String formattedQuery)
+    protected void dropFormattedTable(String formattedQuery)
     {
         logger.info(formattedQuery);
         schemaChange(formattedQuery);
@@ -1247,7 +1015,7 @@ public abstract class CQLTester
      * @param query the index creation query
      * @return the name of the created index
      */
-    protected String createIndex(String query)
+    public String createIndex(String query)
     {
         return createIndex(KEYSPACE, query);
     }
@@ -1295,6 +1063,7 @@ public abstract class CQLTester
     {
         logger.info(formattedQuery);
         Pair<String, String> qualifiedIndexName = getCreateIndexName(keyspace, formattedQuery);
+        indexes.add(qualifiedIndexName.right);
         schemaChange(formattedQuery);
         return qualifiedIndexName;
     }
@@ -1329,19 +1098,29 @@ public abstract class CQLTester
 
         index = ParseUtils.isQuoted(index, '\"')
                 ? ParseUtils.unDoubleQuote(index)
-                : toLowerCaseLocalized(index);
+                : index.toLowerCase();
 
         return Pair.create(keyspace, index);
     }
 
     public void waitForTableIndexesQueryable()
     {
-        waitForTableIndexesQueryable(currentTable());
+        waitForTableIndexesQueryable(60);
     }
 
-    public void waitForTableIndexesQueryable(String table)
+    public void waitForTableIndexesQueryable(int seconds)
     {
-        waitForTableIndexesQueryable(KEYSPACE, table);
+        waitForTableIndexesQueryable(currentTable(), seconds);
+    }
+
+    public void waitForTableIndexesQueryable(String table, int seconds)
+    {
+        waitForTableIndexesQueryable(KEYSPACE, table, seconds);
+    }
+
+    public void waitForTableIndexesQueryable(String keyspace, String table)
+    {
+        waitForTableIndexesQueryable(keyspace, table, 60);
     }
 
     /**
@@ -1349,10 +1128,11 @@ public abstract class CQLTester
      *
      * @param keyspace the table keyspace name
      * @param table the table name
+     * @param seconds the maximum time to wait for the indexes to be queryable
      */
-    public void waitForTableIndexesQueryable(String keyspace, String table)
+    public void waitForTableIndexesQueryable(String keyspace, String table, int seconds)
     {
-        waitForAssert(() -> Assertions.assertThat(getNotQueryableIndexes(keyspace, table)).isEmpty(), 60, TimeUnit.SECONDS);
+        waitForAssert(() -> Assertions.assertThat(getNotQueryableIndexes(keyspace, table)).isEmpty(), seconds, TimeUnit.SECONDS);
     }
 
     public void waitForIndexQueryable(String index)
@@ -1368,7 +1148,20 @@ public abstract class CQLTester
      */
     public void waitForIndexQueryable(String keyspace, String index)
     {
-        waitForAssert(() -> assertTrue(isIndexQueryable(keyspace, index)), 60, TimeUnit.SECONDS);
+        waitForIndexQueryable(keyspace, index, 1, TimeUnit.MINUTES);
+    }
+
+    /**
+     * Index creation is asynchronous. This method waits until the specified index is queryable.
+     *
+     * @param keyspace the index keyspace name
+     * @param index the index name
+     * @param timeout the timeout
+     * @param unit the timeout unit
+     */
+    public void waitForIndexQueryable(String keyspace, String index, long timeout, TimeUnit unit)
+    {
+        waitForAssert(() -> assertTrue(isIndexQueryable(keyspace, index)), timeout, unit);
     }
 
     protected void waitForIndexBuilds(String index)
@@ -1430,6 +1223,34 @@ public abstract class CQLTester
         return manager.isIndexQueryable(index);
     }
 
+    protected boolean areAllTableIndexesQueryable()
+    {
+        return areAllTableIndexesQueryable(KEYSPACE, currentTable());
+    }
+
+    protected boolean areAllTableIndexesQueryable(String keyspace, String table)
+    {
+        ColumnFamilyStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
+        for (Index index : cfs.indexManager.listIndexes())
+        {
+            if (!cfs.indexManager.isIndexQueryable(index))
+                return false;
+        }
+        return true;
+    }
+
+    protected boolean indexNeedsFullRebuild(String index)
+    {
+        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(currentTable());
+        return cfs.indexManager.needsFullRebuild(index);
+    }
+
+    protected void verifyInitialIndexFailed(String indexName)
+    {
+        // Verify that the initial index build fails...
+        waitForAssert(() -> assertTrue(indexNeedsFullRebuild(indexName)));
+    }
+
     @Nullable
     protected SecondaryIndexManager getIndexManager(String keyspace, String indexName)
     {
@@ -1459,11 +1280,28 @@ public abstract class CQLTester
         QueryProcessor.executeOnceInternal(fullQuery);
     }
 
-    protected void dropIndex(String query) throws Throwable
+    public void dropIndex(String query)
     {
         String fullQuery = String.format(query, KEYSPACE);
         logger.info(fullQuery);
         schemaChange(fullQuery);
+    }
+
+    /**
+     *  Because the tracing executor is single threaded, submitting an empty event should ensure
+     *  that all tracing events mutations have been applied.
+     */
+    protected void waitForTracingEvents()
+    {
+        try
+        {
+            Stage.TRACING.executor().submit(() -> {}).get();
+        }
+        catch (Throwable t)
+        {
+            JVMStabilityInspector.inspectThrowable(t);
+            logger.error("Failed to wait for tracing events: {}", t);
+        }
     }
 
     protected static void assertSchemaChange(String query,
@@ -1485,33 +1323,15 @@ public abstract class CQLTester
 
     protected static void assertWarningsContain(Message.Response response, String message)
     {
-        assertWarningsContain(response.getWarnings(), message);
-    }
-
-    protected static void assertWarningsContain(List<String> warnings, String message)
-    {
+        List<String> warnings = response.getWarnings();
         Assert.assertNotNull(warnings);
         assertTrue(warnings.stream().anyMatch(s -> s.contains(message)));
     }
 
-    protected static void assertWarningsEquals(ResultSet rs, String... messages)
-    {
-        assertWarningsEquals(rs.getExecutionInfo().getWarnings(), messages);
-    }
-
-    protected static void assertWarningsEquals(List<String> warnings, String... messages)
-    {
-        Assert.assertNotNull(warnings);
-        Assertions.assertThat(messages).hasSameElementsAs(warnings);
-    }
-
     protected static void assertNoWarningContains(Message.Response response, String message)
     {
-        assertNoWarningContains(response.getWarnings(), message);
-    }
+        List<String> warnings = response.getWarnings();
 
-    protected static void assertNoWarningContains(List<String> warnings, String message)
-    {
         if (warnings != null)
         {
             assertFalse(warnings.stream().anyMatch(s -> s.contains(message)));
@@ -1526,20 +1346,18 @@ public abstract class CQLTester
             QueryState queryState = new QueryState(state);
 
             CQLStatement statement = QueryProcessor.parseStatement(query, queryState.getClientState());
-            statement.validate(state);
+            statement.validate(queryState);
 
             QueryOptions options = QueryOptions.forInternalCalls(Collections.<ByteBuffer>emptyList());
 
-            ResultMessage result = statement.executeLocally(queryState, options);
-            ClusterMetadataService.instance().log().waitForHighestConsecutive();
-            return result;
+            return statement.executeLocally(queryState, options);
         }
         catch (Exception e)
         {
             logger.info("Error performing schema change", e);
             if (e instanceof InvalidRequestException)
-                throw new InvalidRequestException(String.format("Error setting schema for test (query was: %s)", query), e);
-            throw new RuntimeException("Error setting schema for test (query was: " + query + ")", e);
+                throw e;
+            throw new RuntimeException(String.format("Error setting schema for test (query was: %s)", query), e);
         }
     }
 
@@ -1548,47 +1366,65 @@ public abstract class CQLTester
         return Schema.instance.getTableMetadata(KEYSPACE, currentTable());
     }
 
-    protected com.datastax.driver.core.ResultSet executeNet(ProtocolVersion protocolVersion, String query, Object... values)
+    protected com.khulnasoft.driver.core.ResultSet executeNet(ProtocolVersion protocolVersion, String query, Object... values)
     {
         return sessionNet(protocolVersion).execute(formatQuery(query), values);
     }
 
-    protected com.datastax.driver.core.ResultSet executeNet(String query, Object... values)
+    protected com.khulnasoft.driver.core.ResultSet executeNet(String query, Object... values)
     {
         return sessionNet().execute(formatQuery(query), values);
     }
 
-    protected com.datastax.driver.core.ResultSet executeViewNet(String query, Object... values)
+    protected com.khulnasoft.driver.core.ResultSet executeNet(Statement statement)
     {
-        return sessionNet().execute(formatViewQuery(query), values);
+        return executeNet(getDefaultVersion(), statement);
     }
 
-    protected com.datastax.driver.core.ResultSet executeNet(ProtocolVersion protocolVersion, Statement statement)
+    protected com.khulnasoft.driver.core.ResultSet executeNet(ProtocolVersion protocolVersion, Statement statement)
     {
         return sessionNet(protocolVersion).execute(statement);
     }
 
-    protected com.datastax.driver.core.ResultSet executeNetWithPaging(ProtocolVersion version, String query, int pageSize, Object... values)
+    protected com.khulnasoft.driver.core.ResultSet executeNetWithPaging(ProtocolVersion version, String query, int pageSize) throws Throwable
     {
-        return sessionNet(version).execute(new SimpleStatement(formatQuery(query), values).setFetchSize(pageSize));
+        return sessionNet(version).execute(new SimpleStatement(formatQuery(query)).setFetchSize(pageSize));
     }
 
-    protected com.datastax.driver.core.ResultSet executeNetWithPaging(ProtocolVersion version, String query, String KS, int pageSize, Object... values)
+    protected com.khulnasoft.driver.core.ResultSet executeNetWithPaging(ProtocolVersion version, String query, String KS, int pageSize)
     {
-        return sessionNet(version).execute(new SimpleStatement(formatQuery(KS, query), values).setKeyspace(KS).setFetchSize(pageSize));
+        return sessionNet(version).execute(new SimpleStatement(formatQuery(KS, query)).setKeyspace(KS).setFetchSize(pageSize));
     }
 
-    protected com.datastax.driver.core.ResultSet executeNetWithPaging(String query, int pageSize, Object... values)
+    protected com.khulnasoft.driver.core.ResultSet executeNetWithPaging(String query, int pageSize) throws Throwable
     {
-        return sessionNet().execute(new SimpleStatement(formatQuery(query), values).setFetchSize(pageSize));
+        return sessionNet().execute(new SimpleStatement(formatQuery(query)).setFetchSize(pageSize));
     }
 
-    protected com.datastax.driver.core.ResultSet executeNetWithoutPaging(String query)
+    /**
+     * Use the specified user for executing the queries over the network.
+     * @param username the user name
+     * @param password the user password
+     */
+    public void useUser(String username, String password)
     {
-        return executeNetWithPaging(query, Integer.MAX_VALUE);
+        this.user = new User(username, password);
     }
 
-    protected Session sessionNet()
+    /**
+     * Use the super user for executing the queries over the network.
+     */
+    public void useSuperUser()
+    {
+        this.user = SUPER_USER;
+    }
+
+    public boolean isSuperUser()
+    {
+        return SUPER_USER.equals(user);
+    }
+
+    public Session sessionNet()
     {
         return sessionNet(getDefaultVersion());
     }
@@ -1600,15 +1436,89 @@ public abstract class CQLTester
         return getSession(protocolVersion);
     }
 
-    private Session getSession(ProtocolVersion protocolVersion)
+    protected Session getSession(ProtocolVersion protocolVersion)
     {
         Cluster cluster = getCluster(protocolVersion);
-        return sessions.computeIfAbsent(new ClusterSettings(user, protocolVersion, useEncryption, useClientCert), settings -> cluster.connect());
+        return sessions.computeIfAbsent(Pair.create(user, protocolVersion), userProto -> cluster.connect());
     }
 
-    protected Cluster getCluster(ProtocolVersion protocolVersion)
+    private Cluster getCluster(ProtocolVersion protocolVersion)
     {
-        return clusters.computeIfAbsent(new ClusterSettings(user, protocolVersion, useEncryption, useClientCert), settings -> initClientCluster(user, protocolVersion, useEncryption, useClientCert));
+        return clusters.computeIfAbsent(Pair.create(user, protocolVersion),
+                                        userProto -> initClientCluster(user, protocolVersion));
+    }
+
+    private Cluster initClientCluster(User user, ProtocolVersion version)
+    {
+        Pair<User, ProtocolVersion> key = Pair.create(user, version);
+        Cluster cluster = clusters.get(key);
+        if (cluster != null)
+            return cluster;
+
+        Cluster.Builder builder = clusterBuilder(version);
+        if (user != null)
+            builder.withCredentials(user.username, user.password);
+        cluster = builder.build();
+
+        logger.info("Started Java Driver session for {} with protocol version {}", user, version);
+
+        return cluster;
+    }
+
+    protected void closeClientCluster(String username, String password)
+    {
+        // Close driver cluster belonging to user
+        User user = new User(username, password);
+        for (ProtocolVersion protocolVersion : PROTOCOL_VERSIONS)
+        {
+            closeClientCluster(user, protocolVersion);
+        }
+    }
+
+    private void closeClientCluster(User user, ProtocolVersion protocolVersion)
+    {
+        Pair<User, ProtocolVersion> key = Pair.create(user, protocolVersion);
+        Session session = sessions.remove(key);
+        if (session != null)
+        {
+            session.close();
+        }
+        
+        Cluster cluster = clusters.remove(key);
+        if (cluster != null)
+        {
+            cluster.close();
+        }
+
+        logger.info("Closed Java Driver session for {} with protocol version {}", user, protocolVersion);
+    }
+
+    public static Cluster.Builder clusterBuilder(ProtocolVersion version)
+    {
+        Cluster.Builder builder = clusterBuilder();
+        if (version.isBeta())
+            builder = builder.allowBetaProtocolVersion();
+        else
+            builder = builder.withProtocolVersion(com.khulnasoft.driver.core.ProtocolVersion.fromInt(version.asInt()));
+        return builder;
+    }
+
+    public static Cluster.Builder clusterBuilder()
+    {
+        SocketOptions socketOptions = new SocketOptions()
+            .setConnectTimeoutMillis(Integer.getInteger("cassandra.test.driver.connection_timeout_ms", DEFAULT_CONNECT_TIMEOUT_MILLIS)) // default is 5000
+            .setReadTimeoutMillis(Integer.getInteger("cassandra.test.driver.read_timeout_ms", DEFAULT_READ_TIMEOUT_MILLIS)); // default is 12000
+
+        logger.info("Timeouts: {} / {}", socketOptions.getConnectTimeoutMillis(), socketOptions.getReadTimeoutMillis());
+
+        return Cluster.builder()
+                      .addContactPoints(nativeAddr)
+                      .withPort(nativePort)
+                      .withClusterName("Test Cluster")
+                      .withoutJMXReporting()
+                      .withSocketOptions(socketOptions)
+                      .withNettyOptions(IMMEDIATE_CONNECTION_SHUTDOWN_NETTY_OPTIONS)
+                      .withPoolingOptions(new PoolingOptions().setPoolTimeoutMillis(10000));
     }
 
     protected SimpleClient newSimpleClient(ProtocolVersion version) throws IOException
@@ -1628,36 +1538,16 @@ public abstract class CQLTester
         return currentTable == null ? query : String.format(query, keyspace + "." + currentTable);
     }
 
-    public String formatViewQuery(String query)
-    {
-        return formatViewQuery(KEYSPACE, query);
-    }
-
-    public String formatViewQuery(String keyspace, String query)
-    {
-        String currentView = currentView();
-        return currentView == null ? query : String.format(query, keyspace + "." + currentView);
-    }
-
     protected ResultMessage.Prepared prepare(String query) throws Throwable
     {
         return QueryProcessor.instance.prepare(formatQuery(query), ClientState.forInternalCalls());
     }
 
-    protected UntypedResultSet execute(String query, Object... values)
+    public UntypedResultSet execute(String query, Object... values)
     {
         return executeFormattedQuery(formatQuery(query), values);
     }
 
-    public UntypedResultSet executeView(String query, Object... values) throws Throwable
-    {
-        return executeFormattedQuery(formatViewQuery(KEYSPACE, query), values);
-    }
-
-    /**
-     * Executes the provided query using the {@link ClientState#forInternalCalls()} as the expected ClientState. Note:
-     * this means permissions checking will not apply and queries will proceed regardless of role or guardrails.
-     */
     public UntypedResultSet executeFormattedQuery(String query, Object... values)
     {
         UntypedResultSet rs;
@@ -1696,23 +1586,6 @@ public abstract class CQLTester
         return rs;
     }
 
-    public static int compareNetRows(Row r1, Row r2)
-    {
-        Comparator<ByteBuffer> bufComp = Comparator.nullsFirst(Comparator.naturalOrder());
-        for (int c = 0; c < Math.min(r1.getColumnDefinitions().size(), r2.getColumnDefinitions().size()); c++)
-        {
-            DataType t1 = r1.getColumnDefinitions().getType(c);
-            DataType t2 = r2.getColumnDefinitions().getType(c);
-            if (!t1.equals(t2))
-                return t1.getName().toString().compareTo(t2.getName().toString());
-
-            int cmp = bufComp.compare(r1.getBytesUnsafe(c), r2.getBytesUnsafe(c));
-            if (cmp != 0)
-                return cmp;
-        }
-        return Integer.compare(r1.getColumnDefinitions().size(), r2.getColumnDefinitions().size());
-    }
-
     protected void assertRowsNet(ResultSet result, Object[]... rows)
     {
         assertRowsNet(getDefaultVersion(), result, rows);
@@ -1720,7 +1593,6 @@ public abstract class CQLTester
 
     protected void assertRowsNet(ProtocolVersion protocolVersion, ResultSet result, Object[]... rows)
     {
-        com.datastax.driver.core.ProtocolVersion version = com.datastax.driver.core.ProtocolVersion.fromInt(protocolVersion.asInt());
         // necessary as we need cluster objects to supply CodecRegistry.
         // It's reasonably certain that the network setup has already been done
         // by the time we arrive at this point, but adding this check doesn't hurt
@@ -1747,32 +1619,24 @@ public abstract class CQLTester
 
             for (int j = 0; j < meta.size(); j++)
             {
-                String name = meta.getName(j);
                 DataType type = meta.getType(j);
-                com.datastax.driver.core.TypeCodec<Object> codec = getCluster(protocolVersion).getConfiguration()
+                com.khulnasoft.driver.core.TypeCodec<Object> codec = getCluster(protocolVersion).getConfiguration()
                                                                                               .getCodecRegistry()
                                                                                               .codecFor(type);
-                ByteBuffer expectedByteValue = expected[j] instanceof ByteBuffer ? (ByteBuffer) expected[j] : codec.serialize(expected[j], version);
-                // Do not use the by-name lookup as the client calls toLowerCase, so may have cases where "J" and "j" are the same!
-                // See https://datastax-oss.atlassian.net/browse/JAVA-3067
-//                ByteBuffer actualValue = actual.getBytesUnsafe(name);
-                ByteBuffer actualValue = actual.getBytesUnsafe(j);
+                ByteBuffer expectedByteValue = codec.serialize(expected[j], com.khulnasoft.driver.core.ProtocolVersion.fromInt(protocolVersion.asInt()));
+                int expectedBytes = expectedByteValue == null ? -1 : expectedByteValue.remaining();
+                ByteBuffer actualValue = actual.getBytesUnsafe(meta.getName(j));
+                int actualBytes = actualValue == null ? -1 : actualValue.remaining();
                 if (!Objects.equal(expectedByteValue, actualValue))
-                {
-                    if (isEmptyContainerNull(type, codec, version, expectedByteValue, actualValue))
-                        continue;
-                    int expectedBytes = expectedByteValue == null ? -1 : expectedByteValue.remaining();
-                    int actualBytes = actualValue == null ? -1 : actualValue.remaining();
                     Assert.fail(String.format("Invalid value for row %d column %d (%s of type %s), " +
                                               "expected <%s> (%d bytes) but got <%s> (%d bytes) " +
                                               "(using protocol version %s)",
-                                              i, j, name, type,
-                                              codec.format(expected[j] instanceof ByteBuffer ? codec.deserialize((ByteBuffer) expected[j], version) : expected[j]),
+                                              i, j, meta.getName(j), type,
+                                              codec.format(expected[j]),
                                               expectedBytes,
-                                              safeToString(() -> codec.format(codec.deserialize(actualValue, version))),
+                                              codec.format(codec.deserialize(actualValue, com.khulnasoft.driver.core.ProtocolVersion.fromInt(protocolVersion.asInt()))),
                                               actualBytes,
                                               protocolVersion));
-                }
             }
             i++;
         }
@@ -1792,147 +1656,6 @@ public abstract class CQLTester
                                         rows.length>i ? "less" : "more", rows.length, i, protocolVersion), i == rows.length);
     }
 
-    public void assertRowsContains(ResultSet result, Object[]... rows)
-    {
-        assertRowsContains(getCluster(getDefaultVersion()), result, rows);
-    }
-
-    public void assertRowsContains(ResultSet result, List<Object[]> rows)
-    {
-        assertRowsContains(getCluster(getDefaultVersion()), result, rows);
-    }
-
-    public static void assertRowsContains(Cluster cluster, ResultSet result, Object[]... rows)
-    {
-        assertRowsContains(cluster, result, rows == null ? Collections.emptyList() : Arrays.asList(rows));
-    }
-
-    public static void assertRowsContains(Cluster cluster, ResultSet result, List<Object[]> rows)
-    {
-        if (result == null && rows.isEmpty())
-            return;
-        assertNotNull(String.format("No rows returned by query but %d expected", rows.size()), result);
-        assertTrue(result.iterator().hasNext());
-
-        // It is necessary that all rows match the column definitions
-        for (Object[] row : rows)
-        {
-            if (row == null || row.length == 0)
-                Assert.fail("Rows must not be null or empty");
-
-            if (result.getColumnDefinitions().size() == row.length)
-                continue;
-
-            Assert.fail(String.format("Rows do not match column definitions. Expected %d columns but got %d",
-                                      result.getColumnDefinitions().size(), row.length));
-        }
-
-        ColumnDefinitions defs = result.getColumnDefinitions();
-        int size = defs.size();
-        List<ByteBuffer[]> resultSetValues = StreamSupport.stream(result.spliterator(), false)
-                .map(row -> IntStream.range(0, size)
-                                .mapToObj(row::getBytesUnsafe)
-                                .toArray(ByteBuffer[]::new))
-                .collect(Collectors.toList());
-
-        AtomicInteger columnCounter = new AtomicInteger();
-        com.datastax.driver.core.ProtocolVersion version = com.datastax.driver.core.ProtocolVersion.fromInt(getDefaultVersion().asInt());
-        List<ByteBuffer[]> expectedRowsValues = rows.stream()
-                .map(row -> Stream.of(row)
-                        .map(cell -> {
-                            int index = columnCounter.getAndIncrement() % size;
-                            return cell instanceof ByteBuffer ? (ByteBuffer) cell :
-                                    cluster.getConfiguration()
-                                            .getCodecRegistry()
-                                            .codecFor(defs.getType(index))
-                                            .serialize(cell, version);
-                        })
-                        .toArray(ByteBuffer[]::new))
-                .collect(Collectors.toList());
-
-        int found = 0;
-        for (ByteBuffer[] expected : expectedRowsValues)
-            for (ByteBuffer[] actual : resultSetValues)
-                if (Arrays.equals(expected, actual))
-                    found++;
-
-        if (found == expectedRowsValues.size())
-            return;
-
-        Assert.fail(String.format("Result set does not contain expected rows. Result set %s doesn't contain %s",
-                resultSetValues.stream().map(e -> deserializeCells(e, cluster.getConfiguration().getCodecRegistry(),
-                        result.getColumnDefinitions(), version)).collect(Collectors.joining(", ")),
-                expectedRowsValues.stream().map(e -> deserializeCells(e, cluster.getConfiguration().getCodecRegistry(),
-                        result.getColumnDefinitions(), version)).collect(Collectors.joining(", "))));
-    }
-
-    private static String deserializeCells(ByteBuffer[] row,
-                                           com.datastax.driver.core.CodecRegistry codecRegistry,
-                                           ColumnDefinitions columnDefinitions,
-                                           com.datastax.driver.core.ProtocolVersion version)
-    {
-        AtomicInteger index = new AtomicInteger();
-        int size = columnDefinitions.size();
-        return Stream.of(row)
-                .map(b -> {
-                    int idx = index.getAndIncrement() % size;
-                    TypeCodec<Object> codec = codecRegistry.codecFor(columnDefinitions.getType(idx));
-                    return codec.format(codec.deserialize(b, version));
-                })
-                .collect(Collectors.joining(", ", "[", "]"));
-    }
-
-    private static String safeToString(Supplier<String> fn)
-    {
-        try
-        {
-            return fn.get();
-        }
-        catch (Throwable t)
-        {
-            return "Unexpected error: " + t.getMessage();
-        }
-    }
-
-    private static boolean isEmptyContainerNull(AbstractType<?> type,
-                                                ByteBuffer expectedByteValue, ByteBuffer actualValue)
-    {
-        // MAINTANCE : this MUST be in-sync with the DataType version
-
-        // TODO confirm this isn't a bug...
-        // There is an edge case, UDTs... its always UDTs that cause problems.... :shakes-fist:
-        // If the user writes a null for each column, then the whole tuple is null
-        if (type.isUDT() && actualValue == null)
-        {
-            List<ByteBuffer> cells = ((TupleType) type).unpack(expectedByteValue);
-            return cells.stream().allMatch(java.util.Objects::isNull);
-        }
-        return false;
-    }
-
-    private static boolean isEmptyContainerNull(DataType type,
-                                                com.datastax.driver.core.TypeCodec<Object> codec,
-                                                com.datastax.driver.core.ProtocolVersion version,
-                                                ByteBuffer expectedByteValue, ByteBuffer actualValue)
-    {
-        // MAINTANCE : this MUST be in-sync with the AbstractType version
-
-        // TODO confirm this isn't a bug...
-        // There is an edge case, UDTs... its always UDTs that cause problems.... :shakes-fist:
-        // If the user writes a null for each column, then the whole tuple is null
-        if (type instanceof UserType && actualValue == null)
-        {
-            UDTValue value = (UDTValue) codec.deserialize(expectedByteValue, version);
-            for (int c = 0; c < value.getType().size(); c++)
-            {
-                if (!value.isNull(c))
-                    return false;
-            }
-            return true;
-        }
-        return false;
-    }
-
     protected void assertRowCountNet(ResultSet r1, int expectedCount)
     {
         Assert.assertFalse("Received a null resultset when expected count was > 0", expectedCount > 0 && r1 == null);
@@ -1942,6 +1665,24 @@ public abstract class CQLTester
 
     public static void assertRows(UntypedResultSet result, Object[]... rows)
     {
+        assertRows(result, false, rows);
+    }
+
+    public static void assertRows(UntypedResultSet result, boolean printAssertedRows, Object[]... rows)
+    {
+        // Useful for manual debugging, but generally unnecessary on
+        if (printAssertedRows)
+        {
+            // Print all the rows
+            for (Object[] row : rows)
+            {
+                System.out.print("Expected row:");
+                for (Object column : row)
+                    System.out.print("  " + column);
+                System.out.println();
+            }
+        }
+
         if (result == null)
         {
             if (rows.length > 0)
@@ -1954,12 +1695,14 @@ public abstract class CQLTester
         int i = 0;
         while (iter.hasNext() && i < rows.length)
         {
+            if (rows[i] == null)
+                throw new IllegalArgumentException(String.format("Invalid expected value for row: %d. A row cannot be null.", i));
+
             Object[] expected = rows[i];
             UntypedResultSet.Row actual = iter.next();
 
-            Assert.assertEquals(String.format("Invalid number of (expected) values provided for row %d", i), expected == null ? 1 : expected.length, meta.size());
+            Assert.assertEquals(String.format("Invalid number of (expected) values provided for row %d", i), expected.length, meta.size());
 
-            StringBuilder error = new StringBuilder();
             for (int j = 0; j < meta.size(); j++)
             {
                 ColumnSpecification column = meta.get(j);
@@ -1972,21 +1715,15 @@ public abstract class CQLTester
                 {
                     Object actualValueDecoded = actualValue == null ? null : column.type.getSerializer().deserialize(actualValue);
                     if (!Objects.equal(expected != null ? expected[j] : null, actualValueDecoded))
-                    {
-                        if (isEmptyContainerNull(column.type, expectedByteValue, actualValue))
-                            continue;
-                        error.append(String.format("Invalid value for row %d column %d (%s of type %s), expected <%s> but got <%s>",
-                                                   i,
-                                                   j,
-                                                   column.name,
-                                                   column.type.asCQL3Type(),
-                                                   formatValue(expectedByteValue != null ? expectedByteValue.duplicate() : null, column.type),
-                                                   formatValue(actualValue, column.type))).append("\n");
-                    }
+                        Assert.fail(String.format("Invalid value for row %d column %d (%s of type %s), expected <%s> but got <%s>",
+                                                  i,
+                                                  j,
+                                                  column.name,
+                                                  column.type.asCQL3Type(),
+                                                  formatValue(expectedByteValue != null ? expectedByteValue.duplicate() : null, column.type),
+                                                  formatValue(actualValue, column.type)));
                 }
             }
-            if (error.length() > 0)
-                Assert.fail(error.toString());
             i++;
         }
 
@@ -2042,19 +1779,7 @@ public abstract class CQLTester
             Assert.assertEquals("Invalid number of (expected) values provided for row", expected.length, meta.size());
             List<ByteBuffer> expectedRow = new ArrayList<>(meta.size());
             for (int j = 0; j < meta.size(); j++)
-            {
-                try
-                {
-                    expectedRow.add(makeByteBuffer(expected[j], meta.get(j).type));
-                }
-                catch (Exception e)
-                {
-                    ColumnSpecification column = meta.get(j);
-                    AssertionError error = new AssertionError("Error with column '" + column.name + " " + column.type.asCQL3Type() + "'; " + e.getLocalizedMessage());
-                    error.addSuppressed(e);
-                    throw error;
-                }
-            }
+                expectedRow.add(makeByteBuffer(expected[j], meta.get(j).type));
             expectedRows.add(expectedRow);
         }
 
@@ -2204,24 +1929,6 @@ public abstract class CQLTester
         }
     }
 
-    protected void assertColumnNames(ResultSet result, String... expectedColumnNames)
-    {
-        if (result == null)
-        {
-            Assert.fail("No rows returned by query.");
-            return;
-        }
-
-        ColumnDefinitions columnDefinitions = result.getColumnDefinitions();
-        Assert.assertEquals("Got less columns than expected.", expectedColumnNames.length, columnDefinitions.size());
-
-        for (int i = 0, m = columnDefinitions.size(); i < m; i++)
-        {
-            String columnName = columnDefinitions.getName(i);
-            Assert.assertEquals(expectedColumnNames[i], columnName);
-        }
-    }
-
     protected void assertAllRows(Object[]... rows) throws Throwable
     {
         assertRows(execute("SELECT * FROM %s"), rows);
@@ -2232,56 +1939,39 @@ public abstract class CQLTester
         return expected;
     }
 
-    public static Object[][] rows(Object[]... rows)
-    {
-        return rows;
-    }
-
-    protected void assertEmpty(UntypedResultSet result) throws Throwable
+    protected void assertEmpty(UntypedResultSet result)
     {
         if (result != null && !result.isEmpty())
             throw new AssertionError(String.format("Expected empty result but got %d rows: %s \n", result.size(), makeRowStrings(result)));
     }
 
-    protected void assertInvalid(String query, Object... values) throws Throwable
+    protected void assertInvalid(String query, Object... values)
     {
         assertInvalidMessage(null, query, values);
     }
 
-    protected void assertInvalidMessage(String errorMessage, String query, Object... values) throws Throwable
+    protected void assertInvalidMessage(String errorMessage, String query, Object... values)
     {
         assertInvalidThrowMessage(errorMessage, null, query, values);
     }
 
-    protected void assertInvalidMessageNet(String errorMessage, String query, Object... values) throws Throwable
-    {
-        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT), errorMessage, null, query, values);
-    }
-
-    protected void assertInvalidThrow(Class<? extends Throwable> exception, String query, Object... values) throws Throwable
+    protected void assertInvalidThrow(Class<? extends Throwable> exception, String query, Object... values)
     {
         assertInvalidThrowMessage(null, exception, query, values);
     }
 
-    protected void assertInvalidThrowMessage(String errorMessage, Class<? extends Throwable> exception, String query, Object... values) throws Throwable
+    protected void assertInvalidThrowMessage(String errorMessage, Class<? extends Throwable> exception, String query, Object... values)
     {
         assertInvalidThrowMessage(Optional.empty(), errorMessage, exception, query, values);
     }
 
-    /**
-     * Asserts that the query provided throws the exceptions provided.
-     *
-     * NOTE: This method uses {@link ClientState#forInternalCalls()} which sets the {@link ClientState#isInternal} value
-     * to true, nullifying any system keyspace or other permissions checking for tables.
-     *
-     * If a protocol version > Integer.MIN_VALUE is supplied, executes
-     * the query via the java driver, mimicking a real client.
-     */
+    // if a protocol version > Integer.MIN_VALUE is supplied, executes
+    // the query via the java driver, mimicking a real client.
     protected void assertInvalidThrowMessage(Optional<ProtocolVersion> protocolVersion,
                                              String errorMessage,
                                              Class<? extends Throwable> exception,
                                              String query,
-                                             Object... values) throws Throwable
+                                             Object... values)
     {
         try
         {
@@ -2308,6 +1998,13 @@ public abstract class CQLTester
                 assertMessageContains(errorMessage, e);
             }
         }
+    }
+
+    public static List<String> warningsFromResultSet(List<String> ignoredWarnings, ResultSet rs)
+    {
+        return rs.getExecutionInfo().getWarnings()
+                 .stream().filter(w -> ignoredWarnings.stream().noneMatch(w::contains))
+                 .collect(Collectors.toList());
     }
 
     private static String queryInfo(String query, Object[] values)
@@ -2351,13 +2048,6 @@ public abstract class CQLTester
         }
     }
 
-    protected void assertInvalidRequestMessage(String errorMessage, String query, Object... values)
-    {
-        Assertions.assertThatThrownBy(() -> execute(query, values))
-                  .isInstanceOf(InvalidRequestException.class)
-                  .hasMessageContaining(errorMessage);
-    }
-
     /**
      * Asserts that the message of the specified exception contains the specified text.
      *
@@ -2370,31 +2060,9 @@ public abstract class CQLTester
                 e.getMessage().contains(text));
     }
 
-    /**
-     * Checks that the specified query is not authorized for the current user.
-     * @param errorMessage The expected error message
-     * @param query the query
-     * @param values the query parameters
-     */
-    protected void assertUnauthorizedQuery(String errorMessage, String query, Object... values) throws Throwable
-    {
-        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
-                                  errorMessage,
-                                  UnauthorizedException.class,
-                                  query,
-                                  values);
-    }
-
     @FunctionalInterface
-    public interface CheckedFunction
-    {
+    public interface CheckedFunction {
         void apply() throws Throwable;
-    }
-
-    @FunctionalInterface
-    public interface CheckedSupplier
-    {
-        ResultMessage get() throws Throwable;
     }
 
     /**
@@ -2405,9 +2073,48 @@ public abstract class CQLTester
      */
     public void beforeAndAfterFlush(CheckedFunction runnable) throws Throwable
     {
-        runnable.apply();
+        try
+        {
+            runnable.apply();
+        }
+        catch (Throwable t)
+        {
+            throw new AssertionError("Test failed before flush:\n" + t, t);
+        }
+
         flush();
-        runnable.apply();
+
+        try
+        {
+            runnable.apply();
+        }
+        catch (Throwable t)
+        {
+            throw new AssertionError("Test failed after flush:\n" + t, t);
+        }
+    }
+
+    /**
+     * Runs the given function before a flush, after a flush, and finally after a compaction of the table. This is
+     * useful for checking that behavior is the same whether data is in memtables, memtable-flushed-sstbales,
+     * compaction-built-sstables.
+     * @param runnable
+     * @throws Throwable
+     */
+    public void runThenFlushThenCompact(CheckedFunction runnable) throws Throwable
+    {
+        beforeAndAfterFlush(runnable);
+
+        compact();
+
+        try
+        {
+            runnable.apply();
+        }
+        catch (Throwable t)
+        {
+            throw new AssertionError("Test failed after compact:\n" + t, t);
+        }
     }
 
     private static String replaceValues(String query, Object[] values)
@@ -2620,7 +2327,7 @@ public abstract class CQLTester
         if (value instanceof ByteBuffer)
             return (ByteBuffer)value;
 
-        return type.decomposeUntyped(serializeTuples(value));
+        return type.decompose(serializeTuples(value));
     }
 
     private static String formatValue(ByteBuffer bb, AbstractType<?> type)
@@ -2637,14 +2344,7 @@ public abstract class CQLTester
             return ser.toString(ser.deserialize(bb));
         }
 
-        try
-        {
-            return type.getString(bb);
-        }
-        catch (Exception | Error e)
-        {
-            return "getString failed for type " + type.asCQL3Type() + ": " + e.getMessage();
-        }
+        return type.getString(bb);
     }
 
     protected TupleValue tuple(Object...values)
@@ -2669,26 +2369,53 @@ public abstract class CQLTester
         return new UserTypeValue(fieldNames, fieldValues);
     }
 
-    protected List<Object> list(Object...values)
+    protected Object list(Object...values)
     {
         return Arrays.asList(values);
     }
 
-    @SafeVarargs
-    protected final <T> Vector<T> vector(T... values)
+    /** @return a normalized vector with the given dimension */
+    public static Vector<Float> randomVectorBoxed(int dimension)
     {
-        return new Vector<>(values);
+        var floats = randomVector(dimension);
+        return vector(floats);
     }
 
-    protected Vector<Float> vector(float[] v)
+    public static ByteBuffer randomVectorSerialized(int dimension)
     {
-        var v2 = new Float[v.length];
+        var rawVector = randomVectorBoxed(dimension);
+        return VectorType.getInstance(FloatType.instance, dimension).getSerializer().serialize(rawVector);
+    }
+
+    public static float[] randomVector(int dimension)
+    {
+        // this can be called from concurrent threads so don't use getRandom()
+        var R = ThreadLocalRandom.current();
+
+        var vector = new float[dimension];
+        for (int i = 0; i < dimension; i++)
+        {
+            vector[i] = R.nextFloat();
+        }
+        normalize(vector);
+        return vector;
+    }
+
+    /** Normalize the given vector in-place */
+    protected static void normalize(float[] v)
+    {
+        var sum = 0.0f;
         for (int i = 0; i < v.length; i++)
-            v2[i] = v[i];
-        return new Vector<>(v2);
+        {
+            sum += v[i] * v[i];
+        }
+
+        sum = (float) Math.sqrt(sum);
+        for (int i = 0; i < v.length; i++)
+            v[i] /= sum;
     }
 
-    protected Set<Object> set(Object...values)
+    protected Object set(Object...values)
     {
         return ImmutableSet.copyOf(values);
     }
@@ -2719,7 +2446,7 @@ public abstract class CQLTester
         return m;
     }
 
-    protected com.datastax.driver.core.TupleType tupleTypeOf(ProtocolVersion protocolVersion, com.datastax.driver.core.DataType...types)
+    protected com.khulnasoft.driver.core.TupleType tupleTypeOf(ProtocolVersion protocolVersion, com.khulnasoft.driver.core.DataType...types)
     {
         requireNetwork();
         return getCluster(protocolVersion).getMetadata().newTupleType(types);
@@ -2736,12 +2463,7 @@ public abstract class CQLTester
         return metrics.get(metricName);
     }
 
-    private String getTestMethodName()
-    {
-        return decorateCQLWithTestNames && testName.getMethodName() != null ? '_' + toLowerCaseLocalized(testName.getMethodName()).replaceAll("[^\\w]", "_")
-                                                                            : "";
-    }
-
+    @Ignore // Check TinySegmentFlushingFailureTest for details why this annotation is needed here despite this is not a test
     public static class Vector<T> extends AbstractList<T>
     {
         private final T[] values;
@@ -2761,12 +2483,6 @@ public abstract class CQLTester
         public int size()
         {
             return values.length;
-        }
-
-        @Override
-        public String toString()
-        {
-            return Arrays.toString(values);
         }
     }
 
@@ -2875,15 +2591,10 @@ public abstract class CQLTester
 
         public ByteBuffer toByteBuffer()
         {
-            List<AbstractType<?>> types = new ArrayList<>(values.length);
-            List<ByteBuffer> bbs = new ArrayList<>(values.length);
-            for (Object value : values)
-            {
-                AbstractType<?> type = typeFor(value);
-                types.add(type);
-                bbs.add(makeByteBuffer(value, type));
-            }
-            return new TupleType(types).pack(bbs);
+            ByteBuffer[] bbs = new ByteBuffer[values.length];
+            for (int i = 0; i < values.length; i++)
+                bbs[i] = makeByteBuffer(values[i], typeFor(values[i]));
+            return TupleType.buildValue(bbs);
         }
 
         public String toCQLString()
@@ -2960,6 +2671,114 @@ public abstract class CQLTester
         }
     }
 
+    @Ignore // Check TinySegmentFlushingFailureTest for details why this annotation is needed here despite this is not a test
+    public static class Randomization
+    {
+        private long seed;
+        private Random random;
+
+        Randomization()
+        {
+            if (random == null)
+            {
+                seed = Long.getLong("cassandra.test.random.seed", System.nanoTime());
+                random = new Random(seed);
+            }
+        }
+
+        public void printSeedOnFailure()
+        {
+            System.err.println("Randomized test failed. To rerun test use -Dcassandra.test.random.seed=" + seed);
+        }
+
+        public Random getRandom()
+        {
+            return random;
+        }
+
+        public int nextInt()
+        {
+            return random.nextInt();
+        }
+
+        public int nextIntBetween(int minValue, int maxValue)
+        {
+            return RandomInts.randomIntBetween(random, minValue, maxValue);
+        }
+
+        public float nextFloatBetween(int minValue, int maxValue)
+        {
+            return random.nextFloat() * (maxValue - minValue) + minValue;
+        }
+
+        public long nextLong()
+        {
+            return random.nextLong();
+        }
+
+        public short nextShort()
+        {
+            return (short)random.nextInt(Short.MAX_VALUE + 1);
+        }
+
+        public byte nextByte()
+        {
+            return (byte)random.nextInt(Byte.MAX_VALUE + 1);
+        }
+
+        public BigInteger nextBigInteger(int minNumBits, int maxNumBits)
+        {
+            return new BigInteger(RandomInts.randomIntBetween(random, minNumBits, maxNumBits), random);
+        }
+
+        public BigDecimal nextBigDecimal(int minUnscaledValue, int maxUnscaledValue, int minScale, int maxScale)
+        {
+            return BigDecimal.valueOf(RandomInts.randomIntBetween(random, minUnscaledValue, maxUnscaledValue),
+                                      RandomInts.randomIntBetween(random, minScale, maxScale));
+        }
+
+        public float nextFloat()
+        {
+            return random.nextFloat();
+        }
+
+        public double nextDouble()
+        {
+            return random.nextDouble();
+        }
+
+        public String nextAsciiString(int minLength, int maxLength)
+        {
+            return RandomStrings.randomAsciiOfLengthBetween(random, minLength, maxLength);
+        }
+
+        public String nextTextString(int minLength, int maxLength)
+        {
+            return RandomStrings.randomRealisticUnicodeOfLengthBetween(random, minLength, maxLength);
+        }
+
+        public boolean nextBoolean()
+        {
+            return random.nextBoolean();
+        }
+
+        public void nextBytes(byte[] bytes)
+        {
+            random.nextBytes(bytes);
+        }
+    }
+
+    @Ignore // Check TinySegmentFlushingFailureTest for details why this annotation is needed here despite this is not a test
+    public static class FailureWatcher extends TestWatcher
+    {
+        @Override
+        protected void failed(Throwable e, Description description)
+        {
+            if (random != null)
+                random.printSeedOnFailure();
+        }
+    }
+
     private static class User
     {
         /**
@@ -2996,165 +2815,12 @@ public abstract class CQLTester
             User u = (User) o;
 
             return Objects.equal(username, u.username)
-                && Objects.equal(password, u.password);
-        }
-    }
-
-    /**
-     * Enhances {@link CQLTester} to make it easier for tests to leverage randomness.  This class is not the best way to
-     * leverage randomness as it won't run the tests against multiple seeds (so could take a long time to find faults)
-     *
-     * The main use case for this class is to take existing tests or tests patterns people wish to write, and make it easy
-     * and safe to add randomness.  One main advantage is that the node spun up has non-static configs, meaning that each
-     * test run can explore different spaces and avoid having to create a new yaml/CI pipeline to test different configs.
-     *
-     * When possible {@link Property#qt()} should be leveraged as it will rerun the test many times with different seeds.
-     */
-    public static abstract class Fuzzed extends CQLTester
-    {
-        private static RandomSource RANDOM;
-        private static long SEED;
-        private static String CONFIG = null;
-        protected static Gen<Map<String, Object>> CONFIG_GEN = null;
-
-        @Rule
-        public FailureWatcher failureRule = new FailureWatcher();
-
-        @BeforeClass
-        public static void setUpClass()
-        {
-            setupSeed();
-            try
-            {
-                updateConfigs();
-                prePrepareServer();
-
-                // Once per-JVM is enough
-                prepareServer();
-            }
-            catch (Throwable t)
-            {
-                throwPropertyError(t);
-            }
+                   && Objects.equal(password, u.password);
         }
 
-        protected static RandomSource random()
+        public String toString()
         {
-            if (RANDOM == null)
-                setupSeed();
-            return RANDOM;
-        }
-
-        protected static long seed()
-        {
-            return SEED;
-        }
-
-        protected static void setupSeed()
-        {
-            if (RANDOM != null) return;
-            SEED = TEST_RANDOM_SEED.getLong(new DefaultRandom().nextLong());
-            RANDOM = new DefaultRandom(SEED);
-        }
-
-        @Before
-        public void resetSeed()
-        {
-            RANDOM.setSeed(SEED);
-        }
-
-        protected static void updateConfigs()
-        {
-            if (CONFIG_GEN == null)
-                CONFIG_GEN = new ConfigGenBuilder().build();
-            Map<String, Object> config = CONFIG_GEN.next(RANDOM);
-            CONFIG = YamlConfigurationLoader.toYaml(config);
-
-            Config c = ConfigGenBuilder.prepare(DatabaseDescriptor.loadConfig());
-            YamlConfigurationLoader.updateFromMap(config, true, c);
-
-            DatabaseDescriptor.unsafeDaemonInitialization(() -> ConfigGenBuilder.sanitize(c));
-        }
-
-        public static class FailureWatcher extends TestWatcher
-        {
-            @Override
-            protected void failed(Throwable e, Description description)
-            {
-                throwPropertyError(e);
-            }
-        }
-
-        private static AssertionError throwPropertyError(Throwable e)
-        {
-            String seedProp = TEST_RANDOM_SEED.getKey();
-            StringBuilder sb = new StringBuilder();
-            sb.append("Property error detected:");
-            sb.append("\nSeed: ").append(SEED).append(" -- To rerun do -D").append(seedProp).append('=').append(SEED);
-            if (CONFIG != null)
-                sb.append("\nConfig:\n\t").append(CONFIG.replaceAll("\n", "\n\t"));
-            String message = e.toString();
-            sb.append("\nError:\n\t").append(message.replaceAll("\n", "\n\t"));
-            throw new AssertionError(sb.toString(), e);
-        }
-    }
-
-    public static abstract class InMemory extends CQLTester
-    {
-        protected static ListenableFileSystem fs = null;
-
-        /**
-         * Used by {@link #cleanupFileSystemListeners()} to know if file system listeners should be removed at the start
-         * of a test; can disable for cases where listeners are needed cross mutliple tests.
-         */
-        protected boolean cleanupFileSystemListeners = true;
-
-        @BeforeClass
-        public static void setUpClass()
-        {
-            fs = FileSystems.newGlobalInMemoryFileSystem();
-            CassandraRelevantProperties.IGNORE_MISSING_NATIVE_FILE_HINTS.setBoolean(true);
-            FileSystems.maybeCreateTmp();
-
-            CQLTester.setUpClass();
-        }
-        @Before
-        public void cleanupFileSystemListeners()
-        {
-            if (!cleanupFileSystemListeners)
-                return;
-            fs.clearListeners();
-        }
-    }
-
-    private static class ClusterSettings
-    {
-        private final User user;
-        private final ProtocolVersion protocolVersion;
-        private final boolean shouldUseEncryption;
-        private final boolean shouldUseCertificate;
-
-        ClusterSettings(User user, ProtocolVersion protocolVersion, boolean shouldUseEncryption, boolean shouldUseCertificate)
-        {
-            this.user = user;
-            this.protocolVersion = protocolVersion;
-            this.shouldUseEncryption = shouldUseEncryption;
-            this.shouldUseCertificate = shouldUseCertificate;
-        }
-
-        @Override
-        public boolean equals(Object o)
-        {
-            if (this == o) return true;
-            if (o == null || getClass() != o.getClass()) return false;
-            ClusterSettings that = (ClusterSettings) o;
-            return shouldUseEncryption == that.shouldUseEncryption && shouldUseCertificate == that.shouldUseCertificate && java.util.Objects.equals(user, that.user) && protocolVersion == that.protocolVersion;
-        }
-
-        @Override
-        public int hashCode()
-        {
-            return java.util.Objects.hash(user, protocolVersion, shouldUseEncryption, shouldUseCertificate);
+            return username;
         }
     }
 }

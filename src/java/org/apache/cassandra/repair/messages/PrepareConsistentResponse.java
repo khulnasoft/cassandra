@@ -19,23 +19,24 @@
 package org.apache.cassandra.repair.messages;
 
 import java.io.IOException;
+import java.util.UUID;
 
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.UUIDSerializer;
 
 import static org.apache.cassandra.locator.InetAddressAndPort.Serializer.inetAddressAndPortSerializer;
 
 public class PrepareConsistentResponse extends RepairMessage
 {
-    public final TimeUUID parentSession;
+    public final UUID parentSession;
     public final InetAddressAndPort participant;
     public final boolean success;
 
-    public PrepareConsistentResponse(TimeUUID parentSession, InetAddressAndPort participant, boolean success)
+    public PrepareConsistentResponse(UUID parentSession, InetAddressAndPort participant, boolean success)
     {
         super(null);
         assert parentSession != null;
@@ -43,12 +44,6 @@ public class PrepareConsistentResponse extends RepairMessage
         this.parentSession = parentSession;
         this.participant = participant;
         this.success = success;
-    }
-
-    @Override
-    public TimeUUID parentRepairSession()
-    {
-        return parentSession;
     }
 
     public boolean equals(Object o)
@@ -75,21 +70,21 @@ public class PrepareConsistentResponse extends RepairMessage
     {
         public void serialize(PrepareConsistentResponse response, DataOutputPlus out, int version) throws IOException
         {
-            response.parentSession.serialize(out);
+            UUIDSerializer.serializer.serialize(response.parentSession, out, version);
             inetAddressAndPortSerializer.serialize(response.participant, out, version);
             out.writeBoolean(response.success);
         }
 
         public PrepareConsistentResponse deserialize(DataInputPlus in, int version) throws IOException
         {
-            return new PrepareConsistentResponse(TimeUUID.deserialize(in),
+            return new PrepareConsistentResponse(UUIDSerializer.serializer.deserialize(in, version),
                                                  inetAddressAndPortSerializer.deserialize(in, version),
                                                  in.readBoolean());
         }
 
         public long serializedSize(PrepareConsistentResponse response, int version)
         {
-            long size = TimeUUID.sizeInBytes();
+            long size = UUIDSerializer.serializer.serializedSize(response.parentSession, version);
             size += inetAddressAndPortSerializer.serializedSize(response.participant, version);
             size += TypeSizes.sizeof(response.success);
             return size;

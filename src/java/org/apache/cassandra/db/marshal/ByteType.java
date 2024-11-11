@@ -19,12 +19,9 @@ package org.apache.cassandra.db.marshal;
 
 import java.nio.ByteBuffer;
 
-import org.apache.commons.lang3.mutable.MutableByte;
-
 import org.apache.cassandra.cql3.CQL3Type;
-import org.apache.cassandra.cql3.terms.Constants;
-import org.apache.cassandra.cql3.terms.Term;
-import org.apache.cassandra.cql3.functions.ArgumentDeserializer;
+import org.apache.cassandra.cql3.Constants;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.serializers.ByteSerializer;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.serializers.TypeSerializer;
@@ -38,8 +35,6 @@ import org.apache.cassandra.utils.bytecomparable.ByteSourceInverse;
 public class ByteType extends NumberType<Byte>
 {
     public static final ByteType instance = new ByteType();
-
-    private static final ByteBuffer MASKED_VALUE = instance.decompose((byte) 0);
 
     ByteType()
     {
@@ -112,86 +107,50 @@ public class ByteType extends NumberType<Byte>
     }
 
     @Override
-    public ArgumentDeserializer getArgumentDeserializer()
+    public byte toByte(ByteBuffer value)
     {
-        return new NumberArgumentDeserializer<MutableByte>(new MutableByte())
-        {
-            @Override
-            protected void setMutableValue(MutableByte mutable, ByteBuffer buffer)
-            {
-                mutable.setValue(ByteBufferUtil.toByte(buffer));
-            }
-        };
+        return ByteBufferUtil.toByte(value);
     }
 
     @Override
-    public ByteBuffer add(Number left, Number right)
+    public short toShort(ByteBuffer value)
     {
-        return ByteBufferUtil.bytes((byte) (left.byteValue() + right.byteValue()));
+        return toByte(value);
     }
 
     @Override
-    public ByteBuffer substract(Number left, Number right)
+    protected int toInt(ByteBuffer value)
     {
-        return ByteBufferUtil.bytes((byte) (left.byteValue() - right.byteValue()));
+        return toByte(value);
     }
 
-    @Override
-    public ByteBuffer multiply(Number left, Number right)
+    public ByteBuffer add(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
     {
-        return ByteBufferUtil.bytes((byte) (left.byteValue() * right.byteValue()));
+        return ByteBufferUtil.bytes((byte) (leftType.toByte(left) + rightType.toByte(right)));
     }
 
-    @Override
-    public ByteBuffer divide(Number left, Number right)
+    public ByteBuffer substract(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
     {
-        return ByteBufferUtil.bytes((byte) (left.byteValue() / right.byteValue()));
+        return ByteBufferUtil.bytes((byte) (leftType.toByte(left) - rightType.toByte(right)));
     }
 
-    @Override
-    public ByteBuffer mod(Number left, Number right)
+    public ByteBuffer multiply(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
     {
-        return ByteBufferUtil.bytes((byte) (left.byteValue() % right.byteValue()));
+        return ByteBufferUtil.bytes((byte) (leftType.toByte(left) * rightType.toByte(right)));
     }
 
-    public ByteBuffer negate(Number input)
+    public ByteBuffer divide(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
     {
-        return ByteBufferUtil.bytes((byte) -input.byteValue());
+        return ByteBufferUtil.bytes((byte) (leftType.toByte(left) / rightType.toByte(right)));
     }
 
-    @Override
-    public ByteBuffer abs(Number input)
+    public ByteBuffer mod(NumberType<?> leftType, ByteBuffer left, NumberType<?> rightType, ByteBuffer right)
     {
-        return ByteBufferUtil.bytes((byte) Math.abs(input.byteValue()));
+        return ByteBufferUtil.bytes((byte) (leftType.toByte(left) % rightType.toByte(right)));
     }
 
-    @Override
-    public ByteBuffer exp(Number input)
+    public ByteBuffer negate(ByteBuffer input)
     {
-        return ByteBufferUtil.bytes((byte) Math.exp(input.byteValue()));
-    }
-
-    @Override
-    public ByteBuffer log(Number input)
-    {
-        return ByteBufferUtil.bytes((byte) Math.log(input.byteValue()));
-    }
-
-    @Override
-    public ByteBuffer log10(Number input)
-    {
-        return ByteBufferUtil.bytes((byte) Math.log10(input.byteValue()));
-    }
-
-    @Override
-    public ByteBuffer round(Number input)
-    {
-        return decompose(input.byteValue());
-    }
-
-    @Override
-    public ByteBuffer getMaskedValue()
-    {
-        return MASKED_VALUE;
+        return ByteBufferUtil.bytes((byte) -toByte(input));
     }
 }

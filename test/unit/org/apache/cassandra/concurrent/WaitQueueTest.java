@@ -29,7 +29,6 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.apache.cassandra.utils.concurrent.WaitQueue.newWaitQueue;
 import static org.junit.Assert.*;
 
 public class WaitQueueTest
@@ -38,14 +37,14 @@ public class WaitQueueTest
     @Test
     public void testSerial() throws InterruptedException
     {
-        testSerial(newWaitQueue());
+        testSerial(new WaitQueue());
     }
     public void testSerial(final WaitQueue queue) throws InterruptedException
     {
         final AtomicInteger ready = new AtomicInteger();
         Thread[] ts = new Thread[4];
         for (int i = 0 ; i < ts.length ; i++)
-            ts[i] = NamedThreadFactory.createAnonymousThread(new Runnable()
+            ts[i] = NamedThreadFactory.createThread(new Runnable()
         {
             @Override
             public void run()
@@ -78,14 +77,14 @@ public class WaitQueueTest
     @Test
     public void testCondition() throws InterruptedException
     {
-        testCondition(newWaitQueue());
+        testCondition(new WaitQueue());
     }
     public void testCondition(final WaitQueue queue) throws InterruptedException
     {
         final AtomicBoolean ready = new AtomicBoolean(false);
         final AtomicBoolean condition = new AtomicBoolean(false);
         final AtomicBoolean fail = new AtomicBoolean(false);
-        Thread t = NamedThreadFactory.createAnonymousThread(new Runnable()
+        Thread t = NamedThreadFactory.createThread(new Runnable()
         {
             @Override
             public void run()

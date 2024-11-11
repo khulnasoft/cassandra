@@ -37,12 +37,13 @@ import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.utils.concurrent.Ref;
 
 public class SSTableIndex
 {
     private final ColumnIndex columnIndex;
-    private final Ref<SSTableReader> sstableRef;
+    private final Ref<? extends SSTableReader> sstableRef;
     private final SSTableReader sstable;
     private final OnDiskIndex index;
     private final AtomicInteger references = new AtomicInteger(1);
@@ -173,9 +174,9 @@ public class SSTableIndex
 
         public DecoratedKey apply(Long offset)
         {
-            try
+            try (RandomAccessReader in = sstable.openKeyComponentReader())
             {
-                return sstable.keyAtPositionFromSecondaryIndex(offset);
+                return sstable.keyAt(in, offset);
             }
             catch (IOException e)
             {

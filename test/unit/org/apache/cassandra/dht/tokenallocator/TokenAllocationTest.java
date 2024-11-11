@@ -21,33 +21,32 @@ package org.apache.cassandra.dht.tokenallocator;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.Collection;
-import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Random;
-import java.util.Set;
+import java.util.UUID;
 
+import com.google.common.collect.Lists;
 import org.apache.commons.math3.stat.descriptive.SummaryStatistics;
 import org.junit.AfterClass;
 import org.junit.Assert;
-import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.locator.IEndpointSnitch;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.RackInferringSnitch;
-import org.apache.cassandra.schema.KeyspaceMetadata;
+import org.apache.cassandra.locator.TokenMetadata;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.utils.FBUtilities;
 
 import static org.junit.Assert.assertEquals;
@@ -59,34 +58,24 @@ public class TokenAllocationTest
     static Random rand = new Random(1);
 
     @BeforeClass
-    public static void beforeClass() throws ConfigurationException
+    public static void setup() throws ConfigurationException
     {
         DatabaseDescriptor.daemonInitialization();
         oldPartitioner = StorageService.instance.setPartitionerUnsafe(Murmur3Partitioner.instance);
-    }
-
-    @Before
-    public void before() throws ConfigurationException
-    {
-        ClusterMetadataService.setInstance(ClusterMetadataTestHelper.syncInstanceForTest());
-        ClusterMetadataService.instance().log().bootstrap(FBUtilities.getBroadcastAddressAndPort());
-    }
-
-    @Before
-    public void after() throws ConfigurationException
-    {
-        ClusterMetadataService.unsetInstance();
+        SchemaLoader.prepareServer();
+        SchemaLoader.startGossiper();
+        SchemaLoader.schemaDefinition("TokenAllocationTest");
     }
 
     @AfterClass
-    public static void afterClass()
+    public static void tearDown()
     {
         DatabaseDescriptor.setPartitionerUnsafe(oldPartitioner);
     }
 
-    private static TokenAllocation createForTest(ClusterMetadata metadata, int replicas, int numTokens)
+    private static TokenAllocation createForTest(TokenMetadata tokenMetadata, int replicas, int numTokens)
     {
-        return TokenAllocation.create(DatabaseDescriptor.getEndpointSnitch(), metadata, replicas, numTokens);
+        return TokenAllocation.create(DatabaseDescriptor.getEndpointSnitch(), tokenMetadata, replicas, numTokens);
     }
 
     @Test
@@ -94,10 +83,10 @@ public class TokenAllocationTest
     {
         int vn = 16;
         String ks = "TokenAllocationTestKeyspace3";
-        ClusterMetadataTestHelper.addOrUpdateKeyspace(KeyspaceMetadata.create(ks, KeyspaceParams.simple(5)));
-        ClusterMetadata metadata = generateFakeEndpoints(10, vn);
+        TokenMetadata tm = new TokenMetadata();
+        generateFakeEndpoints(tm, 10, vn);
         InetAddressAndPort addr = FBUtilities.getBroadcastAddressAndPort();
-        allocateTokensForKeyspace(vn, ks, metadata, addr);
+        allocateTokensForKeyspace(vn, ks, tm, addr);
     }
 
     @Test
@@ -105,21 +94,22 @@ public class TokenAllocationTest
     {
         int vn = 16;
         int allocateTokensForLocalRf = 3;
-        ClusterMetadata metadata = generateFakeEndpoints(10, vn);
+        TokenMetadata tm = new TokenMetadata();
+        generateFakeEndpoints(tm, 10, vn);
         InetAddressAndPort addr = FBUtilities.getBroadcastAddressAndPort();
-        allocateTokensForLocalReplicationFactor(vn, allocateTokensForLocalRf, metadata, addr);
+        allocateTokensForLocalReplicationFactor(vn, allocateTokensForLocalRf, tm, addr);
     }
 
-    private Collection<Token> allocateTokensForKeyspace(int vnodes, String keyspace, ClusterMetadata metadata, InetAddressAndPort addr)
+    private Collection<Token> allocateTokensForKeyspace(int vnodes, String keyspace, TokenMetadata tm, InetAddressAndPort addr)
     {
-        AbstractReplicationStrategy rs = metadata.schema.getKeyspaces().get(keyspace).get().replicationStrategy;
-        TokenAllocation tokenAllocation = TokenAllocation.create(metadata, rs, vnodes);
+        AbstractReplicationStrategy rs = Keyspace.open(keyspace).getReplicationStrategy();
+        TokenAllocation tokenAllocation = TokenAllocation.create(tm, rs, vnodes);
         return allocateAndVerify(vnodes, addr, tokenAllocation);
     }
 
-    private void allocateTokensForLocalReplicationFactor(int vnodes, int rf, ClusterMetadata metadata, InetAddressAndPort addr)
+    private void allocateTokensForLocalReplicationFactor(int vnodes, int rf, TokenMetadata tm, InetAddressAndPort addr)
     {
-        TokenAllocation tokenAllocation = createForTest(metadata, rf, vnodes);
+        TokenAllocation tokenAllocation = createForTest(tm, rf, vnodes);
         allocateAndVerify(vnodes, addr, tokenAllocation);
     }
 
@@ -176,19 +166,20 @@ public class TokenAllocationTest
             int vn = 16;
             String ks = "TokenAllocationTestNTSKeyspace" + rackCount + replicas;
             String dc = "1";
-            String otherDc = "15";
-            KeyspaceMetadata keyspace = KeyspaceMetadata.create(ks, KeyspaceParams.nts(dc, replicas, otherDc, "15"));
 
-            // register these 2 nodes so that the DCs exist, otherwise the CREATE KEYSPACE will be rejected
-            // but don't join them, we don't assign any tokens to these nodes
-            ClusterMetadataTestHelper.register(InetAddressAndPort.getByName("127.1.0.99"), dc, Integer.toString(0));
-            ClusterMetadataTestHelper.register(InetAddressAndPort.getByName("127.15.0.99"), otherDc, Integer.toString(0));
-            ClusterMetadataTestHelper.addOrUpdateKeyspace(keyspace);
+            // Register peers with expected DC for NetworkTopologyStrategy.
+            TokenMetadata metadata = StorageService.instance.getTokenMetadata();
+            metadata.clearUnsafe();
+            metadata.updateHostId(UUID.randomUUID(), InetAddressAndPort.getByName("127.1.0.99"));
+            metadata.updateHostId(UUID.randomUUID(), InetAddressAndPort.getByName("127.15.0.99"));
 
+            SchemaLoader.createKeyspace(ks, KeyspaceParams.nts(dc, replicas, "15", 15), SchemaLoader.standardCFMD(ks, "Standard1"));
+            TokenMetadata tm = StorageService.instance.getTokenMetadata();
+            tm.clearUnsafe();
             for (int i = 0; i < rackCount; ++i)
-                generateFakeEndpoints(10, vn, dc, Integer.toString(i));
+                generateFakeEndpoints(tm, 10, vn, dc, Integer.toString(i));
             InetAddressAndPort addr = InetAddressAndPort.getByName("127." + dc + ".0.99");
-            allocateTokensForKeyspace(vn, ks, ClusterMetadata.current(), addr);
+            allocateTokensForKeyspace(vn, ks, tm, addr);
             // Note: Not matching replication factor in second datacentre, but this should not affect us.
         } finally {
             DatabaseDescriptor.setEndpointSnitch(oldSnitch);
@@ -205,29 +196,25 @@ public class TokenAllocationTest
             int vn = 8;
             int replicas = 3;
             int rackCount = replicas;
-            String ks = "TokenAllocationTestNTSKeyspaceRfEqRack";
+            String ks = "TokenAllocationTestNTSKeyspaceRfEqRacks";
             String dc = "1";
-            String otherDc = "15";
-            KeyspaceMetadata keyspace = KeyspaceMetadata.create(ks, KeyspaceParams.nts(dc, replicas, otherDc, "15"));
 
-            // register these 2 nodes so that the DCs exist, otherwise the CREATE KEYSPACE will be rejected
-            // but don't join them, we don't assign any tokens to these nodes
-            ClusterMetadataTestHelper.register(InetAddressAndPort.getByName("127.1.0.255"), dc, Integer.toString(0));
-            ClusterMetadataTestHelper.register(InetAddressAndPort.getByName("127.15.0.255"), otherDc, Integer.toString(0));
-            ClusterMetadataTestHelper.addOrUpdateKeyspace(keyspace);
+            TokenMetadata metadata = StorageService.instance.getTokenMetadata();
+            metadata.clearUnsafe();
+            metadata.updateHostId(UUID.randomUUID(), InetAddressAndPort.getByName("127.1.0.99"));
+            metadata.updateHostId(UUID.randomUUID(), InetAddressAndPort.getByName("127.15.0.99"));
 
+            SchemaLoader.createKeyspace(ks, KeyspaceParams.nts(dc, replicas, "15", 15), SchemaLoader.standardCFMD(ks, "Standard1"));
             int base = 5;
             for (int i = 0; i < rackCount; ++i)
-                generateFakeEndpoints(base << i, vn, dc, Integer.toString(i));     // unbalanced racks
+                generateFakeEndpoints(metadata, base << i, vn, dc, Integer.toString(i));     // unbalanced racks
 
             int cnt = 5;
             for (int i = 0; i < cnt; ++i)
             {
                 InetAddressAndPort endpoint = InetAddressAndPort.getByName("127." + dc + ".0." + (99 + i));
-                Collection<Token> tokens = allocateTokensForKeyspace(vn, ks, ClusterMetadata.current(), endpoint);
-
-                ClusterMetadataTestHelper.register(endpoint, dc, Integer.toString(0));
-                ClusterMetadataTestHelper.join(endpoint, new HashSet<>(tokens));
+                Collection<Token> tokens = allocateTokensForKeyspace(vn, ks, metadata, endpoint);
+                metadata.updateNormalTokens(tokens, endpoint);
             }
 
             double target = 1.0 / (base + cnt);
@@ -260,10 +247,12 @@ public class TokenAllocationTest
     {
         final int TOKENS = 16;
 
-        ClusterMetadata metadata = generateFakeEndpoints(10, TOKENS);
+        TokenMetadata tokenMetadata = new TokenMetadata();
+        generateFakeEndpoints(tokenMetadata, 10, TOKENS);
 
-        TokenAllocation rf2Allocator = createForTest(metadata, 2, TOKENS);
-        TokenAllocation rf3Allocator = createForTest(metadata, 3, TOKENS);
+        // Do not clone token metadata so tokens allocated by different allocators are reflected on the parent TokenMetadata
+        TokenAllocation rf2Allocator = createForTest(tokenMetadata, 2, TOKENS);
+        TokenAllocation rf3Allocator = createForTest(tokenMetadata, 3, TOKENS);
 
         SummaryStatistics rf2StatsBefore = rf2Allocator.getAllocationRingOwnership(FBUtilities.getBroadcastAddressAndPort());
         SummaryStatistics rf3StatsBefore = rf3Allocator.getAllocationRingOwnership(FBUtilities.getBroadcastAddressAndPort());
@@ -274,9 +263,9 @@ public class TokenAllocationTest
         for (int i=11; i<=20; ++i)
         {
             InetAddressAndPort endpoint = InetAddressAndPort.getByName("127.0.0." + (i + 1));
-            Set<Token> tokens = new HashSet<>(current.allocate(endpoint));
-            ClusterMetadataTestHelper.register(endpoint, "datacenter" + 1, "rack" + 1);
-            ClusterMetadataTestHelper.join(endpoint, tokens);
+            Collection<Token> tokens = current.allocate(endpoint);
+            // Update tokens on next to verify ownership calculation below
+            next.tokenMetadata.updateNormalTokens(tokens, endpoint);
             TokenAllocation tmp = current;
             current = next;
             next = tmp;
@@ -297,27 +286,25 @@ public class TokenAllocationTest
         }
     }
 
-    private ClusterMetadata generateFakeEndpoints(int numOldNodes, int numVNodes) throws UnknownHostException
+    private void generateFakeEndpoints(TokenMetadata tmd, int numOldNodes, int numVNodes) throws UnknownHostException
     {
-        return generateFakeEndpoints(numOldNodes, numVNodes, "0", "0");
+        tmd.clearUnsafe();
+        generateFakeEndpoints(tmd, numOldNodes, numVNodes, "0", "0");
     }
 
-    private ClusterMetadata generateFakeEndpoints(int nodes, int vnodes, String dc, String rack) throws UnknownHostException
+    private void generateFakeEndpoints(TokenMetadata tmd, int nodes, int vnodes, String dc, String rack) throws UnknownHostException
     {
         System.out.printf("Adding %d nodes to dc=%s, rack=%s.%n", nodes, dc, rack);
-        ClusterMetadata metadata = ClusterMetadata.current();
-        IPartitioner p = metadata.tokenMap.partitioner();
+        IPartitioner p = tmd.partitioner;
 
         for (int i = 1; i <= nodes; i++)
         {
             // leave .1 for myEndpoint
             InetAddressAndPort addr = InetAddressAndPort.getByName("127." + dc + '.' + rack + '.' + (i + 1));
-            ClusterMetadataTestHelper.register(addr, dc, rack);
-            Set<Token> tokens = new HashSet<>(vnodes);
+            List<Token> tokens = Lists.newArrayListWithCapacity(vnodes);
             for (int j = 0; j < vnodes; ++j)
                 tokens.add(p.getRandomToken(rand));
-            ClusterMetadataTestHelper.join(addr, tokens);
+            tmd.updateNormalTokens(tokens, addr);
         }
-        return metadata;
     }
 }

@@ -17,16 +17,20 @@
  */
 package org.apache.cassandra.service;
 
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.SnapshotCommand;
+import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.IVerbHandler;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.DiagnosticSnapshotService;
-
 
 public class SnapshotVerbHandler implements IVerbHandler<SnapshotCommand>
 {
@@ -38,7 +42,7 @@ public class SnapshotVerbHandler implements IVerbHandler<SnapshotCommand>
         SnapshotCommand command = message.payload;
         if (command.clear_snapshot)
         {
-            StorageService.instance.clearSnapshot(command.snapshot_name, command.keyspace);
+            Keyspace.clearSnapshot(command.snapshot_name, command.keyspace);
         }
         else if (DiagnosticSnapshotService.isDiagnosticSnapshotRequest(command))
         {

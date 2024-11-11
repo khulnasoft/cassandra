@@ -21,67 +21,62 @@ package org.apache.cassandra.io.util;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.stream.Stream;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.RateLimiter;
-import org.apache.commons.lang3.RandomUtils;
 import org.junit.Assert;
 import org.junit.Test;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.io.FSWriteError;
 import org.assertj.core.api.Assertions;
 import org.psjava.util.Triple;
 
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.cassandra.config.CassandraRelevantProperties.JAVA_IO_TMPDIR;
-import static org.apache.cassandra.config.CassandraRelevantProperties.USE_NIX_RECURSIVE_DELETE;
 
 public class FileTest
 {
     private static final java.io.File dir;
     static
     {
-        USE_NIX_RECURSIVE_DELETE.setBoolean(false);
-        java.io.File parent = new java.io.File(JAVA_IO_TMPDIR.getString()); //checkstyle: permit this instantiation
+        java.io.File parent = new java.io.File(JAVA_IO_TMPDIR.getString());
         String dirName = Long.toHexString(ThreadLocalRandom.current().nextLong());
-        while (new java.io.File(parent, dirName).exists()) //checkstyle: permit this instantiation
+        while (new java.io.File(parent, dirName).exists())
             dirName = Long.toHexString(ThreadLocalRandom.current().nextLong());
-        dir = new java.io.File(parent, dirName); //checkstyle: permit this instantiation
+        dir = new java.io.File(parent, dirName);
         dir.mkdirs();
         new File(dir).deleteRecursiveOnExit();
-
-        // PathUtils touches StorageService which touches StreamManager which requires configs be setup
-        DatabaseDescriptor.daemonInitialization();
     }
-
 
     @Test
     public void testEquivalence() throws IOException
     {
-        java.io.File notExists = new java.io.File(dir, "notExists"); //checkstyle: permit this instantiation
-        java.io.File regular = new java.io.File(dir, "regular"); //checkstyle: permit this instantiation
+        java.io.File notExists = new java.io.File(dir, "notExists");
+        java.io.File regular = new java.io.File(dir, "regular");
         regular.createNewFile();
-        java.io.File regularLink = new java.io.File(dir, "regularLink"); //checkstyle: permit this instantiation
+        java.io.File regularLink = new java.io.File(dir, "regularLink");
         Files.createSymbolicLink(regularLink.toPath(), regular.toPath());
-        java.io.File emptySubdir = new java.io.File(dir, "empty"); //checkstyle: permit this instantiation
-        java.io.File emptySubdirLink = new java.io.File(dir, "emptyLink"); //checkstyle: permit this instantiation
+        java.io.File emptySubdir = new java.io.File(dir, "empty");
+        java.io.File emptySubdirLink = new java.io.File(dir, "emptyLink");
         emptySubdir.mkdir();
         Files.createSymbolicLink(emptySubdirLink.toPath(), emptySubdir.toPath());
-        java.io.File nonEmptySubdir = new java.io.File(dir, "nonEmpty"); //checkstyle: permit this instantiation
-        java.io.File nonEmptySubdirLink = new java.io.File(dir, "nonEmptyLink"); //checkstyle: permit this instantiation
+        java.io.File nonEmptySubdir = new java.io.File(dir, "nonEmpty");
+        java.io.File nonEmptySubdirLink = new java.io.File(dir, "nonEmptyLink");
         nonEmptySubdir.mkdir();
         Files.createSymbolicLink(nonEmptySubdirLink.toPath(), nonEmptySubdir.toPath());
-        new java.io.File(nonEmptySubdir, "something").createNewFile(); //checkstyle: permit this instantiation
+        new java.io.File(nonEmptySubdir, "something").createNewFile();
 
         testEquivalence("");
 
@@ -115,9 +110,6 @@ public class FileTest
         regularLink.delete();
         regular.delete();
         emptySubdir.delete();
-        nonEmptySubdir.delete();
-        nonEmptySubdirLink.delete();
-        dir.setReadable(true);
     }
 
     private static String nonAbsolute(java.io.File file)
@@ -125,9 +117,9 @@ public class FileTest
         return file.getParent() + File.pathSeparator() + ".." + File.pathSeparator() + file.getParentFile().getName() + File.pathSeparator() + file.getName();
     }
 
-    private void    testEquivalence(String path) throws IOException
+    private void testEquivalence(String path) throws IOException
     {
-        java.io.File file = new java.io.File(path); //checkstyle: permit this instantiation
+        java.io.File file = new java.io.File(path);
         if (file.exists()) testExists(path);
         else testNotExists(path);
     }
@@ -151,7 +143,7 @@ public class FileTest
         testEquivalence(path, java.io.File::toPath, File::toPath);
         testEquivalence(path, java.io.File::list, File::tryListNames);
         testEquivalence(path, java.io.File::listFiles, File::tryList);
-        java.io.File file = new java.io.File(path); //checkstyle: permit this instantiation
+        java.io.File file = new java.io.File(path);
         if (file.getParentFile() != null) testBasic(file.getParent());
         if (!file.equals(file.getAbsoluteFile())) testBasic(file.getAbsolutePath());
         if (!file.equals(file.getCanonicalFile())) testBasic(file.getCanonicalPath());
@@ -166,7 +158,7 @@ public class FileTest
         );
         for (Triple<BiFunction<java.io.File, Boolean, Boolean>, BiFunction<File, Boolean, Boolean>, Function<java.io.File, Boolean>> test : tests)
         {
-            java.io.File file = new java.io.File(path); //checkstyle: permit this instantiation
+            java.io.File file = new java.io.File(path);
             boolean cur = test.v3.apply(file);
             boolean canRead = file.canRead();
             boolean canWrite = file.canWrite();
@@ -225,7 +217,7 @@ public class FileTest
 
     private <T> void testEquivalence(String path, IOFn<java.io.File, T> canonical, IOFn<File, T> test, IOBiConsumer<java.io.File, Boolean> afterEach)
     {
-        java.io.File file = new java.io.File(path); //checkstyle: permit this instantiation
+        java.io.File file = new java.io.File(path);
         Object expect;
         try
         {
@@ -261,7 +253,7 @@ public class FileTest
     }
     private void testTryVsConfirm(String path, Predicate<java.io.File> canonical, IOConsumer<File> test, IOBiConsumer<java.io.File, Boolean> afterEach)
     {
-        java.io.File file = new java.io.File(path); //checkstyle: permit this instantiation
+        java.io.File file = new java.io.File(path);
         boolean expect = canonical.test(file);
         try { afterEach.accept(file, expect); } catch (IOException e) { throw new AssertionError(e); }
         boolean actual;
@@ -333,6 +325,52 @@ public class FileTest
     }
 
     @Test
+    public void testDeleteWithAccumulate()
+    {
+        File file = new File(dir, "testdelete");
+        Assert.assertTrue(file.tryCreateDirectory());
+
+        Throwable accumulate = null;
+        accumulate = file.delete(accumulate);
+        Assert.assertNull(accumulate);
+        accumulate = file.delete(accumulate);
+        Assert.assertNotNull(accumulate);
+        Assert.assertTrue(accumulate instanceof UncheckedIOException);
+        Assert.assertTrue(accumulate.getCause() instanceof NoSuchFileException);
+    }
+
+    @Test
+    public void testForEachRecursive() throws IOException
+    {
+        File subdir = new File(dir, "forEachRecursive");
+        Assert.assertTrue(subdir.tryCreateDirectory());
+        Assert.assertTrue(new File(subdir, "subsubdir").tryCreateDirectory());
+        File file = new File(subdir, "f");
+        Assert.assertTrue(file.createFileIfNotExists());
+        Assert.assertTrue(subdir.exists());
+        Assert.assertTrue(file.exists());
+        
+        subdir.forEachRecursive(f -> f.toPath());
+    }
+
+    @Test
+    public void testList()
+    {
+        File subdir = new File(dir, "testList");
+        Assert.assertTrue(subdir.tryCreateDirectory());
+        Assert.assertTrue(new File(subdir, "subsubdir").tryCreateDirectory());
+        File file = new File(subdir, "f");
+        Assert.assertTrue(file.createFileIfNotExists());
+        Assert.assertTrue(subdir.exists());
+        Assert.assertTrue(file.exists());
+
+        Function<Stream<File>, Stream<File>> toFiles = Function.identity();
+        String[] result = PathUtils.list(subdir.path, stream -> toFiles.apply(stream.map(File::new)).map(File::name), String[]::new);
+        Assert.assertNotNull(result);
+        Assert.assertTrue(result.length == 2);
+    }
+
+    @Test
     public void testAncestry()
     {
         Assert.assertTrue(new File("somewhere/../").isAncestorOf(new File("somewhere")));
@@ -340,52 +378,42 @@ public class FileTest
     }
 
     @Test
-    public void testOverwrite() throws Exception
+    public void testCopy() throws IOException
     {
-        File f = new File(dir, UUID.randomUUID().toString());
+        File file = new File(dir, "a");
+        file.toJavaIOFile().createNewFile();
+        Assert.assertTrue(file.exists());
 
-        // write
-        ByteBuffer buf = ByteBuffer.wrap(RandomUtils.nextBytes(100));
-        try (FileChannel fc = f.newWriteChannel(File.WriteMode.OVERWRITE))
-        {
-            fc.write(buf);
-        }
-        Assertions.assertThat(f.length()).isEqualTo(buf.array().length);
-        Assertions.assertThat(Files.readAllBytes(f.toPath())).isEqualTo(buf.array());
+        File newFile = new File(dir, "b");
+        Assert.assertFalse(newFile.exists());
 
-        // overwrite
-        buf = ByteBuffer.wrap(RandomUtils.nextBytes(50));
-        try (FileChannel fc = f.newWriteChannel(File.WriteMode.OVERWRITE))
-        {
-            fc.write(buf);
-        }
-        Assertions.assertThat(f.length()).isEqualTo(buf.array().length);
-        Assertions.assertThat(Files.readAllBytes(f.toPath())).isEqualTo(buf.array());
+        file.copy(newFile, StandardCopyOption.COPY_ATTRIBUTES);
+        Assert.assertTrue(newFile.exists());
     }
 
     @Test
-    public void testAppend() throws Exception
+    public void testResolve()
     {
-        File f = new File(dir, UUID.randomUUID().toString());
+        File file = new File("somewhere/a/");
+        Assert.assertEquals(new File("somewhere/a/b"), file.resolve(new File("b")));
+        Assert.assertEquals(new File("somewhere/a/b"), file.resolve("b"));
 
-        // write
-        ByteBuffer buf1 = ByteBuffer.wrap(RandomUtils.nextBytes(100));
-        try (FileChannel fc = f.newWriteChannel(File.WriteMode.APPEND))
-        {
-            fc.write(buf1);
-        }
-        Assertions.assertThat(f.length()).isEqualTo(buf1.array().length);
-        Assertions.assertThat(Files.readAllBytes(f.toPath())).isEqualTo(buf1.array());
+        Assert.assertEquals(new File("somewhere/b"), file.resolveSibling("b"));
+    }
 
-        // overwrite
-        ByteBuffer buf2 = ByteBuffer.wrap(RandomUtils.nextBytes(50));
-        try (FileChannel fc = f.newWriteChannel(File.WriteMode.APPEND))
-        {
-            fc.write(buf2);
-        }
-        Assertions.assertThat(f.length()).isEqualTo(buf1.array().length + buf2.array().length);
-        ByteBuffer buf = ByteBuffer.allocate(buf1.array().length + buf2.array().length);
-        buf.put(buf1.array()).put(buf2.array());
-        Assertions.assertThat(Files.readAllBytes(f.toPath())).isEqualTo(buf.array());
+    @Test
+    public void testRelative()
+    {
+        File file = new File("somewhere/a/");
+        Assert.assertEquals(new File("../b"), file.relativize(new File("somewhere/b")));
+    }
+
+    @Test
+    public void testDeleteFail()
+    {
+        File file = new File(UUID.randomUUID().toString());
+        Assertions.assertThatExceptionOfType(FSWriteError.class)
+                  .isThrownBy(file::deleteRecursive)
+                  .withCauseInstanceOf(IOException.class);
     }
 }

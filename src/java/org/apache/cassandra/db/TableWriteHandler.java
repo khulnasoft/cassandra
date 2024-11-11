@@ -19,6 +19,7 @@
 package org.apache.cassandra.db;
 
 import org.apache.cassandra.db.partitions.PartitionUpdate;
+import org.apache.cassandra.index.transactions.UpdateTransaction;
 
 public interface TableWriteHandler
 {

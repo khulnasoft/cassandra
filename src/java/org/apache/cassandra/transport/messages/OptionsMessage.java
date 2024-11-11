@@ -18,24 +18,32 @@
 package org.apache.cassandra.transport.messages;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import io.netty.buffer.ByteBuf;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.Compressor;
-import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.Message;
 import org.apache.cassandra.transport.ProtocolVersion;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.ProductType;
 
 /**
  * Message to indicate that the server is ready to receive requests.
  */
 public class OptionsMessage extends Message.Request
 {
+    private static final List<String> supportedPageUnits = Arrays.stream(PageSize.PageUnit.values()).map(PageSize.PageUnit::name).collect(Collectors.toList());
+
     public static final Message.Codec<OptionsMessage> codec = new Message.Codec<OptionsMessage>()
     {
         public OptionsMessage decode(ByteBuf body, ProtocolVersion version)
@@ -59,7 +67,7 @@ public class OptionsMessage extends Message.Request
     }
 
     @Override
-    protected Message.Response execute(QueryState state, Dispatcher.RequestTime requestTime, boolean traceRequest)
+    protected Message.Response execute(QueryState state, long queryStartNanoTime, boolean traceRequest)
     {
         List<String> cqlVersions = new ArrayList<String>();
         cqlVersions.add(QueryProcessor.CQL_VERSION.toString());
@@ -74,6 +82,10 @@ public class OptionsMessage extends Message.Request
         supported.put(StartupMessage.CQL_VERSION, cqlVersions);
         supported.put(StartupMessage.COMPRESSION, compressions);
         supported.put(StartupMessage.PROTOCOL_VERSIONS, ProtocolVersion.supportedVersions());
+        supported.put(StartupMessage.EMULATE_DBAAS_DEFAULTS, Collections.singletonList(String.valueOf(DatabaseDescriptor.isEmulateDbaasDefaults())));
+        supported.put(StartupMessage.PAGE_UNIT, supportedPageUnits);
+        supported.put(StartupMessage.SERVER_VERSION, Collections.singletonList(FBUtilities.getReleaseVersionString()));
+        supported.put(StartupMessage.PRODUCT_TYPE, Collections.singletonList(ProductType.getProduct().toString()));
 
         return new SupportedMessage(supported);
     }

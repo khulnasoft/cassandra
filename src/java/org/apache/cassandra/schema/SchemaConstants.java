@@ -25,25 +25,15 @@ import java.util.UUID;
 import java.util.regex.Pattern;
 
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Sets;
 
-import org.apache.cassandra.auth.AuthKeyspace;
 import org.apache.cassandra.db.Digest;
-import org.apache.cassandra.db.SystemKeyspace;
-import org.apache.cassandra.tracing.TraceKeyspace;
 
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
-
-/**
- * When adding new String keyspace names here, double check if it needs to be added to PartitionDenylist.canDenylistKeyspace
- */
 public final class SchemaConstants
 {
     public static final Pattern PATTERN_WORD_CHARS = Pattern.compile("\\w+");
 
     public static final String SYSTEM_KEYSPACE_NAME = "system";
     public static final String SCHEMA_KEYSPACE_NAME = "system_schema";
-    public static final String METADATA_KEYSPACE_NAME = "system_cluster_metadata";
 
     public static final String TRACE_KEYSPACE_NAME = "system_traces";
     public static final String AUTH_KEYSPACE_NAME = "system_auth";
@@ -52,28 +42,30 @@ public final class SchemaConstants
     public static final String VIRTUAL_SCHEMA = "system_virtual_schema";
 
     public static final String VIRTUAL_VIEWS = "system_views";
-    public static final String VIRTUAL_METRICS = "system_metrics";
+    public static final String SCHEMA_VIRTUAL_KEYSPACE_NAME = "system_virtual_schema";
+    public static final String SYSTEM_VIEWS_KEYSPACE_NAME = "system_views";
 
     public static final String DUMMY_KEYSPACE_OR_TABLE_NAME = "--dummy--";
 
     /* system keyspace names (the ones with LocalStrategy replication strategy) */
-    public static final Set<String> LOCAL_SYSTEM_KEYSPACE_NAMES =
-        ImmutableSet.of(SYSTEM_KEYSPACE_NAME, SCHEMA_KEYSPACE_NAME);
-
-    /* virtual table system keyspace names */
-    public static final Set<String> VIRTUAL_SYSTEM_KEYSPACE_NAMES =
-        ImmutableSet.of(VIRTUAL_VIEWS, VIRTUAL_SCHEMA);
+    public static final Set<String> LOCAL_SYSTEM_KEYSPACE_NAMES = ImmutableSet.of(SYSTEM_KEYSPACE_NAME, SCHEMA_KEYSPACE_NAME);
 
     /* replicate system keyspace names (the ones with a "true" replication strategy) */
-    public static final Set<String> REPLICATED_SYSTEM_KEYSPACE_NAMES =
-        ImmutableSet.of(TRACE_KEYSPACE_NAME, AUTH_KEYSPACE_NAME, DISTRIBUTED_KEYSPACE_NAME, METADATA_KEYSPACE_NAME);
+    public static final Set<String> REPLICATED_SYSTEM_KEYSPACE_NAMES = ImmutableSet.of(TRACE_KEYSPACE_NAME, AUTH_KEYSPACE_NAME, DISTRIBUTED_KEYSPACE_NAME);
+
+    /* virtual keyspace names */
+    public static final Set<String> VIRTUAL_KEYSPACE_NAMES = ImmutableSet.of(SCHEMA_VIRTUAL_KEYSPACE_NAME, SYSTEM_VIEWS_KEYSPACE_NAME);
+
     /**
-     * The longest permissible KS or CF name.
+     * longest permissible KS or CF name.  Our main concern is that filename not be more than 255 characters;
+     * the filename will contain both the KS and CF names. Since non-schema-name components only take up
+     * ~64 characters, we could allow longer names than this, but on Windows, the entire path should be not greater than
+     * 255 characters, so a lower limit here helps avoid problems.  See CASSANDRA-4110.
      *
-     * Before CASSANDRA-16956, we used to care about not having the entire path longer than 255 characters because of
-     * Windows support but this limit is by implementing CASSANDRA-16956 not in effect anymore.
+     * Note: This extended to 222 for CNDB tenant specific keyspaces. The windows restriction is not valid here
+     * because CNDB does not support windows.
      */
-    public static final int NAME_LENGTH = 48;
+    public static final int NAME_LENGTH = 222;
 
     // 59adb24e-f3cd-3e02-97f0-5b395827453f
     public static final UUID emptyVersion;
@@ -95,7 +87,7 @@ public final class SchemaConstants
      */
     public static boolean isLocalSystemKeyspace(String keyspaceName)
     {
-        return LOCAL_SYSTEM_KEYSPACE_NAMES.contains(toLowerCaseLocalized(keyspaceName)) || isVirtualSystemKeyspace(keyspaceName);
+        return LOCAL_SYSTEM_KEYSPACE_NAMES.contains(keyspaceName.toLowerCase());
     }
 
     /**
@@ -103,7 +95,7 @@ public final class SchemaConstants
      */
     public static boolean isReplicatedSystemKeyspace(String keyspaceName)
     {
-        return REPLICATED_SYSTEM_KEYSPACE_NAMES.contains(toLowerCaseLocalized(keyspaceName));
+        return REPLICATED_SYSTEM_KEYSPACE_NAMES.contains(keyspaceName.toLowerCase());
     }
 
     /**
@@ -112,7 +104,7 @@ public final class SchemaConstants
      */
     public static boolean isVirtualSystemKeyspace(String keyspaceName)
     {
-        return VIRTUAL_SYSTEM_KEYSPACE_NAMES.contains(toLowerCaseLocalized(keyspaceName));
+        return VIRTUAL_SCHEMA.equals(keyspaceName.toLowerCase()) || VIRTUAL_VIEWS.equals(keyspaceName.toLowerCase());
     }
 
     /**
@@ -121,40 +113,31 @@ public final class SchemaConstants
      */
     public static boolean isSystemKeyspace(String keyspaceName)
     {
-        return isLocalSystemKeyspace(keyspaceName) // this includes vtables
-                || isReplicatedSystemKeyspace(keyspaceName);
-    }
-
-    /**
-     * Returns the set of all system keyspaces
-     * @return all system keyspaces
-     */
-    public static Set<String> getSystemKeyspaces()
-    {
-        return Sets.union(Sets.union(LOCAL_SYSTEM_KEYSPACE_NAMES, REPLICATED_SYSTEM_KEYSPACE_NAMES), VIRTUAL_SYSTEM_KEYSPACE_NAMES);
-    }
-
-    /**
-     * Returns the set of local and replicated system keyspace names
-     * @return all local and replicated system keyspace names
-     */
-    public static Set<String> getLocalAndReplicatedSystemKeyspaceNames()
-    {
-        return Sets.union(LOCAL_SYSTEM_KEYSPACE_NAMES, REPLICATED_SYSTEM_KEYSPACE_NAMES);
+        return isLocalSystemKeyspace(keyspaceName)
+                || isReplicatedSystemKeyspace(keyspaceName)
+                || isVirtualSystemKeyspace(keyspaceName);
     }
     
     /**
-     * Returns the set of all local and replicated system table names
-     * @return all local and replicated system table names
+     * @return whether or not the keyspace is a virtual keyspace (system_virtual_schema, system_views)
      */
-    public static Set<String> getLocalAndReplicatedSystemTableNames()
+    public static boolean isVirtualKeyspace(String keyspaceName)
     {
-        return ImmutableSet.<String>builder()
-                           .addAll(SystemKeyspace.TABLE_NAMES)
-                           .addAll(SchemaKeyspaceTables.ALL)
-                           .addAll(TraceKeyspace.TABLE_NAMES)
-                           .addAll(AuthKeyspace.TABLE_NAMES)
-                           .addAll(SystemDistributedKeyspace.TABLE_NAMES)
-                           .build();
+        return VIRTUAL_KEYSPACE_NAMES.contains(keyspaceName.toLowerCase());
+    }
+
+    public static boolean isInternalKeyspace(String keyspaceName)
+    {
+        return isLocalSystemKeyspace(keyspaceName)
+               || isReplicatedSystemKeyspace(keyspaceName)
+               || isVirtualKeyspace(keyspaceName);
+    }
+    
+    /**
+     * @return whether or not the keyspace is a user keyspace
+     */
+    public static boolean isUserKeyspace(String keyspaceName)
+    {
+        return !isInternalKeyspace(keyspaceName);
     }
 }

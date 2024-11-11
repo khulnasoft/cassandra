@@ -17,45 +17,49 @@
  */
 package org.apache.cassandra.streaming;
 
+import org.apache.cassandra.db.compaction.OperationType;
+
 public enum StreamOperation
 {
-    OTHER("Other", true, false), // Fallback to avoid null types when deserializing from string
-    RESTORE_REPLICA_COUNT("Restore replica count", false, false), // Handles removeNode
-    DECOMMISSION("Unbootstrap", false, true),
-    RELOCATION("Relocation", false, true),
-    BOOTSTRAP("Bootstrap", false, true),
-    REBUILD("Rebuild", false, true),
-    BULK_LOAD("Bulk Load", true, false),
-    REPAIR("Repair", true, false);
+    OTHER("Other"), // Fallback to avoid null types when deserializing from string
+    RESTORE_REPLICA_COUNT("Restore replica count", false), // Handles removeNode
+    DECOMMISSION("Unbootstrap", false),
+    RELOCATION("Relocation", false),
+    BOOTSTRAP("Bootstrap", false),
+    REBUILD("Rebuild", false),
+    BULK_LOAD("Bulk Load"),
+    REPAIR("Repair"),
+    REGION_DECOMMISSION("Region Decommission"),
+    REGION_REPAIR("Region Repair");
 
     private final String description;
     private final boolean requiresViewBuild;
-    private final boolean keepSSTableLevel;
+
+
+    StreamOperation(String description) {
+        this(description, true);
+    }
 
     /**
      * @param description The operation description
      * @param requiresViewBuild Whether this operation requires views to be updated if it involves a base table
      */
-    StreamOperation(String description, boolean requiresViewBuild, boolean keepSSTableLevel)
-    {
+    StreamOperation(String description, boolean requiresViewBuild) {
         this.description = description;
         this.requiresViewBuild = requiresViewBuild;
-        this.keepSSTableLevel = keepSSTableLevel;
     }
 
-    public static StreamOperation fromString(String text)
-    {
-        for (StreamOperation b : StreamOperation.values())
-        {
-            if (b.description.equalsIgnoreCase(text))
+    public static StreamOperation fromString(String text) {
+        for (StreamOperation b : StreamOperation.values()) {
+            if (b.description.equalsIgnoreCase(text)) {
                 return b;
+            }
         }
 
         return OTHER;
     }
 
-    public String getDescription()
-    {
+    public String getDescription() {
         return description;
     }
 
@@ -67,8 +71,16 @@ public enum StreamOperation
         return this.requiresViewBuild;
     }
 
-    public boolean keepSSTableLevel()
+    /**
+     * @return the corresponding compaction operation type
+     */
+    public OperationType opType()
     {
-        return keepSSTableLevel;
+        switch (this)
+        {
+            case REGION_DECOMMISSION: return OperationType.REGION_DECOMMISSION;
+            case REGION_REPAIR:       return OperationType.REGION_REPAIR;
+            default:                  return OperationType.STREAM;
+        }
     }
 }

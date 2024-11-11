@@ -24,52 +24,57 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.concurrent.Callable;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Future;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
-import javax.annotation.Nullable;
-
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableSet;
-
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.github.jbellis.jvector.vector.VectorSimilarityFunction;
+import io.github.jbellis.jvector.vector.VectorizationProvider;
+import io.github.jbellis.jvector.vector.types.VectorTypeSupport;
+import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQL3Type;
-import org.apache.cassandra.cql3.CqlBuilder;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.restrictions.Restriction;
-import org.apache.cassandra.cql3.restrictions.SimpleRestriction;
-import org.apache.cassandra.cql3.restrictions.ClusteringElements;
+import org.apache.cassandra.cql3.restrictions.SingleColumnRestriction;
 import org.apache.cassandra.cql3.statements.schema.IndexTarget;
 import org.apache.cassandra.db.CassandraWriteContext;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.DeletionTime;
+import org.apache.cassandra.db.RangeTombstone;
 import org.apache.cassandra.db.ReadCommand;
 import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.WriteContext;
 import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.db.compaction.OperationType;
+import org.apache.cassandra.db.compaction.TableOperation;
 import org.apache.cassandra.db.filter.RowFilter;
-import org.apache.cassandra.db.guardrails.GuardrailViolatedException;
-import org.apache.cassandra.db.guardrails.Guardrails;
-import org.apache.cassandra.db.guardrails.MaxThreshold;
 import org.apache.cassandra.db.lifecycle.LifecycleNewTracker;
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.marshal.FloatType;
+import org.apache.cassandra.db.marshal.VectorType;
 import org.apache.cassandra.db.memtable.Memtable;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.Row;
@@ -80,86 +85,133 @@ import org.apache.cassandra.dht.OrderPreservingPartitioner;
 import org.apache.cassandra.dht.RandomPartitioner;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.index.Index;
+import org.apache.cassandra.index.IndexBuildDecider;
 import org.apache.cassandra.index.IndexRegistry;
+import org.apache.cassandra.index.SecondaryIndexBuilder;
+import org.apache.cassandra.index.SecondaryIndexManager;
 import org.apache.cassandra.index.TargetParser;
 import org.apache.cassandra.index.sai.analyzer.AbstractAnalyzer;
+import org.apache.cassandra.index.sai.analyzer.AnalyzerEqOperatorSupport;
+import org.apache.cassandra.index.sai.analyzer.LuceneAnalyzer;
 import org.apache.cassandra.index.sai.analyzer.NonTokenizingOptions;
-import org.apache.cassandra.index.sai.disk.SSTableIndex;
+import org.apache.cassandra.index.sai.disk.StorageAttachedIndexWriter;
 import org.apache.cassandra.index.sai.disk.format.IndexDescriptor;
-import org.apache.cassandra.index.sai.disk.format.Version;
 import org.apache.cassandra.index.sai.disk.v1.IndexWriterConfig;
-import org.apache.cassandra.index.sai.memory.MemtableIndexManager;
-import org.apache.cassandra.index.sai.metrics.ColumnQueryMetrics;
-import org.apache.cassandra.index.sai.metrics.IndexMetrics;
-import org.apache.cassandra.index.sai.utils.IndexIdentifier;
-import org.apache.cassandra.index.sai.utils.IndexTermType;
-import org.apache.cassandra.index.sai.utils.PrimaryKey;
-import org.apache.cassandra.index.sai.view.IndexViewManager;
+import org.apache.cassandra.index.sai.utils.TypeUtil;
 import org.apache.cassandra.index.sai.view.View;
 import org.apache.cassandra.index.transactions.IndexTransaction;
-import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.SSTableFlushObserver;
-import org.apache.cassandra.io.sstable.SSTableIdFactory;
+import org.apache.cassandra.io.sstable.format.SSTableFlushObserver;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.service.ClientWarn;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.Pair;
-import org.apache.cassandra.utils.concurrent.Future;
-import org.apache.cassandra.utils.concurrent.FutureCombiner;
-import org.apache.cassandra.utils.concurrent.ImmediateFuture;
-import org.apache.cassandra.utils.concurrent.OpOrder;
 
+import static org.apache.cassandra.config.CassandraRelevantProperties.SAI_VALIDATE_TERMS_AT_COORDINATOR;
 import static org.apache.cassandra.index.sai.disk.v1.IndexWriterConfig.MAX_TOP_K;
 
 public class StorageAttachedIndex implements Index
 {
-    public static final String NAME = "sai";
-    
-    public static final String VECTOR_USAGE_WARNING = "SAI ANN indexes on vector columns are experimental and are not recommended for production use.\n" +
-                                                      "They don't yet support SELECT queries with:\n" +
-                                                      " * Consistency level higher than ONE/LOCAL_ONE.\n" +
-                                                      " * Paging.\n" +
-                                                      " * No LIMIT clauses.\n" +
-                                                      " * PER PARTITION LIMIT clauses.\n" +
-                                                      " * GROUP BY clauses.\n" +
-                                                      " * Aggregation functions.\n" +
-                                                      " * Filters on columns without a SAI index.";
-
-    public static final String VECTOR_NON_FLOAT_ERROR = "SAI ANN indexes are only allowed on vector columns with float elements";
-    public static final String VECTOR_1_DIMENSION_COSINE_ERROR = "Cosine similarity is not supported for single-dimension vectors";
-    public static final String VECTOR_MULTIPLE_DATA_DIRECTORY_ERROR = "SAI ANN indexes are not allowed on multiple data directories";
-
-    @VisibleForTesting
-    public static final String ANALYSIS_ON_KEY_COLUMNS_MESSAGE = "Analysis options are not supported on primary key columns, but found ";
-
-    public static final String ANN_LIMIT_ERROR = "Use of ANN OF in an ORDER BY clause requires a LIMIT that is not greater than %s. LIMIT was %s";
-
     private static final Logger logger = LoggerFactory.getLogger(StorageAttachedIndex.class);
+    private static final VectorTypeSupport vts = VectorizationProvider.getInstance().getVectorTypeSupport();
 
-    private static final NoSpamLogger noSpamLogger = NoSpamLogger.getLogger(logger, 1, TimeUnit.MINUTES);
+    private static final boolean VALIDATE_TERMS_AT_COORDINATOR = SAI_VALIDATE_TERMS_AT_COORDINATOR.getBoolean();
 
-    public static final String TERM_OVERSIZE_MESSAGE = "Term in column '%s' for key '%s' is too large and cannot be indexed. (term size: %s)";
+    private static class StorageAttachedIndexBuildingSupport implements IndexBuildingSupport
+    {
+        public NavigableMap<SSTableReader, Set<StorageAttachedIndex>> prepareSSTablesToBuild(StorageAttachedIndexGroup group,
+                                                       Set<Index> indexes,
+                                                       Collection<SSTableReader> sstablesToRebuild,
+                                                       boolean isFullRebuild)
+        {
+            NavigableMap<SSTableReader, Set<StorageAttachedIndex>> sstables = new TreeMap<>(SSTableReader.idComparator);
+
+            indexes.stream()
+                   .filter((i) -> i instanceof StorageAttachedIndex)
+                   .forEach((i) ->
+                            {
+                                StorageAttachedIndex sai = (StorageAttachedIndex) i;
+                                IndexContext indexContext = ((StorageAttachedIndex) i).getIndexContext();
+
+                                // If this is not a full manual index rebuild we can skip SSTables that already have an
+                                // attached index. Otherwise, we override any pre-existent index.
+                                Collection<SSTableReader> ss = sstablesToRebuild;
+                                if (!isFullRebuild)
+                                {
+                                    ss = sstablesToRebuild.stream()
+                                                          .filter(s -> !IndexDescriptor.isIndexBuildCompleteOnDisk(s, indexContext))
+                                                          .collect(Collectors.toList());
+                                }
+
+                                group.prepareIndexSSTablesForRebuild(ss, sai);
+
+                                ss.forEach((sstable) ->
+                                           {
+                                               Set<StorageAttachedIndex> toBuild = sstables.get(sstable);
+                                               if (toBuild == null) sstables.put(sstable, (toBuild = new HashSet<>()));
+                                               toBuild.add(sai);
+                                           });
+                            });
+
+            return sstables;
+        }
+
+        @Override
+        public SecondaryIndexBuilder getIndexBuildTask(ColumnFamilyStore cfs, Set<Index> indexes, Collection<SSTableReader> sstablesToRebuild, boolean isFullRebuild)
+        {
+            StorageAttachedIndexGroup group = StorageAttachedIndexGroup.getIndexGroup(cfs);
+            NavigableMap<SSTableReader, Set<StorageAttachedIndex>> sstables = prepareSSTablesToBuild(group, indexes, sstablesToRebuild, isFullRebuild);
+            return new StorageAttachedIndexBuilder(group, sstables, isFullRebuild, false);
+        }
+
+        @Override
+        public List<SecondaryIndexBuilder> getParallelIndexBuildTasks(ColumnFamilyStore cfs, Set<Index> indexes, Collection<SSTableReader> sstablesToRebuild, boolean isFullRebuild)
+        {
+            StorageAttachedIndexGroup indexGroup = StorageAttachedIndexGroup.getIndexGroup(cfs);
+            NavigableMap<SSTableReader, Set<StorageAttachedIndex>> sstables = prepareSSTablesToBuild(indexGroup, indexes, sstablesToRebuild, isFullRebuild);
+
+            List<List<SSTableReader>> groups = groupBySize(new ArrayList<>(sstables.keySet()), DatabaseDescriptor.getConcurrentCompactors());
+            List<SecondaryIndexBuilder> builders = new ArrayList<>();
+
+            for (List<SSTableReader> group : groups)
+            {
+                SortedMap<SSTableReader, Set<StorageAttachedIndex>> current = new TreeMap<>(Comparator.comparing(sstable -> sstable.descriptor.id));
+                group.forEach(sstable -> current.put(sstable, sstables.get(sstable)));
+
+                builders.add(new StorageAttachedIndexBuilder(indexGroup, current, isFullRebuild, false));
+            }
+
+            logger.info("Creating {} parallel index builds over {} total sstables for {}...", builders.size(), sstables.size(), cfs.metadata());
+
+            return builders;
+        }
+    }
 
     // Used to build indexes on newly added SSTables:
     private static final StorageAttachedIndexBuildingSupport INDEX_BUILDER_SUPPORT = new StorageAttachedIndexBuildingSupport();
 
-    private static final Set<String> VALID_OPTIONS = ImmutableSet.of(IndexTarget.TARGET_OPTION_NAME,
+    private static final Set<String> VALID_OPTIONS = ImmutableSet.of(NonTokenizingOptions.CASE_SENSITIVE,
+                                                                     NonTokenizingOptions.NORMALIZE,
+                                                                     NonTokenizingOptions.ASCII,
+                                                                     // For now, we leave this for backward compatibility even though it's not used
+                                                                     IndexContext.ENABLE_SEGMENT_COMPACTION_OPTION_NAME,
+                                                                     IndexTarget.TARGET_OPTION_NAME,
                                                                      IndexTarget.CUSTOM_INDEX_OPTION_NAME,
+                                                                     IndexWriterConfig.POSTING_LIST_LVL_MIN_LEAVES,
+                                                                     IndexWriterConfig.POSTING_LIST_LVL_SKIP_OPTION,
                                                                      IndexWriterConfig.MAXIMUM_NODE_CONNECTIONS,
                                                                      IndexWriterConfig.CONSTRUCTION_BEAM_WIDTH,
                                                                      IndexWriterConfig.SIMILARITY_FUNCTION,
+                                                                     IndexWriterConfig.SOURCE_MODEL,
                                                                      IndexWriterConfig.OPTIMIZE_FOR,
-                                                                     NonTokenizingOptions.CASE_SENSITIVE,
-                                                                     NonTokenizingOptions.NORMALIZE,
-                                                                     NonTokenizingOptions.ASCII);
+                                                                     LuceneAnalyzer.INDEX_ANALYZER,
+                                                                     LuceneAnalyzer.QUERY_ANALYZER,
+                                                                     AnalyzerEqOperatorSupport.OPTION);
 
+    // this does not include vectors because each Vector declaration is a separate type instance
     public static final Set<CQL3Type> SUPPORTED_TYPES = ImmutableSet.of(CQL3Type.Native.ASCII, CQL3Type.Native.BIGINT, CQL3Type.Native.DATE,
                                                                         CQL3Type.Native.DOUBLE, CQL3Type.Native.FLOAT, CQL3Type.Native.INT,
                                                                         CQL3Type.Native.SMALLINT, CQL3Type.Native.TEXT, CQL3Type.Native.TIME,
@@ -171,44 +223,33 @@ public class StorageAttachedIndex implements Index
             ImmutableSet.of(OrderPreservingPartitioner.class, LocalPartitioner.class, ByteOrderedPartitioner.class, RandomPartitioner.class);
 
     private final ColumnFamilyStore baseCfs;
-    private final IndexMetadata indexMetadata;
-    private final IndexTermType indexTermType;
-    private final IndexIdentifier indexIdentifier;
-    private final IndexViewManager viewManager;
-    private final ColumnQueryMetrics columnQueryMetrics;
-    private final IndexWriterConfig indexWriterConfig;
-    @Nullable private final AbstractAnalyzer.AnalyzerFactory analyzerFactory;
-    private final PrimaryKey.Factory primaryKeyFactory;
-    private final MemtableIndexManager memtableIndexManager;
-    private final IndexMetrics indexMetrics;
-    private final MaxThreshold maxTermSizeGuardrail;
+    private final IndexMetadata config;
+    private final IndexContext indexContext;
 
-    // Tracks whether we've started the index build on initialization.
-    private volatile boolean initBuildStarted = false;
+    // Tracks whether or not we've started the index build on initialization.
+    private volatile boolean canFlushFromMemtableIndex = false;
 
     // Tracks whether the index has been invalidated due to removal, a table drop, etc.
     private volatile boolean valid = true;
 
-    public StorageAttachedIndex(ColumnFamilyStore baseCfs, IndexMetadata indexMetadata)
+    /**
+     * Called via reflection from SecondaryIndexManager
+     */
+    public StorageAttachedIndex(ColumnFamilyStore baseCfs, IndexMetadata config)
     {
         this.baseCfs = baseCfs;
-        this.indexMetadata = indexMetadata;
+        this.config = config;
         TableMetadata tableMetadata = baseCfs.metadata();
-        Pair<ColumnMetadata, IndexTarget.Type> target = TargetParser.parse(tableMetadata, indexMetadata);
-        indexTermType = IndexTermType.create(target.left, tableMetadata.partitionKeyColumns(), target.right);
-        indexIdentifier = new IndexIdentifier(baseCfs.getKeyspaceName(), baseCfs.getTableName(), indexMetadata.name);
-        primaryKeyFactory = new PrimaryKey.Factory(tableMetadata.partitioner, tableMetadata.comparator);
-        indexWriterConfig = IndexWriterConfig.fromOptions(indexMetadata.name, indexTermType, indexMetadata.options);
-        viewManager = new IndexViewManager(this);
-        columnQueryMetrics = indexTermType.isLiteral() ? new ColumnQueryMetrics.TrieIndexMetrics(indexIdentifier)
-                                                       : new ColumnQueryMetrics.BalancedTreeIndexMetrics(indexIdentifier);
-        analyzerFactory = AbstractAnalyzer.fromOptions(indexTermType, indexMetadata.options);
-        memtableIndexManager = new MemtableIndexManager(this);
-        indexMetrics = new IndexMetrics(this, memtableIndexManager);
-        maxTermSizeGuardrail = indexTermType.isVector()
-                               ? Guardrails.saiVectorTermSize
-                               : (indexTermType.isFrozen() ? Guardrails.saiFrozenTermSize
-                                                           : Guardrails.saiStringTermSize);
+        Pair<ColumnMetadata, IndexTarget.Type> target = TargetParser.parse(tableMetadata, config);
+        this.indexContext = new IndexContext(tableMetadata.keyspace,
+                                             tableMetadata.name,
+                                             tableMetadata.id,
+                                             tableMetadata.partitionKeyType,
+                                             tableMetadata.comparator,
+                                             target.left,
+                                             target.right,
+                                             config,
+                                             baseCfs);
     }
 
     /**
@@ -256,7 +297,7 @@ public class StorageAttachedIndex implements Index
             throw new InvalidRequestException("Failed to retrieve target column for: " + targetColumn);
         }
 
-        // In order to support different index targets on non-frozen map, ie. KEYS, VALUE, ENTRIES, we need to put index
+        // In order to support different index target on non-frozen map, ie. KEYS, VALUE, ENTRIES, we need to put index
         // name as part of index file name instead of column name. We only need to check that the target is different
         // between indexes. This will only allow indexes in the same column with a different IndexTarget.Type.
         //
@@ -268,42 +309,57 @@ public class StorageAttachedIndex implements Index
             throw new InvalidRequestException("Cannot create more than one storage-attached index on the same column: " + target.left);
         }
 
-        Map<String, String> analysisOptions = AbstractAnalyzer.getAnalyzerOptions(options);
-        if (target.left.isPrimaryKeyColumn() && !analysisOptions.isEmpty())
+        // Analyzer is not supported against PK columns
+        if (AbstractAnalyzer.isAnalyzed(options))
         {
-            throw new InvalidRequestException(ANALYSIS_ON_KEY_COLUMNS_MESSAGE + new CqlBuilder().append(analysisOptions));
-        }
-
-        IndexTermType indexTermType = IndexTermType.create(target.left, metadata.partitionKeyColumns(), target.right);
-        AbstractAnalyzer.fromOptions(indexTermType, analysisOptions);
-        IndexWriterConfig config = IndexWriterConfig.fromOptions(null, indexTermType, options);
-
-        // If we are indexing map entries we need to validate the subtypes
-        if (indexTermType.isComposite())
-        {
-            for (IndexTermType subType : indexTermType.subTypes())
+            for (ColumnMetadata column : metadata.primaryKeyColumns())
             {
-                if (!SUPPORTED_TYPES.contains(subType.asCQL3Type()) && !subType.isFrozen())
-                    throw new InvalidRequestException("Unsupported type: " + subType.asCQL3Type());
+                if (column.name.equals(target.left.name))
+                    logger.warn("Schema contains an invalid index analyzer on primary key column, allowed for backwards compatibility: " + target.left);
             }
         }
-        else if (!SUPPORTED_TYPES.contains(indexTermType.asCQL3Type()) && !indexTermType.isFrozen())
+
+        AbstractType<?> type = TypeUtil.cellValueType(target.left, target.right);
+        AbstractAnalyzer.fromOptions(type, options); // will throw if invalid
+        if (AbstractAnalyzer.hasQueryAnalyzer(options))
+            AbstractAnalyzer.fromOptionsQueryAnalyzer(type, options); // will throw if invalid
+        var config = IndexWriterConfig.fromOptions(null, type, options);
+
+        // If we are indexing map entries we need to validate the sub-types
+        if (TypeUtil.isComposite(type))
         {
-            throw new InvalidRequestException("Unsupported type: " + indexTermType.asCQL3Type());
+            for (AbstractType<?> subType : type.subTypes())
+            {
+                if (!SUPPORTED_TYPES.contains(subType.asCQL3Type()) && !TypeUtil.isFrozen(subType))
+                    throw new InvalidRequestException("Unsupported composite type for SAI: " + subType.asCQL3Type());
+            }
         }
-        // If this is a vector type we need to validate it for the current vector index constraints
-        else if (indexTermType.isVector())
+        else if (type.isVector())
         {
-            if (!(indexTermType.vectorElementType() instanceof FloatType))
-                throw new InvalidRequestException(VECTOR_NON_FLOAT_ERROR);
+            if (type.valueLengthIfFixed() == 4 && config.getSimilarityFunction() == VectorSimilarityFunction.COSINE)
+                throw new InvalidRequestException("Cosine similarity is not supported for single-dimension vectors");
 
-            if (indexTermType.vectorDimension() == 1 && config.getSimilarityFunction() == VectorSimilarityFunction.COSINE)
-                throw new InvalidRequestException(VECTOR_1_DIMENSION_COSINE_ERROR);
-
-            if (DatabaseDescriptor.getRawConfig().data_file_directories.length > 1)
-                throw new InvalidRequestException(VECTOR_MULTIPLE_DATA_DIRECTORY_ERROR);
-
-            ClientWarn.instance.warn(VECTOR_USAGE_WARNING);
+            // vectors of fixed length types are fixed length too, so we can reject the index creation
+            // if that fixed length is over the max term size for vectors
+            if (type.isValueLengthFixed() && IndexContext.MAX_VECTOR_TERM_SIZE < type.valueLengthIfFixed())
+            {
+                AbstractType<?> elementType = ((VectorType<?>) type).elementType;
+                var error = String.format("Vector index created with %s will produce terms of %s, " +
+                                          "exceeding the max vector term size of %s. " +
+                                          "That sets an implicit limit of %d dimensions for %s vectors.",
+                                          type.asCQL3Type(),
+                                          FBUtilities.prettyPrintMemory(type.valueLengthIfFixed()),
+                                          FBUtilities.prettyPrintMemory(IndexContext.MAX_VECTOR_TERM_SIZE),
+                                          IndexContext.MAX_VECTOR_TERM_SIZE / elementType.valueLengthIfFixed(),
+                                          elementType.asCQL3Type());
+                // VSTODO until we can safely differentiate client and system requests, we can only log here
+                // Ticket for this: https://github.com/riptano/VECTOR-SEARCH/issues/85
+                logger.warn(error);
+            }
+        }
+        else if (!SUPPORTED_TYPES.contains(type.asCQL3Type()) && !TypeUtil.isFrozen(type))
+        {
+            throw new InvalidRequestException("Unsupported type for SAI: " + type.asCQL3Type());
         }
 
         return Collections.emptyMap();
@@ -325,239 +381,89 @@ public class StorageAttachedIndex implements Index
     @Override
     public IndexMetadata getIndexMetadata()
     {
-        return indexMetadata;
+        return config;
+    }
+
+    @Override
+    public boolean shouldSkipInitialization()
+    {
+        // SAI performs partial initialization so it must always execute it; the actual index build is then still skipped
+        // if IndexBuildDecider.instance.onInitialBuild().skipped() is true.
+        return false;
     }
 
     @Override
     public Callable<?> getInitializationTask()
     {
+        IndexBuildDecider.Decision decision = IndexBuildDecider.instance.onInitialBuild();
         // New storage-attached indexes will be available for queries after on disk index data are built.
         // Memtable data will be indexed via flushing triggered by schema change
         // We only want to validate the index files if we are starting up
-        IndexValidation validation = StorageService.instance.isStarting() ? IndexValidation.HEADER_FOOTER : IndexValidation.NONE;
-        return () -> startInitialBuild(baseCfs, validation).get();
+        return () -> startInitialBuild(baseCfs, StorageService.instance.isStarting(), decision.skipped()).get();
     }
 
-    @Override
-    public Callable<?> getMetadataReloadTask(IndexMetadata indexMetadata)
+    private Future<?> startInitialBuild(ColumnFamilyStore baseCfs, boolean validate, boolean skipIndexBuild)
     {
-        return null;
-    }
-
-    @Override
-    public Callable<?> getBlockingFlushTask()
-    {
-        return null; // storage-attached indexes are flushed alongside memtable
-    }
-
-    @Override
-    public Callable<?> getInvalidateTask()
-    {
-        return () ->
+        if (skipIndexBuild)
         {
-            // mark index as invalid, in-progress SSTableIndexWriters will abort
-            valid = false;
+            logger.info("Skipping initialization task for {}.{} after flushing memtable", baseCfs.metadata(), indexContext.getIndexName());
+            // Force another flush to make sure on disk index is generated for memtable data before marking it queryable.
+            // In case of offline scrub, there is no live memtables.
+            if (!baseCfs.getTracker().getView().liveMemtables.isEmpty())
+                baseCfs.forceBlockingFlush(ColumnFamilyStore.FlushReason.INDEX_BUILD_STARTED);
 
-            // in case of dropping table, SSTable indexes should already been removed by SSTableListChangedNotification.
-            Set<Component> toRemove = getComponents();
-            for (SSTableIndex sstableIndex : view().getIndexes())
-                sstableIndex.getSSTable().unregisterComponents(toRemove, baseCfs.getTracker());
-
-            viewManager.invalidate();
-            if (analyzerFactory != null)
-                analyzerFactory.close();
-            columnQueryMetrics.release();
-            memtableIndexManager.invalidate();
-            indexMetrics.release();
-            return null;
-        };
-    }
-
-    @Override
-    public Callable<?> getPreJoinTask(boolean hadBootstrap)
-    {
-        /*
-         * During bootstrap, streamed SSTable are already built for existing indexes via {@link StorageAttachedIndexBuildingSupport}
-         * from {@link org.apache.cassandra.streaming.StreamReceiveTask.OnCompletionRunnable}.
-         *
-         * For indexes created during bootstrapping, we don't have to block bootstrap for them.
-         */
-
-        return this::startPreJoinTask;
-    }
-
-    @Override
-    public Callable<?> getTruncateTask(long truncatedAt)
-    {
-        /*
-         * index files will be removed as part of base sstable lifecycle in {@link LogTransaction#delete(java.io.File)}
-         * asynchronously, but we need to mark the index queryable because if the truncation is during the initial
-         * build of the index it won't get marked queryable by the build.
-         */
-        return () -> {
-            logger.info(indexIdentifier.logMessage("Making index queryable during table truncation"));
-            baseCfs.indexManager.makeIndexQueryable(this, Status.BUILD_SUCCEEDED);
-            return null;
-        };
-    }
-
-    @Override
-    public boolean shouldBuildBlocking()
-    {
-        return true;
-    }
-
-    @Override
-    public boolean isSSTableAttached()
-    {
-        return true;
-    }
-
-    @Override
-    public Optional<ColumnFamilyStore> getBackingTable()
-    {
-        return Optional.empty();
-    }
-
-    @Override
-    public boolean dependsOn(ColumnMetadata column)
-    {
-        return indexTermType.dependsOn(column);
-    }
-
-    @Override
-    public boolean supportsExpression(ColumnMetadata column, Operator operator)
-    {
-        return dependsOn(column) && indexTermType.supports(operator);
-    }
-
-    @Override
-    public boolean filtersMultipleContains()
-    {
-        return false;
-    }
-
-    @Override
-    public AbstractType<?> customExpressionValueType()
-    {
-        return null;
-    }
-
-    @Override
-    public RowFilter getPostIndexQueryFilter(RowFilter filter)
-    {
-        // it should be executed from the SAI query plan, this is only used by the singleton index query plan
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public Comparator<ByteBuffer> getPostQueryOrdering(Restriction restriction, QueryOptions options)
-    {
-        // For now, only support ANN
-        assert restriction instanceof SimpleRestriction
-               && ((SimpleRestriction) restriction).operator() == Operator.ANN;
-
-        Preconditions.checkState(indexTermType.isVector());
-
-        SimpleRestriction annRestriction = (SimpleRestriction) restriction;
-        VectorSimilarityFunction function = indexWriterConfig.getSimilarityFunction();
-
-        List<ClusteringElements> elementsList = annRestriction.values(options);
-        ByteBuffer serializedVector = elementsList.get(0).get(0).duplicate();
-        float[] target = indexTermType.decomposeVector(serializedVector);
-
-        return (leftBuf, rightBuf) -> {
-            float[] left = indexTermType.decomposeVector(leftBuf.duplicate());
-            double scoreLeft = function.compare(left, target);
-
-            float[] right = indexTermType.decomposeVector(rightBuf.duplicate());
-            double scoreRight = function.compare(right, target);
-            return Double.compare(scoreRight, scoreLeft); // descending order
-        };
-    }
-
-    @Override
-    public void validate(ReadCommand command) throws InvalidRequestException
-    {
-        if (!indexTermType.isVector())
-            return;
-
-        // to avoid overflow of the vector graph internal data structure and avoid OOM when filtering top-k
-        if (command.limits().count() > MAX_TOP_K)
-            throw new InvalidRequestException(String.format(ANN_LIMIT_ERROR, MAX_TOP_K, command.limits().count()));
-    }
-
-    @Override
-    public long getEstimatedResultRows()
-    {
-        throw new UnsupportedOperationException("Use StorageAttachedIndexQueryPlan#getEstimatedResultRows() instead.");
-    }
-
-    @Override
-    public boolean isQueryable(Status status)
-    {
-        // consider unknown status as queryable, because gossip may not be up-to-date for newly joining nodes.
-        return status == Status.BUILD_SUCCEEDED || status == Status.UNKNOWN;
-    }
-
-    @Override
-    public void validate(PartitionUpdate update, ClientState state) throws InvalidRequestException
-    {
-        DecoratedKey key = update.partitionKey();
-
-        if (indexTermType.columnMetadata().isStatic())
-            validateTermSizeForRow(key, update.staticRow(), true, state);
-        else
-            for (Row row : update)
-                validateTermSizeForRow(key, row, true, state);
-    }
-
-    @Override
-    public Searcher searcherFor(ReadCommand command) throws InvalidRequestException
-    {
-        // searchers should be created from the query plan, this is only used by the singleton index query plan
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public SSTableFlushObserver getFlushObserver(Descriptor descriptor, LifecycleNewTracker tracker)
-    {
-        // flush observers should be created from the index group, this is only used by the singleton index group
-        throw new UnsupportedOperationException("Storage-attached index flush observers should never be created directly.");
-    }
-
-    @Override
-    public Set<Component> getComponents()
-    {
-        return Version.LATEST.onDiskFormat()
-                             .perColumnIndexComponents(indexTermType)
-                             .stream()
-                             .map(c -> Version.LATEST.makePerIndexComponent(c, indexIdentifier))
-                             .collect(Collectors.toSet());
-    }
-
-    @Override
-    public Indexer indexerFor(DecoratedKey key,
-                              RegularAndStaticColumns columns,
-                              long nowInSec,
-                              WriteContext writeContext,
-                              IndexTransaction.Type transactionType,
-                              Memtable memtable)
-    {
-        if (transactionType == IndexTransaction.Type.UPDATE)
-        {
-            return new UpdateIndexer(key, memtable, writeContext);
+            // From now on, all memtable will have attached memtable index. It is now safe to flush indexes directly from flushing Memtables.
+            canFlushFromMemtableIndex = true;
+            return CompletableFuture.completedFuture(null);
         }
 
-        // we are only interested in the data from Memtable
-        // everything else is going to be handled by SSTableWriter observers
-        return null;
-    }
+        if (baseCfs.indexManager.isIndexQueryable(this))
+        {
+            logger.debug(indexContext.logMessage("Skipping validation and building in initialization task, as pre-join has already made the storage attached index queryable..."));
+            canFlushFromMemtableIndex = true;
+            return CompletableFuture.completedFuture(null);
+        }
 
-    @Override
-    public IndexBuildingSupport getBuildTaskSupport()
-    {
-        return INDEX_BUILDER_SUPPORT;
+        // stop in-progress compaction tasks to prevent compacted sstable not being index.
+        logger.debug(indexContext.logMessage("Stopping active compactions to make sure all sstables are indexed after initial build."));
+        CompactionManager.instance.interruptCompactionFor(Collections.singleton(baseCfs.metadata()),
+                                                          OperationType.REWRITES_SSTABLES,
+                                                          Predicates.alwaysTrue(),
+                                                          true,
+                                                          TableOperation.StopTrigger.INDEX_BUILD);
+
+        // Force another flush to make sure on disk index is generated for memtable data before marking it queryable.
+        // In case of offline scrub, there is no live memtables.
+        if (!baseCfs.getTracker().getView().liveMemtables.isEmpty())
+        {
+            baseCfs.forceBlockingFlush(ColumnFamilyStore.FlushReason.INDEX_BUILD_STARTED);
+        }
+
+        // From now on, all memtable will have attached memtable index. It is now safe to flush indexes directly from flushing Memtables.
+        canFlushFromMemtableIndex = true;
+
+        StorageAttachedIndexGroup indexGroup = StorageAttachedIndexGroup.getIndexGroup(baseCfs);
+        List<SSTableReader> nonIndexed = findNonIndexedSSTables(baseCfs, indexGroup, validate);
+
+        if (nonIndexed.isEmpty())
+        {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        // split sorted sstables into groups with similar size and build each group in separate compaction thread
+        List<List<SSTableReader>> groups = groupBySize(nonIndexed, DatabaseDescriptor.getConcurrentCompactors());
+        List<ListenableFuture<?>> futures = new ArrayList<>();
+
+        for (List<SSTableReader> group : groups)
+        {
+            SortedMap<SSTableReader, Set<StorageAttachedIndex>> current = new TreeMap<>(SSTableReader.idComparator);
+            group.forEach(sstable -> current.put(sstable, Collections.singleton(this)));
+
+            futures.add(CompactionManager.instance.submitIndexBuild(new StorageAttachedIndexBuilder(indexGroup, current, false, true)));
+        }
+
+        logger.info(indexContext.logMessage("Submitting {} parallel initial index builds over {} total sstables..."), futures.size(), nonIndexed.size());
+        return Futures.allAsList(futures);
     }
 
     /**
@@ -596,83 +502,68 @@ public class StorageAttachedIndex implements Index
         return groups;
     }
 
-    /**
-     * @return A set of SSTables which have attached to them invalid index components.
-     */
-    public Collection<SSTableContext> onSSTableChanged(Collection<SSTableReader> oldSSTables, Collection<SSTableContext> newSSTables, IndexValidation validation)
+    @Override
+    public Callable<?> getMetadataReloadTask(IndexMetadata indexMetadata)
     {
-        return viewManager.update(oldSSTables, newSSTables, validation);
+        return null;
     }
 
-    public void drop(Collection<SSTableReader> sstablesToRebuild)
+    @Override
+    public Callable<?> getBlockingFlushTask()
     {
-        viewManager.drop(sstablesToRebuild);
+        return null; // storage-attached indexes are flushed alongside memtable
     }
 
-    public MemtableIndexManager memtableIndexManager()
+    @Override
+    public Callable<?> getInvalidateTask()
     {
-        return memtableIndexManager;
+        return () ->
+        {
+            // mark index as invalid, in-progress SSTableIndexWriters will abort
+            valid = false;
+
+            // in case of dropping table, SSTable indexes should already been removed by SSTableListChangedNotification.
+            for (SSTableIndex sstableIndex : indexContext.getView().getIndexes())
+            {
+                var components = sstableIndex.usedPerIndexComponents();
+                sstableIndex.getSSTable().unregisterComponents(components.allAsCustomComponents(), baseCfs.getTracker());
+            }
+
+            indexContext.invalidate(true);
+            return null;
+        };
     }
 
-    public View view()
+    @Override
+    public Callable<?> getUnloadTask()
     {
-        return viewManager.view();
+        return () ->
+        {
+            // mark index as invalid, in-progress SSTableIndexWriters will abort
+            valid = false;
+
+            indexContext.invalidate(false);
+            return null;
+        };
     }
 
-    public IndexTermType termType()
+    @Override
+    public Callable<?> getPreJoinTask(boolean hadBootstrap)
     {
-        return indexTermType;
-    }
+        /*
+         * During bootstrap, streamed SSTable are already built for existing indexes via {@link StorageAttachedIndexBuildingSupport}
+         * from {@link org.apache.cassandra.streaming.StreamReceiveTask.OnCompletionRunnable}.
+         *
+         * For indexes created during bootstrapping, we don't have to block bootstrap for them.
+         */
 
-    public IndexIdentifier identifier()
-    {
-        return indexIdentifier;
-    }
-
-    public PrimaryKey.Factory keyFactory()
-    {
-        return primaryKeyFactory;
+        return this::startPreJoinTask;
     }
 
     @VisibleForTesting
-    public ColumnFamilyStore baseCfs()
+    public boolean canFlushFromMemtableIndex()
     {
-        return baseCfs;
-    }
-
-    public IndexWriterConfig indexWriterConfig()
-    {
-        return indexWriterConfig;
-    }
-
-    public boolean hasAnalyzer()
-    {
-        return analyzerFactory != null;
-    }
-
-    /**
-     * Returns an {@link AbstractAnalyzer} for use by write and query paths to transform
-     * literal values.
-     */
-    public AbstractAnalyzer analyzer()
-    {
-        assert analyzerFactory != null : "Index does not support string analysis";
-        return analyzerFactory.create();
-    }
-
-    public IndexMetrics indexMetrics()
-    {
-        return indexMetrics;
-    }
-
-    public ColumnQueryMetrics columnQueryMetrics()
-    {
-        return columnQueryMetrics;
-    }
-
-    public boolean isInitBuildStarted()
-    {
-        return initBuildStarted;
+        return canFlushFromMemtableIndex;
     }
 
     public BooleanSupplier isIndexValid()
@@ -680,222 +571,19 @@ public class StorageAttachedIndex implements Index
         return () -> valid;
     }
 
-    public boolean hasClustering()
-    {
-        return baseCfs.getComparator().size() > 0;
-    }
-
-    /**
-     * @return the number of indexed rows in this index (aka. a pair of term and rowId)
-     */
-    public long cellCount()
-    {
-        return view().getIndexes()
-                     .stream()
-                     .mapToLong(SSTableIndex::getRowCount)
-                     .sum();
-    }
-
-    /**
-     * @return total number of per-index open files
-     */
-    public int openPerColumnIndexFiles()
-    {
-        return viewManager.view().size() * Version.LATEST.onDiskFormat().openFilesPerColumnIndex();
-    }
-
-    /**
-     * @return the total size (in bytes) of per-column index components
-     */
-    public long diskUsage()
-    {
-        return view().getIndexes()
-                     .stream()
-                     .mapToLong(SSTableIndex::sizeOfPerColumnComponents)
-                     .sum();
-    }
-
-    /**
-     * @return the total memory usage (in bytes) of per-column index on-disk data structure
-     */
-    public long indexFileCacheSize()
-    {
-        return view().getIndexes()
-                     .stream()
-                     .mapToLong(SSTableIndex::indexFileCacheSize)
-                     .sum();
-    }
-
-    /**
-     * Removes this index from the {@code SecondaryIndexManager}'s set of queryable indexes.
-     */
-    public void makeIndexNonQueryable()
-    {
-        baseCfs.indexManager.makeIndexNonQueryable(this, Status.BUILD_FAILED);
-        logger.warn(indexIdentifier.logMessage("Storage-attached index is no longer queryable. Please restart this node to repair it."));
-    }
-
-    /**
-     * Validate maximum term size for given row
-     */
-    public void validateTermSizeForRow(DecoratedKey key, Row row, boolean isClientMutation, ClientState state)
-    {
-        AbstractAnalyzer analyzer = hasAnalyzer() ? analyzer() : null;
-        if (indexTermType.isNonFrozenCollection())
-        {
-            Iterator<ByteBuffer> bufferIterator = indexTermType.valuesOf(row, FBUtilities.nowInSeconds());
-            while (bufferIterator != null && bufferIterator.hasNext())
-                validateTermSizeForCell(analyzer, key, bufferIterator.next(), isClientMutation, state);
-        }
-        else
-        {
-            ByteBuffer value = indexTermType.valueOf(key, row, FBUtilities.nowInSeconds());
-            validateTermSizeForCell(analyzer, key, value, isClientMutation, state);
-        }
-    }
-
-    private void validateTermSizeForCell(AbstractAnalyzer analyzer, DecoratedKey key, @Nullable ByteBuffer cellBuffer, boolean isClientMutation, ClientState state)
-    {
-        if (cellBuffer == null || cellBuffer.remaining() == 0)
-            return;
-
-        // analyzer should not return terms that are larger than the origin value.
-        if (!maxTermSizeGuardrail.warnsOn(cellBuffer.remaining(), null))
-            return;
-
-        if (analyzer != null)
-        {
-            analyzer.reset(cellBuffer.duplicate());
-            while (analyzer.hasNext())
-                validateTermSize(key, analyzer.next(), isClientMutation, state);
-        }
-        else
-        {
-            validateTermSize(key, cellBuffer.duplicate(), isClientMutation, state);
-        }
-    }
-
-    /**
-     * @return true if the size of the given term is below the maximum term size, false otherwise
-     * 
-     * @throws GuardrailViolatedException if a client mutation contains a term that breaches the failure threshold
-     */
-    public boolean validateTermSize(DecoratedKey key, ByteBuffer term, boolean isClientMutation, ClientState state)
-    {
-        if (isClientMutation)
-        {
-            maxTermSizeGuardrail.guard(term.remaining(), indexTermType.columnName(), false, state);
-            return true;
-        }
-
-        if (maxTermSizeGuardrail.failsOn(term.remaining(), state))
-        {
-            String message = indexIdentifier.logMessage(String.format(TERM_OVERSIZE_MESSAGE,
-                                                                      indexTermType.columnName(),
-                                                                      key,
-                                                                      FBUtilities.prettyPrintMemory(term.remaining())));
-            noSpamLogger.warn(message);
-            return false;
-        }
-
-        return true;
-    }
-
-    @Override
-    public String toString()
-    {
-        return indexIdentifier.toString();
-    }
-
-    @Override
-    public boolean equals(Object obj)
-    {
-        if (obj == this)
-            return true;
-
-        if (!(obj instanceof StorageAttachedIndex))
-            return false;
-
-        StorageAttachedIndex other = (StorageAttachedIndex) obj;
-
-        return Objects.equals(indexTermType, other.indexTermType) &&
-               Objects.equals(indexMetadata, other.indexMetadata) &&
-               Objects.equals(baseCfs.getComparator(), other.baseCfs.getComparator());
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(indexTermType, indexMetadata, baseCfs.getComparator());
-    }
-
-    private Future<?> startInitialBuild(ColumnFamilyStore baseCfs, IndexValidation validation)
-    {
-        if (baseCfs.indexManager.isIndexQueryable(this))
-        {
-            logger.debug(indexIdentifier.logMessage("Skipping validation and building in initialization task, as pre-join has already made the storage-attached index queryable..."));
-            initBuildStarted = true;
-            return ImmediateFuture.success(null);
-        }
-
-        // stop in-progress compaction tasks to prevent compacted sstable not being indexed.
-        logger.debug(indexIdentifier.logMessage("Stopping active compactions to make sure all sstables are indexed after initial build."));
-        CompactionManager.instance.interruptCompactionFor(Collections.singleton(baseCfs.metadata()),
-                                                          ssTableReader -> true,
-                                                          true);
-
-        // Force another flush to make sure on disk index is generated for memtable data before marking it queryable.
-        // In the case of offline scrub, there are no live memtables.
-        if (!baseCfs.getTracker().getView().liveMemtables.isEmpty())
-        {
-            baseCfs.forceBlockingFlush(ColumnFamilyStore.FlushReason.INDEX_BUILD_STARTED);
-        }
-
-        // It is now safe to flush indexes directly from flushing Memtables.
-        initBuildStarted = true;
-
-        StorageAttachedIndexGroup indexGroup = StorageAttachedIndexGroup.getIndexGroup(baseCfs);
-
-        assert indexGroup != null : "Index group does not exist for table " + baseCfs.keyspace + '.' + baseCfs.name;
-
-        List<SSTableReader> nonIndexed = findNonIndexedSSTables(baseCfs, indexGroup, validation);
-
-        if (nonIndexed.isEmpty())
-            return ImmediateFuture.success(null);
-
-        // split sorted sstables into groups with similar size and build each group in separate compaction thread
-        List<List<SSTableReader>> groups = groupBySize(nonIndexed, DatabaseDescriptor.getConcurrentIndexBuilders());
-        List<Future<?>> futures = new ArrayList<>();
-
-        for (List<SSTableReader> group : groups)
-        {
-            SortedMap<SSTableReader, Set<StorageAttachedIndex>> current = new TreeMap<>(Comparator.comparing(s -> s.descriptor.id, SSTableIdFactory.COMPARATOR));
-            group.forEach(sstable -> current.put(sstable, Collections.singleton(this)));
-
-            futures.add(CompactionManager.instance.submitIndexBuild(new StorageAttachedIndexBuilder(indexGroup, current, false, true)));
-        }
-
-        logger.info(indexIdentifier.logMessage("Submitting {} parallel initial index builds over {} total sstables..."), futures.size(), nonIndexed.size());
-        return FutureCombiner.allOf(futures);
-    }
-
-    @SuppressWarnings("SameReturnValue")
     private Future<?> startPreJoinTask()
     {
         try
         {
             if (baseCfs.indexManager.isIndexQueryable(this))
             {
-                logger.debug(indexIdentifier.logMessage("Skipping validation in pre-join task, as the initialization task has already made the index queryable..."));
+                logger.debug(indexContext.logMessage("Skipping validation in pre-join task, as the initialization task has already made the index queryable..."));
                 baseCfs.indexManager.makeIndexQueryable(this, Status.BUILD_SUCCEEDED);
                 return null;
             }
 
-            StorageAttachedIndexGroup indexGroup = StorageAttachedIndexGroup.getIndexGroup(baseCfs);
-
-            assert indexGroup != null : "Index group does not exist for table";
-
-            Collection<SSTableReader> nonIndexed = findNonIndexedSSTables(baseCfs, indexGroup, IndexValidation.HEADER_FOOTER);
+            StorageAttachedIndexGroup group = StorageAttachedIndexGroup.getIndexGroup(baseCfs);
+            Collection<SSTableReader> nonIndexed = findNonIndexedSSTables(baseCfs, group, true);
 
             if (nonIndexed.isEmpty())
             {
@@ -905,10 +593,144 @@ public class StorageAttachedIndex implements Index
         }
         catch (Throwable t)
         {
-            logger.error(indexIdentifier.logMessage("Failed in pre-join task!"), t);
+            logger.error(indexContext.logMessage("Failed in pre-join task!"), t);
         }
 
         return null;
+    }
+
+    @Override
+    public Callable<?> getTruncateTask(long truncatedAt)
+    {
+        /*
+         * index files will be removed as part of base sstable lifecycle in {@link LogTransaction#delete(java.io.File)}
+         * asynchronously, but we need to mark the index queryable because if the truncation is during the initial
+         * build of the index it won't get marked queryable by the build.
+         */
+        return () -> {
+            logger.info(indexContext.logMessage("Making index queryable during table truncation"));
+            baseCfs.indexManager.makeIndexQueryable(this, Status.BUILD_SUCCEEDED);
+            return null;
+        };
+    }
+
+    @Override
+    public boolean shouldBuildBlocking()
+    {
+        return true;
+    }
+
+    @Override
+    public Optional<ColumnFamilyStore> getBackingTable()
+    {
+        return Optional.empty();
+    }
+
+    @Override
+    public boolean dependsOn(ColumnMetadata column)
+    {
+        return indexContext.getDefinition().compareTo(column) == 0;
+    }
+
+    @Override
+    public boolean supportsExpression(ColumnMetadata column, Operator operator)
+    {
+        return dependsOn(column) && indexContext.supports(operator);
+    }
+
+    @Override
+    public AbstractType<?> customExpressionValueType()
+    {
+        return null;
+    }
+
+    @Override
+    public RowFilter getPostIndexQueryFilter(RowFilter filter)
+    {
+        // it should be executed from the SAI query plan, this is only used by the singleton index query plan
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public Comparator<List<ByteBuffer>> postQueryComparator(Restriction restriction, int columnIndex, QueryOptions options)
+    {
+        assert restriction instanceof SingleColumnRestriction.OrderRestriction;
+
+        SingleColumnRestriction.OrderRestriction orderRestriction = (SingleColumnRestriction.OrderRestriction) restriction;
+        var typeComparator = orderRestriction.getDirection() == Operator.ORDER_BY_DESC
+                             ? indexContext.getValidator().reversed()
+                             : indexContext.getValidator();
+        return (a, b) -> typeComparator.compare(a.get(columnIndex), b.get(columnIndex));
+    }
+
+    @Override
+    public Scorer postQueryScorer(Restriction restriction, int columnIndex, QueryOptions options)
+    {
+        // For now, only support ANN
+        assert restriction instanceof SingleColumnRestriction.AnnRestriction;
+
+        Preconditions.checkState(indexContext.isVector());
+
+        SingleColumnRestriction.AnnRestriction annRestriction = (SingleColumnRestriction.AnnRestriction) restriction;
+        VectorSimilarityFunction similarityFunction = indexContext.getIndexWriterConfig().getSimilarityFunction();
+
+        var targetVector = vts.createFloatVector(TypeUtil.decomposeVector(indexContext, annRestriction.value(options).duplicate()));
+
+        return new Scorer()
+        {
+            @Override
+            public float score(List<ByteBuffer> row)
+            {
+                ByteBuffer vectorBuffer = row.get(columnIndex);
+                var vector = vts.createFloatVector(TypeUtil.decomposeVector(indexContext, vectorBuffer.duplicate()));
+                return similarityFunction.compare(vector, targetVector);
+            }
+
+            @Override
+            public boolean reversed()
+            {
+                return true;
+            }
+        };
+    }
+
+    @Override
+    public void validate(ReadCommand command) throws InvalidRequestException
+    {
+        var indexQueryPlan = command.indexQueryPlan();
+        if (indexQueryPlan == null || !indexQueryPlan.isTopK())
+            return;
+
+        // to avoid overflow HNSW internal data structure and avoid OOM when filtering top-k
+        if (command.limits().isUnlimited() || command.limits().count() > MAX_TOP_K)
+            throw new InvalidRequestException(String.format("SAI based ORDER BY clause requires a LIMIT that is not greater than %s. LIMIT was %s",
+                                                            MAX_TOP_K, command.limits().isUnlimited() ? "NO LIMIT" : command.limits().count()));
+
+        indexContext.validate(command.rowFilter());
+    }
+
+    @Override
+    public long getEstimatedResultRows()
+    {
+        throw new UnsupportedOperationException("Use StorageAttachedIndexQueryPlan#getEstimatedResultRows() instead.");
+    }
+
+    @Override
+    public boolean isQueryable(Status status)
+    {
+        return !CassandraRelevantProperties.SAI_INDEX_READS_DISABLED.getBoolean()
+            && (status == Status.BUILD_SUCCEEDED || status == Status.UNKNOWN);
+    }
+
+    @Override
+    public void validate(PartitionUpdate update) throws InvalidRequestException
+    {
+        if (!VALIDATE_TERMS_AT_COORDINATOR)
+            return;
+
+        DecoratedKey key = update.partitionKey();
+        for (Row row : update.rows())
+            indexContext.validate(key, row);
     }
 
     /**
@@ -917,17 +739,17 @@ public class StorageAttachedIndex implements Index
      *
      * @return a list SSTables without attached indexes
      */
-    private synchronized List<SSTableReader> findNonIndexedSSTables(ColumnFamilyStore baseCfs, StorageAttachedIndexGroup group, IndexValidation validation)
+    private synchronized List<SSTableReader> findNonIndexedSSTables(ColumnFamilyStore baseCfs, StorageAttachedIndexGroup group, boolean validate)
     {
         Set<SSTableReader> sstables = baseCfs.getLiveSSTables();
 
         // Initialize the SSTable indexes w/ valid existing components...
         assert group != null : "Missing index group on " + baseCfs.name;
-        group.onSSTableChanged(Collections.emptyList(), sstables, Collections.singleton(this), validation);
+        group.onSSTableChanged(Collections.emptyList(), sstables, Collections.singleton(this), validate);
 
         // ...then identify and rebuild the SSTable indexes that are missing.
         List<SSTableReader> nonIndexed = new ArrayList<>();
-        View view = viewManager.view();
+        View view = indexContext.getView();
 
         for (SSTableReader sstable : sstables)
         {
@@ -935,8 +757,9 @@ public class StorageAttachedIndex implements Index
             //   1. The current view does not contain the SSTable
             //   2. The SSTable is not marked compacted
             //   3. The column index does not have a completion marker
-            if (!view.containsSSTable(sstable) && !sstable.isMarkedCompacted() &&
-                !IndexDescriptor.create(sstable).isPerColumnIndexBuildComplete(indexIdentifier))
+            if (!view.containsSSTable(sstable)
+                && !sstable.isMarkedCompacted()
+                && !IndexDescriptor.isIndexBuildCompleteOnDisk(sstable, indexContext))
             {
                 nonIndexed.add(sstable);
             }
@@ -945,38 +768,112 @@ public class StorageAttachedIndex implements Index
         return nonIndexed;
     }
 
-    private class UpdateIndexer implements Index.Indexer
+    private class UpdateIndexer extends IndexerAdapter
     {
         private final DecoratedKey key;
-        private final Memtable memtable;
+        private final Memtable mt;
         private final WriteContext writeContext;
 
-        UpdateIndexer(DecoratedKey key, Memtable memtable, WriteContext writeContext)
+        UpdateIndexer(DecoratedKey key, Memtable mt, WriteContext writeContext)
         {
             this.key = key;
-            this.memtable = memtable;
+            this.mt = mt;
             this.writeContext = writeContext;
         }
 
         @Override
         public void insertRow(Row row)
         {
-            adjustMemtableSize(memtableIndexManager.index(key, row, memtable),
-                               CassandraWriteContext.fromContext(writeContext).getGroup());
+            indexContext.index(key, row, mt, CassandraWriteContext.fromContext(writeContext).getGroup());
         }
 
         @Override
         public void updateRow(Row oldRow, Row newRow)
         {
-            adjustMemtableSize(memtableIndexManager.update(key, oldRow, newRow, memtable),
-                               CassandraWriteContext.fromContext(writeContext).getGroup());
+            indexContext.update(key, oldRow, newRow, mt, CassandraWriteContext.fromContext(writeContext).getGroup());
+        }
+    }
+
+    protected static abstract class IndexerAdapter implements Indexer
+    {
+        @Override
+        public void begin() { }
+
+        @Override
+        public void finish() { }
+
+        @Override
+        public void partitionDelete(DeletionTime dt)
+        {
         }
 
-        void adjustMemtableSize(long additionalSpace, OpOrder.Group opGroup)
+        @Override
+        public void rangeTombstone(RangeTombstone rt)
         {
-            // The memtable will assert if we try and reduce its memory usage so, for now, just don't tell it.
-            if (additionalSpace >= 0)
-                memtable.markExtraOnHeapUsed(additionalSpace, opGroup);
         }
+
+        @Override
+        public void removeRow(Row row)
+        {
+        }
+    }
+
+    @Override
+    public Searcher searcherFor(ReadCommand command) throws InvalidRequestException
+    {
+        // searchers should be created from the query plan, this is only used by the singleton index query plan
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public SSTableFlushObserver getFlushObserver(Descriptor descriptor, LifecycleNewTracker tracker)
+    {
+        throw new UnsupportedOperationException("Storage-attached index flush observers should never be created directly.");
+    }
+
+    @Override
+    public Indexer indexerFor(DecoratedKey key,
+                              RegularAndStaticColumns columns,
+                              int nowInSec,
+                              WriteContext writeContext,
+                              IndexTransaction.Type transactionType,
+                              Memtable memtable)
+    {
+        if (transactionType == IndexTransaction.Type.UPDATE)
+        {
+            return new UpdateIndexer(key, memtable, writeContext);
+        }
+
+        // we are only interested in the data from Memtable
+        // everything else is going to be handled by SSTableWriter observers
+        return null;
+    }
+
+    @Override
+    public IndexBuildingSupport getBuildTaskSupport()
+    {
+        return INDEX_BUILDER_SUPPORT;
+    }
+
+    public IndexContext getIndexContext()
+    {
+        return indexContext;
+    }
+
+    @Override
+    public String toString()
+    {
+        return String.format("%s.%s.%s", baseCfs.keyspace.getName(), baseCfs.name, config == null ? "?" : config.name);
+    }
+
+    /**
+     * Removes this index from the {@link SecondaryIndexManager}'s set of queryable indexes.
+     *
+     * This usually happens in response to an index writing failure from {@link StorageAttachedIndexWriter}.
+     */
+    public void makeIndexNonQueryable()
+    {
+        baseCfs.indexManager.makeIndexNonQueryable(this, Status.BUILD_FAILED);
+        logger.warn(indexContext.logMessage("Storage-attached index is no longer queryable. Please restart this node to repair it."));
     }
 }

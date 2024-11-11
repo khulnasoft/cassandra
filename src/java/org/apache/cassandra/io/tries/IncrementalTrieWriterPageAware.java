@@ -20,36 +20,33 @@ package org.apache.cassandra.io.tries;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
 import java.util.NavigableSet;
 import java.util.TreeSet;
 
-import javax.annotation.concurrent.NotThreadSafe;
-
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 
 /**
  * Incremental builders of on-disk tries which packs trie stages into disk cache pages.
  *
  * The incremental core is as in {@link IncrementalTrieWriterSimple}, which this augments by:
- * <ul>
- *   <li> calculating branch sizes reflecting the amount of data that needs to be written to store the trie
+ *   - calculating branch sizes reflecting the amount of data that needs to be written to store the trie
  *     branch rooted at each node
- *   <li> delaying writing any part of a completed node until its branch size is above the page size
- *   <li> laying out (some of) its children branches (each smaller than a page) to be contained within a page
- *   <li> adjusting the branch size to reflect the fact that the children are now written (i.e. removing their size)
- * </ul>
- * <p>
+ *   - delaying writing any part of a completed node until its branch size is above the page size
+ *   - laying out (some of) its children branches (each smaller than a page) to be contained within a page
+ *   - adjusting the branch size to reflect the fact that the children are now written (i.e. removing their size)
+ *
  * The process is bottom-up, i.e. pages are packed at the bottom and the root page is usually smaller.
  * This may appear less efficient than a top-down process which puts more information in the top pages that
  * tend to stay in cache, but in both cases performing a search will usually require an additional disk read
  * for the leaf page. When we maximize the amount of relevant data that read brings by using the bottom-up
- * process, we have practically the same efficiency with smaller intermediate page footprint, i.e. fewer data
+ * process, we have practically the same efficiency with smaller intermediate page footprint, i.e. less data
  * to keep in cache.
- * <p>
+ *
  * As an example, taking a sample page size fitting 4 nodes, a simple trie would be split like this:
- * <pre>
  * Node 0 |
  *   -a-> | Node 1
  *        |   -s-> Node 2
@@ -61,24 +58,20 @@ import org.apache.cassandra.io.util.DataOutputPlus;
  *               |  -n-> Node 7
  *               |         -k-> Node 8 (payload 3)
  *               |                -s-> Node 9 (payload 4)
- * </pre>
  * where lines denote page boundaries.
- * <p>
+ *
  * The process itself will start by adding "ask" which adds three nodes after the root to the stack. Adding "ass"
  * completes Node 3, setting its branch a size of 1 and replaces it on the stack with Node 4.
  * The step of adding "bank" starts by completing Node 4 (size 1), Node 2 (size 3), Node 1 (size 4), then adds 4 more
  * nodes to the stack. Adding "banks" descends one more node.
- * <p>
  * The trie completion step completes nodes 9 (size 1), 8 (size 2), 7 (size 3), 6 (size 4), 5 (size 5). Since the size
  * of node 5 is above the page size, the algorithm lays out its children. Nodes 6, 7, 8, 9 are written in order. The
  * size of node 5 is now just the size of it individually, 1. The process continues with completing Node 0 (size 6).
  * This is bigger than the page size, so some of its children need to be written. The algorithm takes the largest,
  * Node 1, and lays it out with its children in the file. Node 0 now has an adjusted size of 2 which is below the
- * page size, and we can continue the process.
- * <p>
+ * page size and we can continue the process.
  * Since this was the root of the trie, the current page is padded and the remaining nodes 0, 5 are written.
  */
-@NotThreadSafe
 public class IncrementalTrieWriterPageAware<VALUE>
 extends IncrementalTrieWriterBase<VALUE, DataOutputPlus, IncrementalTrieWriterPageAware.Node<VALUE>>
 implements IncrementalTrieWriter<VALUE>
@@ -103,9 +96,9 @@ implements IncrementalTrieWriter<VALUE>
         return c;
     };
 
-    IncrementalTrieWriterPageAware(TrieSerializer<VALUE, ? super DataOutputPlus> trieSerializer, DataOutputPlus dest)
+    IncrementalTrieWriterPageAware(TrieSerializer<VALUE, ? super DataOutputPlus> trieSerializer, DataOutputPlus dest, ByteComparable.Version version)
     {
-        super(trieSerializer, dest, new Node<>((byte) 0));
+        super(trieSerializer, dest, new Node<>((byte) 0), version);
         this.maxBytesPerPage = dest.maxBytesInPage();
     }
 
@@ -244,7 +237,80 @@ implements IncrementalTrieWriter<VALUE>
         node.nodeSize = serializer.sizeofNode(node, dest.position());
     }
 
-    @SuppressWarnings("DuplicatedCode") // intentionally duplicated in IncrementalDeepTrieWriterPageAware
+    /**
+     * Simple framework for executing recursion using on-heap linked trace to avoid stack overruns.
+     */
+    static abstract class Recursion<NODE>
+    {
+        final Recursion<NODE> parent;
+        final NODE node;
+        final Iterator<NODE> childIterator;
+
+        Recursion(NODE node, Iterator<NODE> childIterator, Recursion<NODE> parent)
+        {
+            this.parent = parent;
+            this.node = node;
+            this.childIterator = childIterator;
+        }
+
+        /**
+         * Make a child Recursion object for the given node and initialize it as necessary to continue processing
+         * with it.
+         *
+         * May return null if the recursion does not need to continue inside the child branch.
+         */
+        abstract Recursion<NODE> makeChild(NODE child);
+
+        /**
+         * Complete the processing this Recursion object.
+         *
+         * Note: this method is not called for the nodes for which makeChild() returns null.
+         */
+        abstract void complete() throws IOException;
+
+        /**
+         * Complete processing of the given child (possibly retrieve data to apply to any accumulation performed
+         * in this Recursion object).
+         *
+         * This is called when processing a child completes, including when recursion inside the child branch
+         * is skipped by makeChild() returning null.
+         */
+        void completeChild(NODE child)
+        {}
+
+        /**
+         * Recursive process, in depth-first order, the branch rooted at this recursion node.
+         *
+         * Returns this.
+         */
+        Recursion<NODE> process() throws IOException
+        {
+            Recursion<NODE> curr = this;
+
+            while (true)
+            {
+                if (curr.childIterator.hasNext())
+                {
+                    NODE child = curr.childIterator.next();
+                    Recursion<NODE> childRec = curr.makeChild(child);
+                    if (childRec != null)
+                        curr = childRec;
+                    else
+                        curr.completeChild(child);
+                }
+                else
+                {
+                    curr.complete();
+                    Recursion<NODE> currParent = curr.parent;
+                    if (currParent == null)
+                        return curr;
+                    currParent.completeChild(curr.node);
+                    curr = currParent;
+                }
+            }
+        }
+    }
+
     protected int recalcTotalSize(Node<VALUE> node, long nodePosition) throws IOException
     {
         if (node.hasOutOfPageInBranch)
@@ -263,7 +329,6 @@ implements IncrementalTrieWriter<VALUE>
         return node.branchSize + node.nodeSize;
     }
 
-    @SuppressWarnings("DuplicatedCode") // intentionally duplicated in IncrementalDeepTrieWriterPageAware
     protected long write(Node<VALUE> node) throws IOException
     {
         long nodePosition = dest.position();
@@ -310,7 +375,7 @@ implements IncrementalTrieWriter<VALUE>
     public PartialTail makePartialRoot() throws IOException
     {
         // The expectation is that the partial tail will be in memory, so we don't bother with page-fitting.
-        // We could also send some completed children to disk, but that could make suboptimal layout choices, so we'd
+        // We could also send some completed children to disk, but that could make suboptimal layout choices so we'd
         // rather not. Just write anything not written yet to a buffer, from bottom to top, and we're done.
         try (DataOutputBuffer buf = new DataOutputBuffer())
         {
@@ -326,7 +391,6 @@ implements IncrementalTrieWriter<VALUE>
         }
     }
 
-    @SuppressWarnings("DuplicatedCode") // intentionally duplicated in IncrementalDeepTrieWriterPageAware
     protected long writePartial(Node<VALUE> node, DataOutputPlus dest, long baseOffset) throws IOException
     {
         long startPosition = dest.position() + baseOffset;
@@ -337,7 +401,7 @@ implements IncrementalTrieWriter<VALUE>
             if (child.filePos == -1)
             {
                 childrenToClear.add(child);
-                child.filePos = writePartial(child, dest, baseOffset);
+                    child.filePos = writePartial(child, dest, baseOffset);
             }
         }
 
@@ -346,7 +410,7 @@ implements IncrementalTrieWriter<VALUE>
         if (node.hasOutOfPageInBranch)
         {
             // Update the branch size with the size of what we have just written. This may be used by the node's
-            // maxPositionDelta, and it's a better approximation for later fitting calculations.
+            // maxPositionDelta and it's a better approximation for later fitting calculations.
             node.branchSize = (int) (nodePosition - startPosition);
         }
 

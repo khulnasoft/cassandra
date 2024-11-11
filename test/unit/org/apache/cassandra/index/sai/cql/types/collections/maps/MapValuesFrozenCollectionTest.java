@@ -20,18 +20,33 @@ package org.apache.cassandra.index.sai.cql.types.collections.maps;
 import java.util.Collection;
 import java.util.Map;
 
+import org.junit.Test;
+import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import org.apache.cassandra.index.sai.cql.types.DataSet;
 import org.apache.cassandra.index.sai.cql.types.IndexingTypeSupport;
 import org.apache.cassandra.index.sai.cql.types.collections.CollectionDataSet;
+import org.apache.cassandra.index.sai.disk.format.Version;
 
+@RunWith(Parameterized.class)
 public class MapValuesFrozenCollectionTest extends IndexingTypeSupport
 {
-    @Parameterized.Parameters(name = "dataset={0},wide={1},scenario={2}")
+    @Parameterized.Parameters(name = "version={0},dataset={1},wide={2},scenario={3}")
     public static Collection<Object[]> generateParameters()
     {
         DataSet<Map<Integer, Integer>> frozen = new CollectionDataSet.FrozenMapValuesDataSet<>(new DataSet.IntDataSet());
         return generateParameters(new CollectionDataSet.MapValuesDataSet<>(frozen));
+    }
+
+    public MapValuesFrozenCollectionTest(Version version, DataSet<?> dataset, boolean widePartitions, Scenario scenario)
+    {
+        super(version, dataset, widePartitions, scenario);
+    }
+
+    @Test
+    public void test() throws Throwable
+    {
+        runIndexQueryScenarios();
     }
 }

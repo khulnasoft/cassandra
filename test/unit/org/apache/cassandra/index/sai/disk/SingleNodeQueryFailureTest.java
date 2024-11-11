@@ -22,10 +22,12 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
-import com.datastax.driver.core.exceptions.ReadFailureException;
+import com.khulnasoft.driver.core.exceptions.ReadFailureException;
 import org.apache.cassandra.index.sai.SAITester;
-import org.apache.cassandra.index.sai.disk.v1.postings.PostingListRangeIterator;
-import org.apache.cassandra.index.sai.disk.v1.segment.LiteralIndexSegmentTermsReader;
+import org.apache.cassandra.index.sai.disk.format.Version;
+import org.apache.cassandra.index.sai.disk.v1.KeyFetcher;
+import org.apache.cassandra.index.sai.disk.v1.TermsReader;
+import org.apache.cassandra.index.sai.disk.v1.postings.PostingsReader;
 import org.apache.cassandra.inject.Injection;
 import org.apache.cassandra.inject.Injections;
 import org.apache.cassandra.utils.Throwables;
@@ -34,17 +36,16 @@ import static org.apache.cassandra.inject.ActionBuilder.newActionBuilder;
 import static org.apache.cassandra.inject.Expression.quote;
 import static org.apache.cassandra.inject.InvokePointBuilder.newInvokePoint;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.Assume.assumeTrue;
 
 public class SingleNodeQueryFailureTest extends SAITester
 {
-    private static final String CREATE_TABLE_TEMPLATE = "CREATE TABLE %s (id text PRIMARY KEY, v1 int, v2 text) WITH " +
-                                                        "compaction = {'class' : 'SizeTieredCompactionStrategy', 'enabled' : false }";
+    private static final String CREATE_TABLE_TEMPLATE = "CREATE TABLE %s (id text PRIMARY KEY, v1 int, v2 text) WITH compaction = {'class' : 'SizeTieredCompactionStrategy', 'enabled' : false }";
 
     @Before
-    public void setup()
+    public void setup() throws Throwable
     {
         requireNetwork();
-        setupTableAndIndexes();
     }
 
     @After
@@ -53,34 +54,45 @@ public class SingleNodeQueryFailureTest extends SAITester
         Injections.deleteAll();
     }
 
-    // Single Index Tests
-    @Test
-    public void testFailedRangeIteratorOnSingleIndexQuery() throws Throwable
-    {
-        testFailedQuery("range_iterator_single", PostingListRangeIterator.class, "getNextRowId", true);
-    }
-
-    @Test
-    public void testFailedTermsReaderOnSingleIndexQuery() throws Throwable
-    {
-        testFailedQuery("terms_reader_single", LiteralIndexSegmentTermsReader.TermQuery.class, "lookupPostingsOffset", true);
-    }
-
-    // Multi Index Tests
     @Test
     public void testFailedRangeIteratorOnMultiIndexesQuery() throws Throwable
     {
-        testFailedQuery("range_iterator_multi", PostingListRangeIterator.class, "getNextRowId", false);
+        testFailedMultiIndexesQuery("range_iterator", PostingListKeyRangeIterator.class, "getNextRowId");
     }
 
     @Test
     public void testFailedTermsReaderOnMultiIndexesQuery() throws Throwable
     {
-        testFailedQuery("terms_reader_multi", LiteralIndexSegmentTermsReader.TermQuery.class, "lookupPostingsOffset", false);
+        testFailedMultiIndexesQuery("terms_reader", TermsReader.TermQuery.class, "lookupTermDictionary");
     }
 
-    private void setupTableAndIndexes()
+    @Test
+    public void testFailedBkdReaderOnMultiIndexesQuery() throws Throwable
     {
+        testFailedMultiIndexesQuery("bkd_reader", PostingsReader.class, "<init>");
+    }
+
+    @Test
+    public void testFailedKeyFetcherOnMultiIndexesQuery() throws Throwable
+    {
+        assumeTrue(Version.latest() == Version.AA);
+        testFailedMultiIndexesQuery("key_fetcher", KeyFetcher.class, "apply");
+    }
+
+    @Test
+    public void testFailedKeyReaderOnMultiIndexesQuery() throws Throwable
+    {
+        assumeTrue(Version.latest() == Version.AA);
+        testFailedMultiIndexesQuery("key_reader", KeyFetcher.class, "createReader");
+    }
+
+    private void testFailedMultiIndexesQuery(String name, Class<?> targetClass, String targetMethod) throws Throwable
+    {
+        Injection injection = Injections.newCustom(name)
+                                        .add(newInvokePoint().onClass(targetClass).onMethod(targetMethod))
+                                        .add(newActionBuilder().actions().doThrow(RuntimeException.class, quote("Injected failure!")))
+                                        .build();
+
         createTable(CREATE_TABLE_TEMPLATE);
         createIndex(String.format(CREATE_INDEX_TEMPLATE, "v1"));
         createIndex(String.format(CREATE_INDEX_TEMPLATE, "v2"));
@@ -91,19 +103,19 @@ public class SingleNodeQueryFailureTest extends SAITester
         flush();
         execute("INSERT INTO %s (id, v1, v2) VALUES ('3', 2, '2')");
         flush();
-    }
-
-    private void testFailedQuery(String name, Class<?> targetClass, String targetMethod, boolean isSingleIndexTest) throws Throwable
-    {
-        Injection injection = Injections.newCustom(name)
-                .add(newInvokePoint().onClass(targetClass).onMethod(targetMethod))
-                .add(newActionBuilder().actions().doThrow(RuntimeException.class, quote("Injected failure!")))
-                .build();
 
         try
         {
             Injections.inject(injection);
-            performTestQueries(isSingleIndexTest);
+
+            assertThatThrownBy(() -> executeNet("SELECT id FROM %s WHERE v1 < 1 and v2 = '0'"))
+                    .isInstanceOf(ReadFailureException.class);
+
+            assertThatThrownBy(() -> executeNet("SELECT id FROM %s WHERE v1 >= 1 and v2 = '1'"))
+                    .isInstanceOf(ReadFailureException.class);
+
+            assertThatThrownBy(() -> executeNet("SELECT id FROM %s WHERE v1 >= 2 and v2 = '2'"))
+                    .isInstanceOf(ReadFailureException.class);
         }
         catch (Exception e)
         {
@@ -114,49 +126,9 @@ public class SingleNodeQueryFailureTest extends SAITester
             injection.disable();
         }
 
-        verifyResults(isSingleIndexTest);
-    }
-
-    private void performTestQueries(boolean isSingleIndexTest)
-    {
-        if (isSingleIndexTest)
-        {
-            assertThatThrownBy(() -> executeNet("SELECT id FROM %s WHERE v2 = '0'"))
-                    .isInstanceOf(ReadFailureException.class);
-
-            assertThatThrownBy(() -> executeNet("SELECT id FROM %s WHERE v2 = '1'"))
-                    .isInstanceOf(ReadFailureException.class);
-
-            assertThatThrownBy(() -> executeNet("SELECT id FROM %s WHERE v2 = '2'"))
-                    .isInstanceOf(ReadFailureException.class);
-        }
-        else
-        {
-            assertThatThrownBy(() -> executeNet("SELECT id FROM %s WHERE v1 < 1 and v2 = '0'"))
-                    .isInstanceOf(ReadFailureException.class);
-
-            assertThatThrownBy(() -> executeNet("SELECT id FROM %s WHERE v1 >= 1 and v2 = '1'"))
-                    .isInstanceOf(ReadFailureException.class);
-
-            assertThatThrownBy(() -> executeNet("SELECT id FROM %s WHERE v1 >= 2 and v2 = '2'"))
-                    .isInstanceOf(ReadFailureException.class);
-        }
-    }
-
-    private void verifyResults(boolean isSingleIndexTest)
-    {
-        if (isSingleIndexTest)
-        {
-            Assert.assertEquals(1, executeNet("SELECT id FROM %s WHERE v2 = '0'").all().size());
-            Assert.assertEquals(1, executeNet("SELECT id FROM %s WHERE v2 = '1'").all().size());
-            Assert.assertEquals(1, executeNet("SELECT id FROM %s WHERE v2 = '2'").all().size());
-        }
-        else
-        {
-            Assert.assertEquals(3, executeNet("SELECT id FROM %s WHERE v1 >= 0").all().size());
-            Assert.assertEquals(1, executeNet("SELECT id FROM %s WHERE v2 = '0'").all().size());
-            Assert.assertEquals(1, executeNet("SELECT id FROM %s WHERE v2 = '1'").all().size());
-            Assert.assertEquals(1, executeNet("SELECT id FROM %s WHERE v2 = '2'").all().size());
-        }
+        Assert.assertEquals(3, executeNet("SELECT id FROM %s WHERE v1 >= 0").all().size());
+        Assert.assertEquals(1, executeNet("SELECT id FROM %s WHERE v2 = '0'").all().size());
+        Assert.assertEquals(1, executeNet("SELECT id FROM %s WHERE v2 = '1'").all().size());
+        Assert.assertEquals(1, executeNet("SELECT id FROM %s WHERE v2 = '2'").all().size());
     }
 }

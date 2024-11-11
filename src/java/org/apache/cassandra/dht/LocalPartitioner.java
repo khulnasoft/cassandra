@@ -125,7 +125,7 @@ public class LocalPartitioner implements IPartitioner
 
     public Map<Token, Float> describeOwnership(List<Token> sortedTokens)
     {
-        return Collections.singletonMap((Token)getMinimumToken(), 1.0F);
+        return Collections.singletonMap((Token)getMinimumToken(), new Float(1.0));
     }
 
     public AbstractType<?> getTokenValidator()
@@ -161,9 +161,7 @@ public class LocalPartitioner implements IPartitioner
         @Override
         public int compareTo(Token o)
         {
-            // todo (tcm); seems partitioner got mutated on alter type (for example) before tcm, now we create a new one - not sure its enough just making sure that its the same type of partitioner
-            assert o.getPartitioner().getClass().equals(getPartitioner().getClass());
-//            assert getPartitioner() == o.getPartitioner() : String.format("partitioners do not match; %s != %s", getPartitioner(), o.getPartitioner());
+            assert getPartitioner() == o.getPartitioner();
             return comparator.compare(token, ((LocalToken) o).token);
         }
 

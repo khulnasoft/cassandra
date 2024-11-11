@@ -19,8 +19,9 @@
 package org.apache.cassandra.db;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.List;
+
+import com.google.common.collect.Lists;
 
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -28,32 +29,19 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.cql3.CQL3Type;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.FieldIdentifier;
-import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.marshal.BytesType;
-import org.apache.cassandra.db.marshal.Int32Type;
-import org.apache.cassandra.db.marshal.IntegerType;
-import org.apache.cassandra.db.marshal.MapType;
-import org.apache.cassandra.db.marshal.ShortType;
-import org.apache.cassandra.db.marshal.TupleType;
-import org.apache.cassandra.db.marshal.UTF8Type;
-import org.apache.cassandra.db.marshal.UserType;
-import org.apache.cassandra.db.rows.BufferCell;
-import org.apache.cassandra.db.rows.Cell;
-import org.apache.cassandra.db.rows.CellPath;
-import org.apache.cassandra.db.rows.Cells;
+import org.apache.cassandra.db.marshal.*;
+import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.assertj.core.api.Assertions;
-import org.assertj.core.api.ThrowableAssert;
+import org.apache.cassandra.utils.FBUtilities;
 
-import static java.util.Arrays.asList;
+import static java.util.Arrays.*;
 
 public class CellTest
 {
@@ -89,8 +77,7 @@ public class CellTest
                                   ColumnIdentifier.getInterned(name, false),
                                   type,
                                   ColumnMetadata.NO_POSITION,
-                                  ColumnMetadata.Kind.REGULAR,
-                                  null);
+                                  ColumnMetadata.Kind.REGULAR);
     }
 
     @Test
@@ -114,26 +101,6 @@ public class CellTest
                 Assert.assertNotSame(b, a);
             }
         }
-    }
-
-    @Test
-    public void testUnmarshallableInMulticellCollection()
-    {
-        List<CQL3Type.Native> unmarshallableTypes = new ArrayList<>();
-        for (CQL3Type.Native nativeType : CQL3Type.Native.values())
-        {
-            ColumnMetadata c = fakeColumn("c", MapType.getInstance(Int32Type.instance, nativeType.getType(), true));
-            BufferCell cell = BufferCell.tombstone(c, 0, 4, CellPath.create(ByteBufferUtil.bytes(4)));
-            try
-            {
-                Assert.assertEquals("expected #toString failed for type " + nativeType, "[c[4]=<tombstone> ts=0 ldt=4]", cell.toString());
-            }
-            catch (MarshalException m)
-            {
-                unmarshallableTypes.add(nativeType);
-            }
-        }
-        Assert.assertTrue(unmarshallableTypes.isEmpty());
     }
 
     private void assertValid(Cell<?> cell)
@@ -186,9 +153,9 @@ public class CellTest
 
         // Invalid ttl
         assertInvalid(BufferCell.expiring(c, 0, -4, 4, bbs(4)));
-        ColumnMetadata f = c;
-        assertThrowsOnInvalidDeletionTime(() -> BufferCell.expiring(f, 0, 4, -5, bbs(4)));
-        assertThrowsOnInvalidDeletionTime(() -> BufferCell.expiring(f, 0, 4, Cell.NO_DELETION_TIME, bbs(4)));
+        // Cells with overflowed localExpirationTime are valid after CASSANDRA-14092
+        assertValid(BufferCell.expiring(c, 0, 4, -5, bbs(4)));
+        assertValid(BufferCell.expiring(c, 0, 4, Cell.NO_DELETION_TIME, bbs(4)));
 
         c = fakeColumn("c", MapType.getInstance(Int32Type.instance, Int32Type.instance, true));
         // Valid cell path
@@ -222,8 +189,9 @@ public class CellTest
 
         // Invalid ttl
         assertInvalid(BufferCell.expiring(c, 0, -4, 4, bb(1), CellPath.create(bbs(0))));
-        assertThrowsOnInvalidDeletionTime(() -> BufferCell.expiring(c, 0, 4, -5, bb(1), CellPath.create(bbs(0))));
-        assertThrowsOnInvalidDeletionTime(() -> BufferCell.expiring(c, 0, 4, Cell.NO_DELETION_TIME, bb(1), CellPath.create(bbs(0))));
+        // Cells with overflowed localExpirationTime are valid after CASSANDRA-14092
+        assertValid(BufferCell.expiring(c, 0, 4, -5, bb(1), CellPath.create(bbs(0))));
+        assertValid((BufferCell.expiring(c, 0, 4, Cell.NO_DELETION_TIME, bb(1), CellPath.create(bbs(0)))));
 
         // Invalid cell path (int values should be 0 or 2 bytes)
         assertInvalid(BufferCell.live(c, 0, bb(1), CellPath.create(ByteBufferUtil.bytes((long)4))));
@@ -260,8 +228,9 @@ public class CellTest
 
         // Invalid ttl
         assertInvalid(BufferCell.expiring(c, 0, -4, 4, val));
-        assertThrowsOnInvalidDeletionTime(() -> BufferCell.expiring(c, 0, 4, -5, val));
-        assertThrowsOnInvalidDeletionTime(() -> BufferCell.expiring(c, 0, 4, Cell.NO_DELETION_TIME, val));
+        // Cells with overflowed localExpirationTime are valid after CASSANDRA-14092
+        assertValid(BufferCell.expiring(c, 0, 4, -5, val));
+        assertValid(BufferCell.expiring(c, 0, 4, Cell.NO_DELETION_TIME, val));
     }
 
     @Test
@@ -286,14 +255,14 @@ public class CellTest
 
     class SimplePurger implements DeletionPurger
     {
-        private final long gcBefore;
+        private final int gcBefore;
 
-        public SimplePurger(long gcBefore)
+        public SimplePurger(int gcBefore)
         {
             this.gcBefore = gcBefore;
         }
 
-        public boolean shouldPurge(long timestamp, long localDeletionTime)
+        public boolean shouldPurge(long timestamp, int localDeletionTime)
         {
             return localDeletionTime < gcBefore;
         }
@@ -372,13 +341,7 @@ public class CellTest
 
     private static ByteBuffer udt(ByteBuffer...buffers)
     {
-        List<AbstractType<?>> types = new ArrayList<>(buffers.length);
-        for (int i = 0, m = buffers.length; i < m; i++)
-        {
-            types.add(BytesType.instance);
-        }
-        TupleType tupleType = new TupleType(types);
-        return tupleType.pack(buffers);
+        return UserType.buildValue(buffers);
     }
 
     private static FieldIdentifier field(String field)
@@ -434,27 +397,20 @@ public class CellTest
         return BufferCell.live(cdef, timestamp, ByteBufferUtil.bytes(value));
     }
 
-    private Cell<?> expiring(TableMetadata cfm, String columnName, String value, long timestamp, long localExpirationTime)
+    private Cell<?> expiring(TableMetadata cfm, String columnName, String value, long timestamp, int localExpirationTime)
     {
         return expiring(cfm, columnName, value, timestamp, 1, localExpirationTime);
     }
 
-    private Cell<?> expiring(TableMetadata cfm, String columnName, String value, long timestamp, int ttl, long localExpirationTime)
+    private Cell<?> expiring(TableMetadata cfm, String columnName, String value, long timestamp, int ttl, int localExpirationTime)
     {
         ColumnMetadata cdef = cfm.getColumn(ByteBufferUtil.bytes(columnName));
         return new BufferCell(cdef, timestamp, ttl, localExpirationTime, ByteBufferUtil.bytes(value), null);
     }
 
-    private Cell<?> deleted(TableMetadata cfm, String columnName, long localDeletionTime, long timestamp)
+    private Cell<?> deleted(TableMetadata cfm, String columnName, int localDeletionTime, long timestamp)
     {
         ColumnMetadata cdef = cfm.getColumn(ByteBufferUtil.bytes(columnName));
         return BufferCell.tombstone(cdef, timestamp, localDeletionTime);
-    }
-
-    private static void assertThrowsOnInvalidDeletionTime(ThrowableAssert.ThrowingCallable runnable)
-    {
-        Assertions.assertThatThrownBy(runnable)
-                  .isInstanceOf(IllegalArgumentException.class)
-                  .hasMessageContaining("out of range");
     }
 }

@@ -27,11 +27,11 @@ import javax.annotation.Nullable;
 
 import org.junit.Test;
 
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.SimpleStatement;
-import com.datastax.driver.core.Statement;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.ResultSet;
+import com.khulnasoft.driver.core.Session;
+import com.khulnasoft.driver.core.SimpleStatement;
+import com.khulnasoft.driver.core.Statement;
 import org.apache.cassandra.cql3.statements.BatchStatement;
 import org.apache.cassandra.cql3.statements.ModificationStatement;
 import org.apache.cassandra.cql3.statements.SelectStatement;
@@ -131,7 +131,7 @@ public class QueryEventsTest extends CQLTester
         BatchMockListener listener = new BatchMockListener(getCurrentColumnFamilyStore());
         QueryEvents.instance.registerListener(listener);
         Session session = sessionNet();
-        com.datastax.driver.core.BatchStatement batch = new com.datastax.driver.core.BatchStatement(com.datastax.driver.core.BatchStatement.Type.UNLOGGED);
+        com.khulnasoft.driver.core.BatchStatement batch = new com.khulnasoft.driver.core.BatchStatement(com.khulnasoft.driver.core.BatchStatement.Type.UNLOGGED);
         String q1 = formatQuery("insert into %s (id, v) values (?, ?)");
         PreparedStatement ps = session.prepare(q1);
         batch.add(ps.bind(1,1));

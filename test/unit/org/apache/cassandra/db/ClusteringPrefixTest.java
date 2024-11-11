@@ -21,6 +21,7 @@ package org.apache.cassandra.db;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -33,7 +34,6 @@ import org.apache.cassandra.db.marshal.ByteArrayAccessor;
 import org.apache.cassandra.db.marshal.ByteBufferAccessor;
 import org.apache.cassandra.db.marshal.ValueAccessor;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.concurrent.ImmediateFuture;
 import org.apache.cassandra.utils.memory.MemtablePool;
 import org.apache.cassandra.utils.memory.NativeAllocator;
 import org.apache.cassandra.utils.memory.NativePool;
@@ -80,13 +80,11 @@ public class ClusteringPrefixTest
     public void testRetainableOnHeapSliced()
     {
         for (int prepend = 0; prepend < 3; ++prepend)
-        {
             for (int append = 0; append < 3; ++append)
             {
                 testRetainable(ByteBufferAccessor.instance.factory(),
                                slicingAllocator(prepend, append));
             }
-        }
     }
 
     private Function<String, ByteBuffer[]> slicingAllocator(int prepend, int append)
@@ -133,9 +131,8 @@ public class ClusteringPrefixTest
 
     public void testRetainableSlab(boolean onHeap) throws InterruptedException, TimeoutException
     {
-        MemtablePool pool = new SlabPool(1L << 24, onHeap ? 0 : 1L << 24, 1.0f, () -> ImmediateFuture.success(false));
-        SlabAllocator allocator = ((SlabAllocator) pool.newAllocator("test"));
-        assert !allocator.allocate(1).isDirect() == onHeap;
+        MemtablePool pool = new SlabPool(1L << 24, onHeap ? 0 : 1L << 24, 1.0f, () -> CompletableFuture.completedFuture(false));
+        SlabAllocator allocator = (SlabAllocator) pool.newAllocator();
         try
         {
             testRetainable(ByteBufferAccessor.instance.factory(), x ->
@@ -156,14 +153,14 @@ public class ClusteringPrefixTest
     @Test
     public void testRetainableNative() throws InterruptedException, TimeoutException
     {
-        MemtablePool pool = new NativePool(1L << 24,1L << 24, 1.0f, () -> ImmediateFuture.success(false));
-        NativeAllocator allocator = (NativeAllocator) pool.newAllocator("test");
+        MemtablePool pool = new NativePool(1L << 24,1L << 24, 1.0f, () -> CompletableFuture.completedFuture(false));
+        NativeAllocator allocator = (NativeAllocator) pool.newAllocator();
         try
         {
             testRetainable(ByteBufferAccessor.instance.factory(),
                            x -> new ByteBuffer[] {ByteBufferUtil.bytes(x)},
                            x -> x.kind() == ClusteringPrefix.Kind.CLUSTERING
-                                ? new NativeClustering(allocator, null, (Clustering<?>) x)
+                                ? new NativeClustering(allocator, null, (Clustering) x)
                                 : x);
         }
         finally
@@ -180,12 +177,12 @@ public class ClusteringPrefixTest
 
     public <V> void testRetainable(ValueAccessor.ObjectFactory<V> factory,
                                    Function<String, V[]> allocator,
-                                   Function<ClusteringPrefix<V>, ClusteringPrefix<V>> mapper)
+                                   Function<ClusteringPrefix<?>, ClusteringPrefix<?>> mapper)
     {
-        ClusteringPrefix<V>[] clusterings = new ClusteringPrefix[]
+        ClusteringPrefix<?>[] clusterings = new ClusteringPrefix[]
         {
             factory.clustering(),
-            factory.staticClustering(),
+            Clustering.STATIC_CLUSTERING,
             factory.clustering(allocator.apply("test")),
             factory.bound(ClusteringPrefix.Kind.INCL_START_BOUND, allocator.apply("testA")),
             factory.bound(ClusteringPrefix.Kind.INCL_END_BOUND, allocator.apply("testB")),
@@ -203,18 +200,18 @@ public class ClusteringPrefixTest
         testRetainable(clusterings);
     }
 
-    public void testRetainable(ClusteringPrefix<?>[] clusterings)
+    public void testRetainable(ClusteringPrefix[] clusterings)
     {
-        for (ClusteringPrefix<?> clustering : clusterings)
+        for (ClusteringPrefix clustering : clusterings)
         {
-            ClusteringPrefix<?> retainable = clustering.retainable();
+            ClusteringPrefix retainable = clustering.retainable();
             assertEquals(clustering, retainable);
             assertClusteringIsRetainable(retainable);
         }
     }
 
 
-    public static void assertClusteringIsRetainable(ClusteringPrefix<?> clustering)
+    public static void assertClusteringIsRetainable(ClusteringPrefix clustering)
     {
         if (clustering instanceof AbstractArrayClusteringPrefix)
             return; // has to be on-heap and minimized
@@ -226,7 +223,7 @@ public class ClusteringPrefixTest
         {
             assertFalse(b.isDirect());
             assertTrue(b.hasArray());
-            assertEquals(b.capacity(), b.remaining());
+            assertTrue(b.capacity() == b.remaining());
             assertEquals(0, b.arrayOffset());
             assertEquals(b.capacity(), b.array().length);
         }

@@ -24,9 +24,8 @@ import java.util.regex.Pattern;
 import com.google.common.primitives.UnsignedLongs;
 
 import org.apache.cassandra.cql3.CQL3Type;
-import org.apache.cassandra.cql3.terms.Constants;
-import org.apache.cassandra.cql3.terms.Term;
-import org.apache.cassandra.cql3.functions.ArgumentDeserializer;
+import org.apache.cassandra.cql3.Constants;
+import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.serializers.TypeSerializer;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.serializers.UUIDSerializer;
@@ -50,10 +49,6 @@ public class UUIDType extends AbstractType<UUID>
 {
     public static final UUIDType instance = new UUIDType();
 
-    private static final ArgumentDeserializer ARGUMENT_DESERIALIZER = new DefaultArgumentDeserializer(instance);
-
-    private static final ByteBuffer MASKED_VALUE = instance.decompose(UUID.fromString("00000000-0000-0000-0000-000000000000"));
-
     UUIDType()
     {
         super(ComparisonType.CUSTOM);
@@ -65,7 +60,6 @@ public class UUIDType extends AbstractType<UUID>
         return true;
     }
 
-    @Override
     public boolean isEmptyValueMeaningless()
     {
         return true;
@@ -136,7 +130,7 @@ public class UUIDType extends AbstractType<UUID>
         swizzled.putLong(8, accessor.getLong(data, 8));
 
         // fixed-length thus prefix-free
-        return ByteSource.fixedLength(swizzled);
+        return ByteSource.preencoded(swizzled);
     }
 
     @Override
@@ -150,8 +144,8 @@ public class UUIDType extends AbstractType<UUID>
         long hiBits = ByteSourceInverse.getUnsignedFixedLengthAsLong(comparableBytes, 8);
         long loBits = ByteSourceInverse.getUnsignedFixedLengthAsLong(comparableBytes, 8);
 
-        long uuidVersion = hiBits >>> 60 & 0xF;
-        if (uuidVersion == 1)
+        long version1 = hiBits >>> 60 & 0xF;
+        if (version1 == 1)
         {
             // If the version bits are set to 1, this is a time-based UUID, and its high bits are significantly more
             // shuffled than in other UUIDs. Revert the shuffle.
@@ -161,7 +155,7 @@ public class UUIDType extends AbstractType<UUID>
         {
             // For non-time UUIDs, the only thing that's needed is to put the version bits back where they were originally.
             hiBits = hiBits << 4 & 0xFFFFFFFFFFFF0000L
-                     | uuidVersion << 12
+                     | version1 << 12
                      | hiBits & 0x0000000000000FFFL;
         }
 
@@ -199,16 +193,9 @@ public class UUIDType extends AbstractType<UUID>
         return CQL3Type.Native.UUID;
     }
 
-    @Override
     public TypeSerializer<UUID> getSerializer()
     {
         return UUIDSerializer.instance;
-    }
-
-    @Override
-    public ArgumentDeserializer getArgumentDeserializer()
-    {
-        return ARGUMENT_DESERIALIZER;
     }
 
     static final Pattern regexPattern = Pattern.compile("[A-Fa-f0-9]{8}\\-[A-Fa-f0-9]{4}\\-[A-Fa-f0-9]{4}\\-[A-Fa-f0-9]{4}\\-[A-Fa-f0-9]{12}");
@@ -256,11 +243,5 @@ public class UUIDType extends AbstractType<UUID>
     public int valueLengthIfFixed()
     {
         return 16;
-    }
-
-    @Override
-    public ByteBuffer getMaskedValue()
-    {
-        return MASKED_VALUE;
     }
 }

@@ -23,8 +23,8 @@ import java.util.stream.Collectors;
 
 import org.junit.Test;
 
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.Session;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.Session;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.distributed.api.ICluster;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
@@ -45,7 +45,7 @@ public class PrepareBatchStatementsTest extends TestBaseImpl
                                                             .withConfig(config -> config.with(GOSSIP, NETWORK, NATIVE_PROTOCOL))
                                                             .start()))
         {
-            try (com.datastax.driver.core.Cluster cluster = com.datastax.driver.core.Cluster.builder()
+            try (com.khulnasoft.driver.core.Cluster cluster = com.khulnasoft.driver.core.Cluster.builder()
                                                                                             .addContactPoint("127.0.0.1")
                                                                                             .build();
                  Session s = cluster.connect())

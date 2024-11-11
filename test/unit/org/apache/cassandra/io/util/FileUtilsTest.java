@@ -19,17 +19,25 @@
 package org.apache.cassandra.io.util;
 
 import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.Arrays;
+import java.util.Random;
 
+import org.junit.Assert;
+import org.junit.Assume;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.io.compress.BufferType;
+import org.apache.cassandra.metrics.NativeMemoryMetrics;
+import org.apache.cassandra.utils.FastByteOperations;
+import org.apache.cassandra.utils.INativeLibrary;
+import org.apache.cassandra.utils.NativeLibrary;
 import org.assertj.core.api.Assertions;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -52,56 +60,34 @@ public class FileUtilsTest
         // test straightforward conversions for each unit
         assertEquals("FileUtils.parseFileSize() failed to parse a whole number of bytes",
             256L, FileUtils.parseFileSize("256 bytes"));
-        assertEquals("FileUtils.parseFileSize() failed to parse a whole number of kibibytes",
+        assertEquals("FileUtils.parseFileSize() failed to parse a whole number of kilobytes",
             2048L, FileUtils.parseFileSize("2 KiB"));
-        assertEquals("FileUtils.parseFileSize() failed to parse a whole number of mebibytes",
+        assertEquals("FileUtils.parseFileSize() failed to parse a whole number of megabytes",
             4194304L, FileUtils.parseFileSize("4 MiB"));
-        assertEquals("FileUtils.parseFileSize() failed to parse a whole number of gibibytes",
+        assertEquals("FileUtils.parseFileSize() failed to parse a whole number of gigabytes",
             3221225472L, FileUtils.parseFileSize("3 GiB"));
-        assertEquals("FileUtils.parseFileSize() failed to parse a whole number of tebibytes",
+        assertEquals("FileUtils.parseFileSize() failed to parse a whole number of terabytes",
             5497558138880L, FileUtils.parseFileSize("5 TiB"));
         // test conversions of fractional units
-        assertEquals("FileUtils.parseFileSize() failed to parse a rational number of kibibytes",
+        assertEquals("FileUtils.parseFileSize() failed to parse a rational number of kilobytes",
             1536L, FileUtils.parseFileSize("1.5 KiB"));
-        assertEquals("FileUtils.parseFileSize() failed to parse a rational number of kibibytes",
+        assertEquals("FileUtils.parseFileSize() failed to parse a rational number of kilobytes",
             4434L, FileUtils.parseFileSize("4.33 KiB"));
-        assertEquals("FileUtils.parseFileSize() failed to parse a rational number of mebibytes",
+        assertEquals("FileUtils.parseFileSize() failed to parse a rational number of megabytes",
             2359296L, FileUtils.parseFileSize("2.25 MiB"));
-        assertEquals("FileUtils.parseFileSize() failed to parse a rational number of mebibytes",
+        assertEquals("FileUtils.parseFileSize() failed to parse a rational number of megabytes",
             3292529L, FileUtils.parseFileSize("3.14 MiB"));
-        assertEquals("FileUtils.parseFileSize() failed to parse a rational number of gibibytes",
+        assertEquals("FileUtils.parseFileSize() failed to parse a rational number of gigabytes",
             1299227607L, FileUtils.parseFileSize("1.21 GiB"));
-        assertEquals("FileUtils.parseFileSize() failed to parse a rational number of tebibytes",
+        assertEquals("FileUtils.parseFileSize() failed to parse a rational number of terabytes",
             6621259022467L, FileUtils.parseFileSize("6.022 TiB"));
     }
 
     @Test
-    public void testStringifyFileSize() throws Exception
+    public void testDelete()
     {
-        // test straightforward conversions for each unit
-        assertEquals("FileUtils.stringifyFileSize() failed to stringify a whole number of bytes",
-                     "256 bytes", FileUtils.stringifyFileSize(256L));
-        assertEquals("FileUtils.stringifyFileSize() failed to stringify a whole number of kibibytes",
-                     "2 KiB", FileUtils.stringifyFileSize(2048L));
-        assertEquals("FileUtils.stringifyFileSize() failed to stringify a whole number of mebibytes",
-                     "4 MiB", FileUtils.stringifyFileSize(4194304L));
-        assertEquals("FileUtils.stringifyFileSize() failed to stringify a whole number of gibibytes",
-                     "3 GiB", FileUtils.stringifyFileSize(3221225472L));
-        assertEquals("FileUtils.stringifyFileSize() failed to stringify a whole number of tebibytes",
-                     "5 TiB", FileUtils.stringifyFileSize(5497558138880L));
-        // test conversions of fractional units
-        assertEquals("FileUtils.stringifyFileSize() failed to stringify a rational number of kibibytes",
-                     "1.5 KiB", FileUtils.stringifyFileSize(1536L));
-        assertEquals("FileUtils.stringifyFileSize() failed to stringify a rational number of kibibytes",
-                     "4.33 KiB", FileUtils.stringifyFileSize(4434L));
-        assertEquals("FileUtils.stringifyFileSize() failed to stringify a rational number of mebibytes",
-                     "2.25 MiB", FileUtils.stringifyFileSize(2359296L));
-        assertEquals("FileUtils.stringifyFileSize() failed to stringify a rational number of mebibytes",
-                     "3.14 MiB", FileUtils.stringifyFileSize(3292529L));
-        assertEquals("FileUtils.stringifyFileSize() failed to stringify a rational number of gibibytes",
-                     "1.21 GiB", FileUtils.stringifyFileSize(1299227607L));
-        assertEquals("FileUtils.stringifyFileSize() failed to stringify a rational number of tebibytes",
-                     "6.02 TiB", FileUtils.stringifyFileSize(6621259022467L));
+        File file = FileUtils.createDeletableTempFile("testTruncate", "1");
+        FileUtils.delete(file);
     }
 
     @Test
@@ -128,10 +114,10 @@ public class FileUtilsTest
     @Test
     public void testFolderSize() throws Exception
     {
-        File folder = createFolder(Paths.get(DatabaseDescriptor.getAllDataFileLocations()[0], "testFolderSize"));
+        File folder = createFolder(DatabaseDescriptor.getAllDataFileLocations()[0], "testFolderSize");
         folder.deleteOnExit();
 
-        File childFolder = createFolder(Paths.get(folder.path(), "child"));
+        File childFolder = createFolder(folder, "child");
 
         File[] files = {
                        createFile(new File(folder, "001"), 10000),
@@ -149,13 +135,36 @@ public class FileUtilsTest
     }
 
     @Test
+    public void testClean()
+    {
+        FileUtils.clean(null); // should not throw
+
+        FileUtils.clean(ByteBuffer.allocate(1)); // should not throw
+        FileUtils.clean(BufferType.ON_HEAP.allocate(1)); // should not throw
+
+        ByteBuffer buffer = ByteBuffer.allocateDirect(1);
+        long usedMemory = NativeMemoryMetrics.instance.usedNioDirectMemoryValue();
+
+        FileUtils.clean(buffer);
+        assertTrue("Used memory should have decreased by at least one byte",
+                   NativeMemoryMetrics.instance.usedNioDirectMemoryValue() <= usedMemory - 1);
+
+        buffer = BufferType.OFF_HEAP.allocate(1);
+        usedMemory = NativeMemoryMetrics.instance.usedNioDirectMemoryValue();
+
+        FileUtils.clean(buffer);
+        assertTrue("Used memory should have decreased by at least one byte",
+                   NativeMemoryMetrics.instance.usedNioDirectMemoryValue() <= usedMemory - 1);
+    }
+
+    @Test
     public void testIsContained()
     {
-        assertTrue(FileUtils.isContained(new File("/testroot/abc"), new File("/testroot/abc")));
-        assertFalse(FileUtils.isContained(new File("/testroot/abc"), new File("/testroot/abcd")));
-        assertTrue(FileUtils.isContained(new File("/testroot/abc"), new File("/testroot/abc/d")));
-        assertTrue(FileUtils.isContained(new File("/testroot/abc/../abc"), new File("/testroot/abc/d")));
-        assertFalse(FileUtils.isContained(new File("/testroot/abc/../abc"), new File("/testroot/abcc")));
+        assertTrue(FileUtils.isContained(new File("/tmp/abc"), new File("/tmp/abc")));
+        assertFalse(FileUtils.isContained(new File("/tmp/abc"), new File("/tmp/abcd")));
+        assertTrue(FileUtils.isContained(new File("/tmp/abc"), new File("/tmp/abc/d")));
+        assertTrue(FileUtils.isContained(new File("/tmp/abc/../abc"), new File("/tmp/abc/d")));
+        assertFalse(FileUtils.isContained(new File("/tmp/abc/../abc"), new File("/tmp/abcc")));
     }
 
     @Test
@@ -247,24 +256,110 @@ public class FileUtilsTest
                   .hasMessageContaining("is not a directory");
     }
 
-
-    private File createFolder(Path path)
+    @Test
+    public void testSize() throws IOException
     {
-        File folder = new File(path);
+        Path tmpDir = Files.createTempDirectory(this.getClass().getSimpleName());
+        Path path = tmpDir.resolve("a.txt");
+        Assert.assertEquals(0, FileUtils.size(path));
+
+        createFile(new File(path), 10000);
+        Assert.assertEquals(10000, FileUtils.size(path));
+    }
+
+    @Test
+    public void testCreateHardLinkWithoutConfirm() throws Throwable
+    {
+        Assume.assumeTrue(NativeLibrary.instance.isOS(INativeLibrary.OSType.LINUX));
+
+        Path tmpDir = Files.createTempDirectory(this.getClass().getSimpleName());
+
+        Path from = tmpDir.resolve("b.txt");
+        writeData(new File(from), 100);
+        Assert.assertTrue(Files.exists(from));
+        Assert.assertEquals(1, Files.getAttribute(from, "unix:nlink"));
+
+        Path to = tmpDir.resolve("c.txt");
+        Assert.assertFalse(Files.exists(to));
+    }
+
+    @Test
+    public void testCopyWithOutConfirm() throws Throwable
+    {
+        Assume.assumeTrue(NativeLibrary.instance.isOS(INativeLibrary.OSType.LINUX));
+
+        Path tmpDir = Files.createTempDirectory(this.getClass().getSimpleName());
+
+        Path from = tmpDir.resolve("b.txt");
+        writeData(new File(from), 100);
+        Assert.assertTrue(Files.exists(from));
+        Assert.assertEquals(1, Files.getAttribute(from, "unix:nlink"));
+
+        Path to = tmpDir.resolve("c.txt");
+        Assert.assertFalse(Files.exists(to));
+
+        FileUtils.copyWithOutConfirm(new File(from), new File(to));
+        compareFile(from, to);
+        Assert.assertEquals(1, Files.getAttribute(from, "unix:nlink"));
+        Assert.assertEquals(1, Files.getAttribute(to, "unix:nlink"));
+
+        File nonExisting = new File(from.resolveSibling("non_existing.txt"));
+        to = tmpDir.resolve("d.txt");
+        FileUtils.copyWithOutConfirm(nonExisting, new File(to));
+        Assert.assertFalse(new File(to).exists());
+    }
+
+    @Test
+    public void testLegacyDSEAPI() throws IOException
+    {
+        Path tmpDir = Files.createTempDirectory(this.getClass().getSimpleName());
+
+        FileUtils.createDirectory(tmpDir);
+        Path f = tmpDir.resolve("somefile");
+        FileUtils.appendAndSync(f, "lorem", "ipsum");
+        assertEquals(Arrays.asList(f), FileUtils.listPaths(tmpDir, path -> true));
+        assertEquals(Arrays.asList(f), FileUtils.listPaths(tmpDir));
+        FileUtils.deleteContent(tmpDir);
+        assertEquals(Arrays.asList(), FileUtils.listPaths(tmpDir));
+        FileUtils.delete(tmpDir);
+        FileUtils.deleteRecursive(tmpDir);
+    }
+
+    private File createFolder(File folder, String additionalName)
+    {
+        folder = folder.resolve(additionalName);
         FileUtils.createDirectory(folder);
         return folder;
     }
 
     private File createFile(File file, long size)
     {
-        try
+        try (RandomAccessFile f = new RandomAccessFile(file.toJavaIOFile(), "rw"))
         {
-            Util.setFileLength(file, size);
+            f.setLength(size);
         }
         catch (Exception e)
         {
             System.err.println(e);
         }
         return file;
+    }
+
+    private File writeData(File file, int size) throws Throwable
+    {
+        Random random = new Random();
+        try (RandomAccessFile f = new RandomAccessFile(file.toJavaIOFile(), "rw"))
+        {
+            byte[] bytes = new byte[size];
+            random.nextBytes(bytes);
+
+            f.write(bytes);
+        }
+        return file;
+    }
+
+    private boolean compareFile(Path left, Path right) throws IOException
+    {
+        return FastByteOperations.compareUnsigned(ByteBuffer.wrap(Files.readAllBytes(left)), ByteBuffer.wrap(Files.readAllBytes(right))) == 0;
     }
 }

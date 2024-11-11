@@ -22,12 +22,13 @@ package org.apache.cassandra.stress.operations.userdefined;
 
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
-import com.datastax.driver.core.*;
+import com.khulnasoft.driver.core.*;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.stress.generate.*;
 import org.apache.cassandra.stress.generate.Row;
@@ -121,7 +122,7 @@ public class ValidatingSchemaQuery extends PartitionOperation
             }
 
             rowCount = 0;
-            Iterator<com.datastax.driver.core.Row> results = rs.iterator();
+            Iterator<com.khulnasoft.driver.core.Row> results = rs.iterator();
             if (!statements[statementIndex].inclusiveStart && iter.hasNext())
                 iter.next();
             while (iter.hasNext())
@@ -134,7 +135,7 @@ public class ValidatingSchemaQuery extends PartitionOperation
                     return false;
 
                 rowCount++;
-                com.datastax.driver.core.Row actualRow = results.next();
+                com.khulnasoft.driver.core.Row actualRow = results.next();
                 for (int i = 0 ; i < actualRow.getColumnDefinitions().size() ; i++)
                 {
                     Object expectedValue = expectedRow.get(valueIndex[i]);

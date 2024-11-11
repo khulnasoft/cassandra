@@ -27,15 +27,6 @@ import org.apache.cassandra.transport.ProtocolVersion;
 
 final class AggregateFunctionSelector extends AbstractFunctionSelector<AggregateFunction>
 {
-    static final SelectorDeserializer deserializer = new AbstractFunctionSelectorDeserializer()
-    {
-        @Override
-        protected Selector newFunctionSelector(ProtocolVersion version, Function function, List<Selector> argSelectors)
-        {
-            return new AggregateFunctionSelector(version, function, argSelectors);
-        }
-    };
-
     private final AggregateFunction.Aggregate aggregate;
 
     public boolean isAggregate()
@@ -43,19 +34,19 @@ final class AggregateFunctionSelector extends AbstractFunctionSelector<Aggregate
         return true;
     }
 
-    public void addInput(InputRow input)
+    public void addInput(ResultSetBuilder rs) throws InvalidRequestException
     {
-        ProtocolVersion protocolVersion = input.getProtocolVersion();
+        ProtocolVersion protocolVersion = rs.getProtocolVersion();
 
         // Aggregation of aggregation is not supported
         for (int i = 0, m = argSelectors.size(); i < m; i++)
         {
             Selector s = argSelectors.get(i);
-            s.addInput(input);
+            s.addInput(rs);
             setArg(i, s.getOutput(protocolVersion));
             s.reset();
         }
-        aggregate.addInput(args());
+        this.aggregate.addInput(protocolVersion, args());
     }
 
     public ByteBuffer getOutput(ProtocolVersion protocolVersion) throws InvalidRequestException
@@ -68,9 +59,9 @@ final class AggregateFunctionSelector extends AbstractFunctionSelector<Aggregate
         aggregate.reset();
     }
 
-    AggregateFunctionSelector(ProtocolVersion version, Function fun, List<Selector> argSelectors) throws InvalidRequestException
+    AggregateFunctionSelector(Function fun, List<Selector> argSelectors) throws InvalidRequestException
     {
-        super(Kind.AGGREGATE_FUNCTION_SELECTOR, version, (AggregateFunction) fun, argSelectors);
+        super((AggregateFunction) fun, argSelectors);
 
         this.aggregate = this.fun.newAggregate();
     }

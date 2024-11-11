@@ -17,60 +17,36 @@
  */
 package org.apache.cassandra.io.util;
 
-import java.io.BufferedReader;
-import java.io.FileNotFoundException;
-import java.io.IOError;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.UncheckedIOException;
+import java.io.*;
+import java.net.URI;
 import java.nio.channels.FileChannel;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.FileAlreadyExistsException;
-import java.nio.file.FileStore;
-import java.nio.file.Files;
-import java.nio.file.NoSuchFileException;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
-import java.nio.file.attribute.FileAttribute;
-import java.nio.file.attribute.FileTime;
-import java.nio.file.attribute.PosixFileAttributeView;
-import java.nio.file.attribute.PosixFileAttributes;
-import java.nio.file.attribute.PosixFilePermission;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.EnumSet;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.nio.file.*;
+import java.nio.file.attribute.*;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
-import java.util.function.Function;
-import java.util.function.IntFunction;
+import java.util.function.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
 import javax.annotation.Nullable;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import net.openhft.chronicle.core.util.ThrowingFunction;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.io.FSError;
 import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.FSWriteError;
+import org.apache.cassandra.io.storage.StorageProvider;
 import org.apache.cassandra.utils.NoSpamLogger;
 
-import static java.nio.file.StandardOpenOption.APPEND;
+import static java.nio.file.StandardOpenOption.*;
 import static java.nio.file.StandardOpenOption.CREATE;
-import static java.nio.file.StandardOpenOption.READ;
-import static java.nio.file.StandardOpenOption.TRUNCATE_EXISTING;
 import static java.nio.file.StandardOpenOption.WRITE;
 import static java.util.Collections.unmodifiableSet;
-import static org.apache.cassandra.config.CassandraRelevantProperties.USE_NIX_RECURSIVE_DELETE;
 import static org.apache.cassandra.utils.Throwables.merge;
 
 /**
@@ -78,7 +54,7 @@ import static org.apache.cassandra.utils.Throwables.merge;
  *
  * This class tries to apply uniform IOException handling, and does not propagate IOException except for NoSuchFileException.
  * Any harmless/application error exceptions are propagated as UncheckedIOException, and anything else as an FSReadError or FSWriteError.
- * Semantically this is a little incoherent throughout the codebase, as we intercept IOException haphazardly and treaat
+ * Semantically this is a little incoherent throughout the codebase, as we intercept IOException haphazardly and treat
  * it inconsistently - we should ideally migrate to using {@link #propagate(IOException, Path, boolean)} et al globally.
  */
 public final class PathUtils
@@ -94,7 +70,21 @@ public final class PathUtils
     private static final Logger logger = LoggerFactory.getLogger(PathUtils.class);
     private static final NoSpamLogger nospam1m = NoSpamLogger.getLogger(logger, 1, TimeUnit.MINUTES);
 
-    private static Consumer<Path> onDeletion = path -> {};
+    private static final boolean USE_NIX_RECURSIVE_DELETE = CassandraRelevantProperties.USE_NIX_RECURSIVE_DELETE.getBoolean();
+
+    private static volatile boolean DAEMON_SETUP_COMPLETED = false;
+
+    private static Consumer<Path> onDeletion = path -> {
+        if (DAEMON_SETUP_COMPLETED)
+            setDeletionListener(ignore -> {});
+        else if (logger.isTraceEnabled())
+            logger.trace("Deleting file during startup: {}", path);
+    };
+
+    public static void daemonSetupCompleted()
+    {
+        DAEMON_SETUP_COMPLETED = true;
+    }
 
     public static FileChannel newReadChannel(Path path) throws NoSuchFileException
     {
@@ -155,7 +145,7 @@ public final class PathUtils
         }
     }
 
-    public static <T extends Throwable, V> V[] tryList(Path path, Function<Stream<Path>, Stream<V>> transform, IntFunction<V[]> arrayFactory, ThrowingFunction<IOException, V[], T> orElse) throws T
+    public static <T> T[] tryList(Path path, Function<Stream<Path>, Stream<T>> transform, IntFunction<T[]> arrayFactory)
     {
         try (Stream<Path> stream = Files.list(path))
         {
@@ -164,15 +154,15 @@ public final class PathUtils
         }
         catch (IOException e)
         {
-            return orElse.apply(e);
+            return null;
         }
     }
 
-    public static void forEach(Path path, Consumer<Path> forEach)
+    public static void forEach(Path path, Consumer<Path> pathConsumer)
     {
         try (Stream<Path> stream = Files.list(path))
         {
-            (consistentDirectoryListings ? stream.sorted() : stream).forEach(forEach);
+            (consistentDirectoryListings ? stream.sorted() : stream).forEach(pathConsumer);
         }
         catch (IOException e)
         {
@@ -180,18 +170,19 @@ public final class PathUtils
         }
     }
 
-    public static void forEachRecursive(Path path, Consumer<Path> forEach)
+    public static void forEachRecursive(Path path, Consumer<Path> pathConsumer)
     {
-        Consumer<Path> forEachRecursive = new Consumer<Path>()
+        Consumer<Path> recursivePathConsumer = new Consumer<Path>()
         {
             @Override
-            public void accept(Path child)
+            public void accept(Path childPath)
             {
-                forEach.accept(child);
-                forEach(child, this);
+                pathConsumer.accept(childPath);
+                if (isDirectory(childPath))
+                    forEach(childPath, this);
             }
         };
-        forEach(path, forEachRecursive);
+        forEach(path, recursivePathConsumer);
     }
 
     public static long tryGetLength(Path path)
@@ -278,22 +269,6 @@ public final class PathUtils
         }
     }
 
-    public static void deleteIfExists(Path file)
-    {
-        try
-        {
-            Files.delete(file);
-            onDeletion.accept(file);
-        }
-        catch (IOException e)
-        {
-            if (e instanceof FileNotFoundException | e instanceof NoSuchFileException)
-                return;
-
-            throw propagateUnchecked(e, file, true);
-        }
-    }
-
     public static boolean tryDelete(Path file)
     {
         try
@@ -332,42 +307,14 @@ public final class PathUtils
         return accumulate;
     }
 
-    /**
-     * Uses unix `rm -r` to delete a directory recursively.
-     * Note that, it will trigger {@link #onDeletion} listener only for the provided path and will not call it for any
-     * nested path. This method can be much faster than deleting files and directories recursively by traversing them
-     * with Java. Though, we use it only for tests because it provides less information about the problem when something
-     * goes wrong.
-     *
-     * @param path    path to be deleted
-     * @param quietly if quietly, additional `-f` flag is added to the `rm` command so that it will not complain in case
-     *                the provided path is missing
-     */
     private static void deleteRecursiveUsingNixCommand(Path path, boolean quietly)
     {
-        String [] cmd = new String[]{ "rm", quietly ? "-rdf" : "-rd", path.toAbsolutePath().toString() };
         try
         {
-            if (!quietly && !Files.exists(path))
-                throw new NoSuchFileException(path.toString());
-
-            Process p = Runtime.getRuntime().exec(cmd);
-            int result = p.waitFor();
-
-            String out, err;
-            try (BufferedReader outReader = new BufferedReader(new InputStreamReader(p.getInputStream()));
-                 BufferedReader errReader = new BufferedReader(new InputStreamReader(p.getErrorStream())))
-            {
-                out = outReader.lines().collect(Collectors.joining("\n"));
-                err = errReader.lines().collect(Collectors.joining("\n"));
-            }
-
-            if (result != 0 && Files.exists(path))
-            {
-                logger.error("{} returned:\nstdout:\n{}\n\nstderr:\n{}", Arrays.toString(cmd), out, err);
-                throw new IOException(String.format("%s returned non-zero exit code: %d%nstdout:%n%s%n%nstderr:%n%s", Arrays.toString(cmd), result, out, err));
-            }
-
+            String[] cmd = new String[]{ "rm", quietly ? "-rf" : "-r", path.toAbsolutePath().toString() };
+            int result = Runtime.getRuntime().exec(cmd).waitFor();
+            if (result != 0)
+                throw new IOException(String.format("'%s' returned non-zero exit code: %d", Arrays.toString(cmd), result));
             onDeletion.accept(path);
         }
         catch (IOException e)
@@ -388,7 +335,7 @@ public final class PathUtils
      */
     public static void deleteRecursive(Path path)
     {
-        if (USE_NIX_RECURSIVE_DELETE.getBoolean() && path.getFileSystem() == java.nio.file.FileSystems.getDefault())
+        if (USE_NIX_RECURSIVE_DELETE && path.getFileSystem() == FileSystems.getDefault())
         {
             deleteRecursiveUsingNixCommand(path, false);
             return;
@@ -397,8 +344,28 @@ public final class PathUtils
         if (isDirectory(path))
             forEach(path, PathUtils::deleteRecursive);
 
-        // The directory is now empty, so now it can be smoked
+        // The directory is now empty so now it can be smoked
         delete(path);
+    }
+
+    /**
+     * Deletes all files and subdirectories under "path",
+     * ignoring IOExceptions along the way.
+     * @param path file to be deleted
+     */
+    public static void deleteQuietly(Path path)
+    {
+        if (USE_NIX_RECURSIVE_DELETE && path.getFileSystem() == FileSystems.getDefault())
+        {
+            deleteRecursiveUsingNixCommand(path, true);
+            return;
+        }
+
+        if (isDirectory(path))
+            forEach(path, PathUtils::deleteQuietly);
+
+        // The directory is now empty so now it can be smoked
+        tryDelete(path);
     }
 
     /**
@@ -408,12 +375,6 @@ public final class PathUtils
      */
     public static void deleteRecursive(Path path, RateLimiter rateLimiter)
     {
-        if (USE_NIX_RECURSIVE_DELETE.getBoolean() && path.getFileSystem() == java.nio.file.FileSystems.getDefault())
-        {
-            deleteRecursiveUsingNixCommand(path, false);
-            return;
-        }
-
         deleteRecursive(path, rateLimiter, p -> deleteRecursive(p, rateLimiter));
     }
 
@@ -429,6 +390,49 @@ public final class PathUtils
 
         // The directory is now empty so now it can be smoked
         delete(path, rateLimiter);
+    }
+
+    /**
+     * Recursively delete the content of the directory, but not the directory itself.
+     * @param dirPath directory for which content should be deleted 
+     */
+    public static void deleteContent(Path dirPath)
+    {
+        if (isDirectory(dirPath))
+            forEach(dirPath, PathUtils::deleteRecursive);
+    }
+
+    /**
+     * List all paths in this directory
+     * @param dirPath directory for which to list all paths
+     * @return list of all paths contained in the given directory
+     */
+    public static List<Path> listPaths(Path dirPath)
+    {
+        return listPaths(dirPath, p -> true);
+    }
+
+    /**
+     * List paths in this directory that match the filter
+     * @param dirPath directory for which to list all paths matching the given filter
+     * @param filter predicate used to filter paths
+     * @return filtered list of paths contained in the given directory
+     */
+    public static List<Path> listPaths(Path dirPath, Predicate<Path> filter)
+    {
+        try (Stream<Path> stream = Files.list(dirPath))
+        {
+            return (consistentDirectoryListings ? stream.sorted() : stream).filter(filter).collect(Collectors.toList());
+        }
+        catch(NotDirectoryException | NoSuchFileException ex)
+        {
+            // Don't throw if the file does not exist or is not a directory
+            return ImmutableList.of();
+        }
+        catch(IOException ex)
+        {
+            throw new FSReadError(ex, dirPath);
+        }
     }
 
     /**
@@ -452,9 +456,11 @@ public final class PathUtils
     public static boolean tryRename(Path from, Path to)
     {
         logger.trace("Renaming {} to {}", from, to);
+        // this is not FSWE because usually when we see it it's because we didn't close the file before renaming it,
+        // and Windows is picky about that.
         try
         {
-            atomicMoveWithFallback(from, to);
+            atomicMoveWithFallback(StorageProvider.instance.getLocalPath(from), StorageProvider.instance.getLocalPath(to));
             return true;
         }
         catch (IOException e)
@@ -467,16 +473,19 @@ public final class PathUtils
     public static void rename(Path from, Path to)
     {
         logger.trace("Renaming {} to {}", from, to);
+        // this is not FSWE because usually when we see it it's because we didn't close the file before renaming it,
+        // and Windows is picky about that.
         try
         {
-            atomicMoveWithFallback(from, to);
+            atomicMoveWithFallback(StorageProvider.instance.getLocalPath(from), StorageProvider.instance.getLocalPath(to));
         }
         catch (IOException e)
         {
             logger.trace("Could not move file {} to {}", from, to, e);
 
-            // TODO: try to decide if is read or write? for now, have assumed write
-            throw propagateUnchecked(String.format("Failed to rename %s to %s", from, to), e, to, true);
+            // TODO: this should be an FSError (either read or write)?
+            // (but for now this is maintaining legacy semantics)
+            throw new RuntimeException(String.format("Failed to rename %s to %s", from, to), e);
         }
     }
 
@@ -493,6 +502,22 @@ public final class PathUtils
         {
             logger.trace("Could not do an atomic move", e);
             Files.move(from, to, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    /**
+     * Copy a file to a target file
+     */
+    public static void copy(Path from, Path to, StandardCopyOption option)
+    {
+        logger.trace("Copying {} to {}", from, to);
+        try
+        {
+            Files.copy(from, to, option);
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException(String.format("Failed to copy %s to %s", from, to), e);
         }
     }
 
@@ -575,8 +600,13 @@ public final class PathUtils
             throw new IllegalArgumentException("Must be invoked on a path without redundant elements");
 
         Path parent = file;
+        boolean isRelative = !file.isAbsolute();
         while (parent != null && !Files.exists(parent))
+        {
             parent = parent.getParent();
+            if (parent == null && isRelative)
+                parent = Paths.get("");
+        }
         return parent;
     }
 
@@ -597,6 +627,41 @@ public final class PathUtils
         if (parent == file)
             return toRealPath(file);
         return toRealPath(parent).resolve(parent.relativize(file));
+    }
+
+    /**
+     * @param path to check file szie
+     * @return file size or 0 if failed to get file size
+     */
+    public static long size(Path path)
+    {
+        try
+        {
+            return Files.size(path);
+        }
+        catch (IOException e)
+        {
+            // it's possible that between the time that the caller has checked if the file exists and the time it retrieves the creation time,
+            // the file is actually deleted. File.length() returns a positive value only if the file is valid, otherwise it returns 0L, here
+            // we do the same
+            return 0;
+        }
+    }
+
+    /**
+     * @param pathOrURI path or uri in string
+     * @return nio Path
+     */
+    public static Path getPath(String pathOrURI)
+    {
+        try
+        {
+            return Paths.get(URI.create(pathOrURI));
+        }
+        catch (IllegalArgumentException ex)
+        {
+            return Paths.get(pathOrURI);
+        }
     }
 
     private static Path toRealPath(Path path)
@@ -622,67 +687,15 @@ public final class PathUtils
         return realFile.startsWith(realFolder);
     }
 
-    @VisibleForTesting
-    static public void runOnExitThreadsAndClear()
-    {
-        DeleteOnExit.runOnExitThreadsAndClear();
-    }
-
-    static public void clearOnExitThreads()
-    {
-        DeleteOnExit.clearOnExitThreads();
-    }
-
-
     private static final class DeleteOnExit implements Runnable
     {
         private boolean isRegistered;
         private final Set<Path> deleteRecursivelyOnExit = new HashSet<>();
         private final Set<Path> deleteOnExit = new HashSet<>();
 
-        private static List<Thread> onExitThreads = new ArrayList<>();
-
-        private static void runOnExitThreadsAndClear()
-        {
-            List<Thread> toRun;
-            synchronized (onExitThreads)
-            {
-                toRun = new ArrayList<>(onExitThreads);
-                onExitThreads.clear();
-            }
-            Runtime runtime = Runtime.getRuntime();
-            toRun.forEach(onExitThread -> {
-                try
-                {
-                    runtime.removeShutdownHook(onExitThread);
-                    //noinspection CallToThreadRun
-                    onExitThread.run();
-                }
-                catch (Exception ex)
-                {
-                    logger.warn("Exception thrown when cleaning up files to delete on exit, continuing.", ex);
-                }
-            });
-        }
-
-        private static void clearOnExitThreads()
-        {
-            synchronized (onExitThreads)
-            {
-                Runtime runtime = Runtime.getRuntime();
-                onExitThreads.forEach(runtime::removeShutdownHook);
-                onExitThreads.clear();
-            }
-        }
-
         DeleteOnExit()
         {
-            final Thread onExitThread = new Thread(this); // checkstyle: permit this instantiation
-            synchronized (onExitThreads)
-            {
-                onExitThreads.add(onExitThread);
-            }
-            Runtime.getRuntime().addShutdownHook(onExitThread);
+            Runtime.getRuntime().addShutdownHook(new Thread(this));
         }
 
         synchronized void add(Path path, boolean recursive)
@@ -779,7 +792,7 @@ public final class PathUtils
     {
         try
         {
-            Path ancestor = findExistingAncestor(path.toAbsolutePath().normalize());
+            Path ancestor = findExistingAncestor(path.normalize().toAbsolutePath());
             if (ancestor == null)
             {
                 orElse.accept(new NoSuchFileException(path.toString()));
@@ -816,7 +829,7 @@ public final class PathUtils
      * @param size returned by the Java's FileStore methods
      * @return the size or {@code Long.MAX_VALUE} if the size was bigger than {@code Long.MAX_VALUE}
      */
-    private static long handleLargeFileSystem(long size)
+    public static long handleLargeFileSystem(long size)
     {
         return size < 0 ? Long.MAX_VALUE : size;
     }
@@ -833,14 +846,6 @@ public final class PathUtils
      */
     public static RuntimeException propagateUnchecked(IOException ioe, Path path, boolean write)
     {
-        return propagateUnchecked(null, ioe, path, write);
-    }
-
-    /**
-     * propagate an IOException as an FSWriteError, FSReadError or UncheckedIOException
-     */
-    public static RuntimeException propagateUnchecked(String message, IOException ioe, Path path, boolean write)
-    {
         if (ioe instanceof FileAlreadyExistsException
             || ioe instanceof NoSuchFileException
             || ioe instanceof AtomicMoveNotSupportedException
@@ -848,10 +853,10 @@ public final class PathUtils
             || ioe instanceof java.nio.file.FileSystemLoopException
             || ioe instanceof java.nio.file.NotDirectoryException
             || ioe instanceof java.nio.file.NotLinkException)
-            throw new UncheckedIOException(message, ioe);
+            throw new UncheckedIOException(ioe);
 
-        if (write) throw new FSWriteError(message, ioe, path);
-        else throw new FSReadError(message, ioe, path);
+        if (write) throw new FSWriteError(ioe, path);
+        else throw new FSReadError(ioe, path);
     }
 
     /**

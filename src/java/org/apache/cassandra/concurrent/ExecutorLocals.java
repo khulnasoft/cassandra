@@ -18,90 +18,88 @@
 
 package org.apache.cassandra.concurrent;
 
-import io.netty.util.concurrent.FastThreadLocal;
+import java.util.Arrays;
+
+import org.apache.cassandra.sensors.RequestSensors;
+import org.apache.cassandra.sensors.RequestTracker;
 import org.apache.cassandra.service.ClientWarn;
 import org.apache.cassandra.tracing.TraceState;
-import org.apache.cassandra.utils.Closeable;
-import org.apache.cassandra.utils.WithResources;
+import org.apache.cassandra.tracing.Tracing;
 
 /*
- * This class only knows about Tracing and ClientWarn, so if any different executor locals are added, it must be
+ * This class only knows about fixed locals, so if any different executor locals are added, it must be
  * updated.
  *
  * We don't enumerate the ExecutorLocal.all array each time because it would be much slower.
  */
-public class ExecutorLocals implements WithResources, Closeable
+public class ExecutorLocals
 {
-    private static final ExecutorLocals none = new ExecutorLocals(null, null);
-    private static final FastThreadLocal<ExecutorLocals> locals = new FastThreadLocal<ExecutorLocals>()
-    {
-        @Override
-        protected ExecutorLocals initialValue()
-        {
-            return none;
-        }
-    };
-
-    public static class Impl
-    {
-        protected static void set(TraceState traceState, ClientWarn.State clientWarnState)
-        {
-            if (traceState == null && clientWarnState == null) locals.set(none);
-            else locals.set(new ExecutorLocals(traceState, clientWarnState));
-        }
-    }
+    private static final ExecutorLocal<TraceState> tracing = Tracing.instance;
+    private static final ExecutorLocal<ClientWarn.State> clientWarn = ClientWarn.instance;
+    private static final ExecutorLocal<RequestSensors> requestTracker = RequestTracker.instance;
 
     public final TraceState traceState;
     public final ClientWarn.State clientWarnState;
+    public final RequestSensors sensors;
 
-    protected ExecutorLocals(TraceState traceState, ClientWarn.State clientWarnState)
+    private ExecutorLocals(TraceState traceState, ClientWarn.State clientWarnState, RequestSensors sensors)
     {
         this.traceState = traceState;
         this.clientWarnState = clientWarnState;
+        this.sensors = sensors;
+    }
+
+    static
+    {
+        assert Arrays.equals(ExecutorLocal.all, new ExecutorLocal[]{ tracing, clientWarn, requestTracker })
+        : "ExecutorLocals has not been updated to reflect new ExecutorLocal.all";
     }
 
     /**
-     * @return an ExecutorLocals object which has the current trace state and client warn state.
+     * This creates a new ExecutorLocals object based on what is already set.
+     *
+     * @return an ExecutorLocals object which has the trace state and client warn state captured if either has been set,
+     *         or null if both are unset. The null result short-circuits logic in
+     *         {@link AbstractLocalAwareExecutorService#newTaskFor(Runnable, Object, ExecutorLocals)}, preventing
+     *         unnecessarily calling {@link ExecutorLocals#set(ExecutorLocals)}.
      */
-    public static ExecutorLocals current()
+    public static ExecutorLocals create()
     {
-        return locals.get();
+        TraceState traceState = tracing.get();
+        ClientWarn.State clientWarnState = clientWarn.get();
+        RequestSensors sensors = requestTracker.get();
+        if (traceState == null && clientWarnState == null && sensors == null)
+            return null;
+        else
+            return new ExecutorLocals(traceState, clientWarnState, sensors);
     }
 
-    /**
-     * The {@link #current}Locals, if any; otherwise {@link WithResources#none()}.
-     * Used to propagate current to other executors as a {@link WithResources}.
-     */
-    public static WithResources propagate()
+    public static ExecutorLocals create(TraceState traceState, ClientWarn.State clientWarnState, RequestSensors sensors)
     {
-        ExecutorLocals locals = current();
-        return locals == none ? WithResources.none() : locals;
+        return new ExecutorLocals(traceState, clientWarnState, sensors);
     }
 
     public static ExecutorLocals create(TraceState traceState)
     {
-        ExecutorLocals current = locals.get();
-        return current.traceState == traceState ? current : new ExecutorLocals(traceState, current.clientWarnState);
+        ClientWarn.State clientWarnState = clientWarn.get();
+        RequestSensors sensors = requestTracker.get();
+        return new ExecutorLocals(traceState, clientWarnState, sensors);
     }
 
-    public static void clear()
+    public static ExecutorLocals create(RequestSensors sensors)
     {
-        locals.set(none);
+        TraceState traceState = tracing.get();
+        ClientWarn.State clientWarnState = clientWarn.get();
+        return new ExecutorLocals(traceState, clientWarnState, sensors);
     }
 
-    /**
-     * Overwrite current locals, and return the previous ones
-     */
-    public Closeable get()
+    public static void set(ExecutorLocals locals)
     {
-        ExecutorLocals old = current();
-        if (old != this)
-            locals.set(this);
-        return old;
-    }
-
-    public void close()
-    {
-        locals.set(this);
+        TraceState traceState = locals == null ? null : locals.traceState;
+        ClientWarn.State clientWarnState = locals == null ? null : locals.clientWarnState;
+        RequestSensors sensors = locals == null ? null : locals.sensors;
+        tracing.set(traceState);
+        clientWarn.set(clientWarnState);
+        requestTracker.set(sensors);
     }
 }

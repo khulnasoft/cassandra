@@ -18,9 +18,7 @@
 
 package org.apache.cassandra.streaming;
 
-import java.io.IOException;
-
-public class StreamReceiveException extends IOException
+public class StreamReceiveException extends RuntimeException
 {
     public final StreamSession session;
 

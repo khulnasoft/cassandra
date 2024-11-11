@@ -66,12 +66,12 @@ public class CommitLogSegmentBackpressureTest
     @Test
     @BMRules(rules = {@BMRule(name = "Acquire Semaphore before sync",
                               targetClass = "AbstractCommitLogService$SyncRunnable",
-                              targetMethod = "run",
+                              targetMethod = "sync",
                               targetLocation = "AT INVOKE org.apache.cassandra.db.commitlog.CommitLog.sync(boolean)",
                               action = "org.apache.cassandra.db.commitlog.CommitLogSegmentBackpressureTest.allowSync.acquire()"),
                       @BMRule(name = "Release Semaphore after sync",
                               targetClass = "AbstractCommitLogService$SyncRunnable",
-                              targetMethod = "run",
+                              targetMethod = "sync",
                               targetLocation = "AFTER INVOKE org.apache.cassandra.db.commitlog.CommitLog.sync(boolean)",
                               action = "org.apache.cassandra.db.commitlog.CommitLogSegmentBackpressureTest.allowSync.release()")})
     public void testCompressedCommitLogBackpressure() throws Throwable
@@ -85,7 +85,6 @@ public class CommitLogSegmentBackpressureTest
         DatabaseDescriptor.setCommitLogSync(CommitLogSync.periodic);
         DatabaseDescriptor.setCommitLogSyncPeriod(10 * 1000);
         DatabaseDescriptor.setCommitLogMaxCompressionBuffersPerPool(3);
-        DatabaseDescriptor.initializeCommitLogDiskAccessMode();
         SchemaLoader.prepareServer();
         SchemaLoader.createKeyspace(KEYSPACE1,
                                     KeyspaceParams.simple(1),
@@ -112,7 +111,7 @@ public class CommitLogSegmentBackpressureTest
 
             dummyThread.start();
 
-            AbstractCommitLogSegmentManager clsm = CommitLog.instance.segmentManager;
+            AbstractCommitLogSegmentManager clsm = CommitLog.instance.getSegmentManager();
 
             Util.spinAssertEquals(3, () -> clsm.getActiveSegments().size(), 5);
 

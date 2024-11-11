@@ -147,10 +147,9 @@
                                           -DQT_SHRINKS=0
                                           -Dcassandra.config=file://$PROJECT_DIR$/conf/cassandra.yaml
                                           -Dcassandra.logdir=$PROJECT_DIR$/data/logs
-                                          -Dcassandra.reads.thresholds.coordinator.defensive_checks_enabled=true
                                           -Dcassandra.storagedir=$PROJECT_DIR$/data
+                                          -Djava.library.path=$PROJECT_DIR$/lib/sigar-bin
                                           -Dlogback.configurationFile=file://$PROJECT_DIR$/conf/logback.xml
-                                          -XX:HeapDumpPath=build/test
                                           -ea" />
       <option name="PROGRAM_PARAMETERS" value="" />
       <option name="WORKING_DIRECTORY" value="" />
@@ -183,8 +182,8 @@
       <option name="TEST_OBJECT" value="class" />
       <option name="VM_PARAMETERS" value="
                                           -Dcassandra.config=file://$PROJECT_DIR$/test/conf/cassandra.yaml
+                                          -Dcassandra.disable_tcactive_openssl=true 
                                           -Dcassandra.logdir=$PROJECT_DIR$/build/test/logs
-                                          -Dcassandra.reads.thresholds.coordinator.defensive_checks_enabled=true
                                           -Dcassandra.ring_delay_ms=1000
                                           -Dcassandra.skip_sync=true
                                           -Dcassandra.strict.runtime.checks=true
@@ -192,16 +191,16 @@
                                           -Dcassandra.test.messagingService.nonGracefulShutdown=true
                                           -Dcassandra.tolerate_sstable_size=true
                                           -Dcassandra.use_nix_recursive_delete=true
+                                          -Dcassandra.testtag=ide
                                           -Dinvalid-legacy-sstable-root=$PROJECT_DIR$/test/data/invalid-legacy-sstables
+                                          -Djava.library.path=$PROJECT_DIR$/lib/sigar-bin
                                           -Dlegacy-sstable-root=$PROJECT_DIR$/test/data/legacy-sstables
                                           -Dlogback.configurationFile=file://$PROJECT_DIR$/test/conf/logback-test.xml
                                           -Dmigration-sstable-root=$PROJECT_DIR$/test/data/migration-sstables
-                                          -XX:ActiveProcessorCount=2
-                                          -XX:HeapDumpPath=build/test
-                                          -XX:MaxMetaspaceSize=2G
+                                          -XX:ActiveProcessorCount=4
                                           -XX:SoftRefLRUPolicyMSPerMB=0
-                                          -Xmx4G
-                                          -ea" />
+                                          -ea
+                                          -noverify" />
       <option name="PARAMETERS" value="" />
       <fork_mode value="class" />
       <option name="WORKING_DIRECTORY" value="" />
@@ -226,11 +225,9 @@
                                           -Dcassandra.config=file://$PROJECT_DIR$/conf/cassandra.yaml
                                           -Dcassandra.jmx.local.port=7199
                                           -Dcassandra.logdir=$PROJECT_DIR$/data/logs
-                                          -Dcassandra.reads.thresholds.coordinator.defensive_checks_enabled=true
                                           -Dcassandra.storagedir=$PROJECT_DIR$/data
-                                          -Dcassandra.triggers_dir=$PROJECT_DIR$/conf/triggers
+                                          -Djava.library.path=$PROJECT_DIR$/lib/sigar-bin
                                           -Dlogback.configurationFile=file://$PROJECT_DIR$/conf/logback.xml
-                                          -XX:HeapDumpPath=build/test
                                           -Xmx1G
                                           -ea" />
       <option name="PROGRAM_PARAMETERS" value="" />

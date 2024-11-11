@@ -1,13 +1,11 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Copyright KhulnaSoft, Ltd.
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,14 +21,17 @@ import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Directories;
+import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.compaction.CompactionRealm;
 import org.apache.cassandra.db.compaction.ShardTracker;
 import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableWriter;
+import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.utils.FBUtilities;
 
 /**
@@ -45,14 +46,14 @@ public class ShardedCompactionWriter extends CompactionAwareWriter
 
     private final ShardTracker boundaries;
 
-    public ShardedCompactionWriter(ColumnFamilyStore cfs,
+    public ShardedCompactionWriter(CompactionRealm realm,
                                    Directories directories,
                                    LifecycleTransaction txn,
                                    Set<SSTableReader> nonExpiredSSTables,
                                    boolean keepOriginals,
                                    ShardTracker boundaries)
     {
-        super(cfs, directories, txn, nonExpiredSSTables, keepOriginals);
+        super(realm, directories, txn, nonExpiredSSTables, keepOriginals);
 
         this.boundaries = boundaries;
         long totalKeyCount = nonExpiredSSTables.stream()
@@ -74,7 +75,7 @@ public class ShardedCompactionWriter extends CompactionAwareWriter
                          key.getToken(), boundaries.shardStart(),
                          boundaries.shardIndex(),
                          FBUtilities.prettyPrintMemory(uncompressedBytesWritten),
-                         cfs.getKeyspaceName(), cfs.getTableName());
+                         realm.getKeyspaceName(), realm.getTableName());
             return true;
         }
 
@@ -82,16 +83,22 @@ public class ShardedCompactionWriter extends CompactionAwareWriter
     }
 
     @Override
-    protected SSTableWriter sstableWriter(Directories.DataDirectory directory, DecoratedKey nextKey)
+    @SuppressWarnings("resource")
+    protected SSTableWriter sstableWriter(Directories.DataDirectory directory, Token nextKey)
     {
         if (nextKey != null)
-            boundaries.advanceTo(nextKey.getToken());
-        return super.sstableWriter(directory, nextKey);
-    }
+            boundaries.advanceTo(nextKey);
 
-    protected long sstableKeyCount()
-    {
-        return shardAdjustedKeyCount(boundaries, nonExpiredSSTables, uniqueKeyRatio);
+        return SSTableWriter.create(realm.newSSTableDescriptor(getDirectories().getLocationForDisk(directory)),
+                                    shardAdjustedKeyCount(boundaries, nonExpiredSSTables, uniqueKeyRatio),
+                                    minRepairedAt,
+                                    pendingRepair,
+                                    isTransient,
+                                    realm.metadataRef(),
+                                    new MetadataCollector(txn.originals(), realm.metadata().comparator, 0),
+                                    SerializationHeader.make(realm.metadata(), nonExpiredSSTables),
+                                    realm.getIndexManager().listIndexGroups(),
+                                    txn);
     }
 
     private static long shardAdjustedKeyCount(ShardTracker boundaries,

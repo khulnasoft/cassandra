@@ -17,12 +17,9 @@
  */
 package org.apache.cassandra.auth;
 
-import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
-
-import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.RequestExecutionException;
@@ -34,7 +31,7 @@ import org.apache.cassandra.exceptions.RequestValidationException;
  * alteration and the granting and revoking of roles to other
  * roles.
  */
-public interface IRoleManager extends AuthCache.BulkLoader<RoleResource, Set<Role>>
+public interface IRoleManager
 {
 
     /**
@@ -44,7 +41,7 @@ public interface IRoleManager extends AuthCache.BulkLoader<RoleResource, Set<Rol
      */
     public enum Option
     {
-        SUPERUSER, PASSWORD, LOGIN, OPTIONS, HASHED_PASSWORD, GENERATED_PASSWORD
+        SUPERUSER, PASSWORD, LOGIN, OPTIONS
     }
 
     /**
@@ -156,6 +153,15 @@ public interface IRoleManager extends AuthCache.BulkLoader<RoleResource, Set<Rol
      }
 
     /**
+     * Return the set of roles that are direct members of the given role (non-recursive).
+     * @return any non-{@code null} value means the found reverse-memberships.
+     *         {@code null} means that the functionality is not supported.
+     * @throws RequestValidationException
+     * @throws RequestExecutionException
+     */
+    Set<RoleResource> getMembersOf(RoleResource role);
+
+    /**
      * Called during the execution of an unqualified LIST ROLES query.
      * Returns the total set of distinct roles in the system.
      *
@@ -228,69 +234,5 @@ public interface IRoleManager extends AuthCache.BulkLoader<RoleResource, Set<Rol
      *
      * For example, use this method to create any required keyspaces/column families.
      */
-    default void setup()
-    {
-        setup(true);
-    }
-
-    /**
-     * Like the method above, but allows to disable async role setup, making it synchronous.
-     */
-    @VisibleForTesting
-    void setup(boolean asyncRoleSetup);
-
-    /**
-     * Each valid identity is associated with a role in the identity_to_role table, this method returns role
-     * of a given identity
-     *
-     * @param identity identity whose role to be retrieved
-     * @return role of the given identity
-     */
-    default String roleForIdentity(String identity)
-    {
-        return null;
-    }
-
-    /**
-     * Returns all the authorized identities from the identity_to_role table
-     *
-     * @return Map of identity -> roles
-     */
-    default Map<String, String> authorizedIdentities()
-    {
-        return Collections.emptyMap();
-    }
-
-    /**
-     * Adds a row (identity, role) to the identity_to_role table
-     *
-     * @param identity identity to be added
-     * @param role role that is associated with the identity
-     */
-    default void addIdentity(String identity, String role)
-    {
-    }
-
-    /**
-     * Returns if an identity exists in the identity_to_role
-     *
-     * @param identity identity whose existence to verify
-     * @return
-     */
-    default boolean isExistingIdentity(String identity)
-    {
-        return false;
-    }
-
-    /**
-     * Called on the execution of DROP IDENTITY statement for removing a given identity from the identity_role table.
-     * This implies we want to revoke the access for the given identity.
-     *
-     * @param identity identity that has to be removed from the table
-     */
-    default void dropIdentity(String identity)
-    {
-
-    }
-
+    void setup();
 }

@@ -29,19 +29,17 @@ import javax.net.ssl.SSLEngine;
 
 import com.google.common.net.HostAndPort;
 
-import com.datastax.driver.core.*;
-import com.datastax.driver.core.policies.DCAwareRoundRobinPolicy;
-import com.datastax.driver.core.policies.LoadBalancingPolicy;
-import com.datastax.driver.core.policies.TokenAwarePolicy;
-import com.datastax.driver.core.policies.WhiteListPolicy;
-import com.datastax.shaded.netty.channel.socket.SocketChannel;
+import com.khulnasoft.driver.core.*;
+import com.khulnasoft.driver.core.policies.DCAwareRoundRobinPolicy;
+import com.khulnasoft.driver.core.policies.LoadBalancingPolicy;
+import com.khulnasoft.driver.core.policies.TokenAwarePolicy;
+import com.khulnasoft.driver.core.policies.WhiteListPolicy;
+import com.khulnasoft.shaded.netty.channel.socket.SocketChannel;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 import io.netty.util.internal.logging.Slf4JLoggerFactory;
 import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.security.SSLFactory;
 import org.apache.cassandra.stress.settings.StressSettings;
-
-import static org.apache.cassandra.config.EncryptionOptions.ClientAuth.REQUIRED;
 
 public class JavaDriverClient
 {
@@ -160,16 +158,15 @@ public class JavaDriverClient
         if (loadBalancingPolicy != null)
             clusterBuilder.withLoadBalancingPolicy(loadBalancingPolicy);
         clusterBuilder.withCompression(compression);
-        if (encryptionOptions.getEnabled())
+        if (encryptionOptions.isEnabled())
         {
             SSLContext sslContext;
-            sslContext = SSLFactory.createSSLContext(encryptionOptions, REQUIRED);
+            sslContext = SSLFactory.createSSLContext(encryptionOptions, true);
 
             // Temporarily override newSSLEngine to set accepted protocols until it is added to
             // RemoteEndpointAwareJdkSSLOptions.  See CASSANDRA-13325 and CASSANDRA-16362.
-            RemoteEndpointAwareJdkSSLOptions sslOptions = new RemoteEndpointAwareJdkSSLOptions(sslContext, encryptionOptions.cipherSuitesArray())
+            RemoteEndpointAwareJdkSSLOptions sslOptions = new RemoteEndpointAwareJdkSSLOptions(sslContext, null)
             {
-                @Override
                 protected SSLEngine newSSLEngine(SocketChannel channel, InetSocketAddress remoteEndpoint)
                 {
                     SSLEngine engine = super.newSSLEngine(channel, remoteEndpoint);
@@ -256,27 +253,27 @@ public class JavaDriverClient
         switch (cl)
         {
             case ANY:
-                return com.datastax.driver.core.ConsistencyLevel.ANY;
+                return com.khulnasoft.driver.core.ConsistencyLevel.ANY;
             case ONE:
-                return com.datastax.driver.core.ConsistencyLevel.ONE;
+                return com.khulnasoft.driver.core.ConsistencyLevel.ONE;
             case TWO:
-                return com.datastax.driver.core.ConsistencyLevel.TWO;
+                return com.khulnasoft.driver.core.ConsistencyLevel.TWO;
             case THREE:
-                return com.datastax.driver.core.ConsistencyLevel.THREE;
+                return com.khulnasoft.driver.core.ConsistencyLevel.THREE;
             case QUORUM:
-                return com.datastax.driver.core.ConsistencyLevel.QUORUM;
+                return com.khulnasoft.driver.core.ConsistencyLevel.QUORUM;
             case ALL:
-                return com.datastax.driver.core.ConsistencyLevel.ALL;
+                return com.khulnasoft.driver.core.ConsistencyLevel.ALL;
             case LOCAL_QUORUM:
-                return com.datastax.driver.core.ConsistencyLevel.LOCAL_QUORUM;
+                return com.khulnasoft.driver.core.ConsistencyLevel.LOCAL_QUORUM;
             case EACH_QUORUM:
-                return com.datastax.driver.core.ConsistencyLevel.EACH_QUORUM;
+                return com.khulnasoft.driver.core.ConsistencyLevel.EACH_QUORUM;
             case LOCAL_ONE:
-                return com.datastax.driver.core.ConsistencyLevel.LOCAL_ONE;
+                return com.khulnasoft.driver.core.ConsistencyLevel.LOCAL_ONE;
             case SERIAL:
-                return com.datastax.driver.core.ConsistencyLevel.SERIAL;
+                return com.khulnasoft.driver.core.ConsistencyLevel.SERIAL;
             case LOCAL_SERIAL:
-                return com.datastax.driver.core.ConsistencyLevel.LOCAL_SERIAL;
+                return com.khulnasoft.driver.core.ConsistencyLevel.LOCAL_SERIAL;
         }
         throw new AssertionError();
     }

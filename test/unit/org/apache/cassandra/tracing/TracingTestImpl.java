@@ -24,12 +24,16 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import org.apache.commons.lang3.StringUtils;
 
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.service.ClientState;
 
+/**
+ * A Tracing implementation that exposes its state (`traces` and `payloads`) for testing.
+ */
 public final class TracingTestImpl extends Tracing
 {
     private final List<String> traces;
@@ -46,11 +50,10 @@ public final class TracingTestImpl extends Tracing
         this.traces = traces;
     }
 
-    @Override
     public void stopSessionImpl()
-    {}
+    {
+    }
 
-    @Override
     public TraceState begin(String request, InetAddress ia, Map<String, String> map)
     {
         traces.add(request);
@@ -58,19 +61,19 @@ public final class TracingTestImpl extends Tracing
     }
 
     @Override
-    protected TimeUUID newSession(TimeUUID sessionId, TraceType traceType, Map<String,ByteBuffer> customPayload)
+    protected UUID newSession(ClientState state, UUID sessionId, TraceType traceType, Map<String, ByteBuffer> customPayload)
     {
         if (!customPayload.isEmpty())
             logger.info("adding custom payload items {}", StringUtils.join(customPayload.keySet(), ','));
 
         payloads.putAll(customPayload);
-        return super.newSession(sessionId, traceType, customPayload);
+        return super.newSession(state, sessionId, traceType, customPayload);
     }
 
     @Override
-    protected TraceState newTraceState(InetAddressAndPort ia, TimeUUID uuid, Tracing.TraceType tt)
+    protected TraceState newTraceState(ClientState state, InetAddressAndPort ia, UUID uuid, TraceType tt)
     {
-        return new TraceState(ia, uuid, tt)
+        return new TraceState(state, ia, uuid, tt)
         {
             protected void traceImpl(String string)
             {
@@ -84,7 +87,7 @@ public final class TracingTestImpl extends Tracing
     }
 
     @Override
-    public void trace(ByteBuffer bb, String message, int i)
+    public void trace(ClientState state, ByteBuffer bb, String message, int i)
     {
         traces.add(message);
     }

@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.transport.messages;
 
-import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
@@ -30,21 +29,18 @@ import org.apache.cassandra.cql3.QueryEvents;
 import org.apache.cassandra.cql3.QueryHandler;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.ResultSet;
+import org.apache.cassandra.cql3.statements.BatchStatement;
 import org.apache.cassandra.exceptions.PreparedQueryNotFoundException;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.transport.CBUtil;
-import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.Message;
 import org.apache.cassandra.transport.ProtocolException;
 import org.apache.cassandra.transport.ProtocolVersion;
-import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.MD5Digest;
 import org.apache.cassandra.utils.NoSpamLogger;
-
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 
 public class ExecuteMessage extends Message.Request
 {
@@ -121,13 +117,7 @@ public class ExecuteMessage extends Message.Request
     }
 
     @Override
-    protected boolean isTrackable()
-    {
-        return true;
-    }
-
-    @Override
-    protected Message.Response execute(QueryState state, Dispatcher.RequestTime requestTime, boolean traceRequest)
+    protected Message.Response execute(QueryState state, long queryStartNanoTime, boolean traceRequest)
     {
         QueryHandler.Prepared prepared = null;
         try
@@ -137,20 +127,24 @@ public class ExecuteMessage extends Message.Request
             if (prepared == null)
                 throw new PreparedQueryNotFoundException(statementId);
 
-            if (!prepared.fullyQualified && prepared.statement.eligibleAsPreparedStatement() && !Objects.equals(state.getClientState().getRawKeyspace(), prepared.keyspace))
+            if (!prepared.fullyQualified
+                && !Objects.equals(state.getClientState().getRawKeyspace(), prepared.keyspace)
+                // We can not reliably detect inconsistencies for batches yet
+                && !(prepared.statement instanceof BatchStatement)
+            )
             {
                 state.getClientState().warnAboutUseWithPreparedStatements(statementId, prepared.keyspace);
-
-                String msg = String.format("Tried to execute a prepared unqualified statement on a keyspace it was not prepared on. " +
-                                           " Executing the resulting prepared statement will return unexpected results: %s (on keyspace %s, previously prepared on %s)",
+                String msg = String.format("Tried to execute a prepared unqalified statement on a keyspace it was not prepared on. " +
+                                           "Executing the resulting prepared statement will return unexpected results: %s (on keyspace %s, previously prepared on %s)",
                                            statementId, state.getClientState().getRawKeyspace(), prepared.keyspace);
                 nospam.error(msg);
             }
 
+
             CQLStatement statement = prepared.statement;
             options.prepare(statement.getBindVariables());
 
-            if (options.getPageSize() == 0)
+            if (options.getPageSize().getSize() == 0)
                 throw new ProtocolException("The page size cannot be 0");
 
             if (traceRequest)
@@ -160,11 +154,12 @@ public class ExecuteMessage extends Message.Request
             // by wrapping the QueryOptions.
             QueryOptions queryOptions = QueryOptions.addColumnSpecifications(options, prepared.statement.getBindVariables());
 
-            long requestStartTime = currentTimeMillis();
+            long requestStartTime = System.currentTimeMillis();
 
-            Message.Response response = handler.processPrepared(statement, state, queryOptions, getCustomPayload(), requestTime);
+            Message.Response response = handler.processPrepared(statement, state, queryOptions, getCustomPayload(), queryStartNanoTime);
 
-            QueryEvents.instance.notifyExecuteSuccess(prepared.statement, prepared.rawCQLStatement, options, state, requestStartTime, response);
+            QueryEvents.instance.notifyExecuteSuccess(prepared.statement, options, state,
+                                                      requestStartTime, response);
 
             if (response instanceof ResultMessage.Rows)
             {
@@ -209,21 +204,23 @@ public class ExecuteMessage extends Message.Request
     private void traceQuery(QueryState state, QueryHandler.Prepared prepared)
     {
         ImmutableMap.Builder<String, String> builder = ImmutableMap.builder();
-        if (options.getPageSize() > 0)
-            builder.put("page_size", Integer.toString(options.getPageSize()));
+        if (options.getPageSize().isDefined())
+        {
+            builder.put("page_size", Integer.toString(options.getPageSize().getSize()));
+            builder.put("page_size_unit", options.getPageSize().getUnit().name());
+        }
         if (options.getConsistency() != null)
             builder.put("consistency_level", options.getConsistency().name());
-        if (options.getSerialConsistency() != null)
-            builder.put("serial_consistency_level", options.getSerialConsistency().name());
+        if (options.getSerialConsistency(state) != null)
+            builder.put("serial_consistency_level", options.getSerialConsistency(state).name());
 
-        builder.put("query", prepared.rawCQLStatement);
+        builder.put("query", prepared.statement.getRawCQLStatement());
 
         for (int i = 0; i < prepared.statement.getBindVariables().size(); i++)
         {
             ColumnSpecification cs = prepared.statement.getBindVariables().get(i);
             String boundName = cs.name.toString();
-            ByteBuffer bytes = options.getValues().get(i);
-            String boundValue = (bytes == ByteBufferUtil.UNSET_BYTE_BUFFER) ? "<unset>" : cs.type.asCQL3Type().toCQLLiteral(bytes);
+            String boundValue = cs.type.asCQL3Type().toCQLLiteral(options.getValues().get(i), options.getProtocolVersion());
             if (boundValue.length() > 1000)
                 boundValue = boundValue.substring(0, 1000) + "...'";
 

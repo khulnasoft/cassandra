@@ -1,1 +1,0 @@
-SELECT comment,commenter FROM comments_vs WHERE commenter ='Alex';

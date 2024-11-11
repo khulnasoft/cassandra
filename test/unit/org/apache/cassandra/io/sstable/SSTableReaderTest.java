@@ -20,19 +20,31 @@ package org.apache.cassandra.io.sstable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.Uninterruptibles;
+import org.junit.After;
+import org.junit.Assert;
 import org.junit.Assume;
 import org.junit.BeforeClass;
 import org.junit.Rule;
@@ -40,18 +52,16 @@ import org.junit.Test;
 import org.junit.rules.ExpectedException;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.Operator;
-import org.apache.cassandra.cql3.UntypedResultSet;
+import org.apache.cassandra.db.BufferDecoratedKey;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.ReadCommand;
 import org.apache.cassandra.db.ReadExecutionController;
 import org.apache.cassandra.db.RowUpdateBuilder;
-import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
@@ -59,41 +69,49 @@ import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.db.lifecycle.View;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterators;
 import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.LocalPartitioner.LocalToken;
+import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.index.Index;
 import org.apache.cassandra.io.FSReadError;
-import org.apache.cassandra.io.sstable.format.CompressionInfoComponent;
+import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.SSTableReaderWithFilter;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
-import org.apache.cassandra.io.sstable.format.big.BigFormat.Components;
-import org.apache.cassandra.io.sstable.format.big.BigTableReader;
-import org.apache.cassandra.io.sstable.format.big.IndexSummaryComponent;
-import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
-import org.apache.cassandra.io.sstable.indexsummary.IndexSummarySupport;
-import org.apache.cassandra.io.sstable.keycache.KeyCache;
-import org.apache.cassandra.io.sstable.keycache.KeyCacheSupport;
+import org.apache.cassandra.io.sstable.format.big.BigTableScanner;
+import org.apache.cassandra.io.sstable.format.trieindex.TrieIndexScanner;
+import org.apache.cassandra.io.sstable.metadata.MetadataComponent;
+import org.apache.cassandra.io.sstable.metadata.MetadataType;
+import org.apache.cassandra.io.sstable.metadata.ValidationMetadata;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileDataInput;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.MmappedRegions;
-import org.apache.cassandra.io.util.PageAware;
 import org.apache.cassandra.schema.CachingParams;
 import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.schema.KeyspaceParams;
+import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.service.CacheService;
+import org.apache.cassandra.utils.BloomCalculations;
+import org.apache.cassandra.utils.BloomFilter;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.mockito.Mockito;
+import org.apache.cassandra.utils.FilterFactory;
+import org.apache.cassandra.utils.IFilter;
+import org.apache.cassandra.utils.PageAware;
 
-import static java.lang.String.format;
 import static org.apache.cassandra.cql3.QueryProcessor.executeInternal;
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
+import static org.apache.cassandra.io.sstable.format.SSTableReader.selectOnlyBigTableReaders;
+import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.is;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assume.assumeTrue;
 
 public class SSTableReaderTest
 {
@@ -106,12 +124,13 @@ public class SSTableReaderTest
     public static final String CF_INDEXED = "Indexed1";
     public static final String CF_STANDARD_LOW_INDEX_INTERVAL = "StandardLowIndexInterval";
     public static final String CF_STANDARD_SMALL_BLOOM_FILTER = "StandardSmallBloomFilter";
+    public static final String CF_STANDARD_NO_BLOOM_FILTER = "StandardNoBloomFilter";
 
     private IPartitioner partitioner;
 
     Token t(int i)
     {
-        return partitioner.getToken(keyFor(i));
+        return partitioner.getToken(ByteBufferUtil.bytes(String.valueOf(i)));
     }
 
     @BeforeClass
@@ -121,7 +140,9 @@ public class SSTableReaderTest
         SchemaLoader.createKeyspace(KEYSPACE1,
                                     KeyspaceParams.simple(1),
                                     SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD),
-                                    SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD2),
+                                    SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD2)
+                                                .minIndexInterval(8)
+                                                .maxIndexInterval(8),  // ensure close key count estimation
                                     SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD3),
                                     SchemaLoader.standardCFMD(KEYSPACE1, CF_MOVE_AND_OPEN),
                                     SchemaLoader.standardCFMD(KEYSPACE1, CF_COMPRESSED).compression(CompressionParams.DEFAULT),
@@ -133,10 +154,19 @@ public class SSTableReaderTest
                                     SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD_SMALL_BLOOM_FILTER)
                                                 .minIndexInterval(4)
                                                 .maxIndexInterval(4)
-                                                .bloomFilterFpChance(0.99));
-        
+                                                .bloomFilterFpChance(0.99),
+                                    SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD_NO_BLOOM_FILTER)
+                                                .bloomFilterFpChance(1));
+
         // All tests in this class assume auto-compaction is disabled.
         CompactionManager.instance.disableAutoCompaction();
+    }
+
+    @After
+    public void Cleanup() {
+        Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD).truncateBlocking();
+        Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD2).truncateBlocking();
+        BloomFilter.recreateOnFPChanceChange = false;
     }
 
     @Test
@@ -154,7 +184,7 @@ public class SSTableReaderTest
                 .build()
                 .applyUnsafe();
         }
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
         CompactionManager.instance.performMaximal(store, false);
 
         List<Range<Token>> ranges = new ArrayList<>();
@@ -179,8 +209,83 @@ public class SSTableReaderTest
     }
 
     @Test
+    public void testEstimatedKeysForRangesAndKeySamples()
+    {
+        // prepare data
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard2");
+        partitioner = store.getPartitioner();
+
+        Random random = new Random();
+        List<Token> tokens = new ArrayList<>();
+        tokens.add(partitioner.getMinimumToken());
+        if (partitioner.splitter().isPresent())
+            tokens.add(partitioner.getMaximumToken());
+
+        for (int j = 0; j < 100; j++)
+        {
+            Mutation mutation = new RowUpdateBuilder(store.metadata(), j, String.valueOf(random.nextInt())).clustering("0")
+                                                                                                           .add("val",
+                                                                                                                ByteBufferUtil.EMPTY_BYTE_BUFFER)
+                                                                                                           .build();
+            if (j % 4 != 0) // skip some keys
+                mutation.applyUnsafe();
+            tokens.add(mutation.key().getToken());
+        }
+
+        store.forceBlockingFlush(UNIT_TESTS);
+        assertEquals(1, store.getLiveSSTables().size());
+        SSTableReader sstable = store.getLiveSSTables().iterator().next();
+
+        // verify any combination of start and end point among the keys we have, which includes empty, full and
+        // wrap-around ranges
+        for (int i = 0; i < tokens.size(); i++)
+            for (int j = 0; j < tokens.size(); j++)
+            {
+                verifyEstimatedKeysAndKeySamples(sstable, new Range<Token>(tokens.get(i), tokens.get(j)));
+            }
+    }
+
+    private void verifyEstimatedKeysAndKeySamples(SSTableReader sstable, Range<Token> range)
+    {
+        List<DecoratedKey> expectedKeys = new ArrayList<>();
+        try (ISSTableScanner scanner = sstable.getScanner())
+        {
+            while (scanner.hasNext())
+            {
+                try (UnfilteredRowIterator rowIterator = scanner.next())
+                {
+                    if (range.contains(rowIterator.partitionKey().getToken()))
+                        expectedKeys.add(rowIterator.partitionKey());
+                }
+            }
+        }
+
+        // check estimated key
+        long estimated = sstable.estimatedKeysForRanges(Collections.singleton(range));
+        assertTrue("Range: " + range + " having " + expectedKeys.size() + " partitions, but estimated "
+                   + estimated, closeEstimation(expectedKeys.size(), estimated));
+
+        // check key samples
+        List<DecoratedKey> sampledKeys = new ArrayList<>();
+        sstable.getKeySamples(range).forEach(sampledKeys::add);
+
+        assertTrue("Range: " + range + " having " + expectedKeys + " keys, but keys sampled: "
+                   + sampledKeys, expectedKeys.containsAll(sampledKeys));
+        // no duplicate
+        assertEquals(expectedKeys.size(), expectedKeys.stream().distinct().count());
+        assertEquals(sampledKeys.size(), sampledKeys.stream().distinct().count());
+    }
+
+    private boolean closeEstimation(long expected, long estimated)
+    {
+        return expected <= estimated + 16 && expected >= estimated - 16;
+    }
+
+    @Test
     public void testSpannedIndexPositions() throws IOException
     {
+        // expect to create many regions - that is, the size of index must exceed the page size multiple times
         int originalMaxSegmentSize = MmappedRegions.MAX_SEGMENT_SIZE;
         MmappedRegions.MAX_SEGMENT_SIZE = PageAware.PAGE_SIZE;
 
@@ -198,7 +303,7 @@ public class SSTableReaderTest
                 .build()
                 .applyUnsafe();
             }
-            Util.flush(store);
+            store.forceBlockingFlush(UNIT_TESTS);
             CompactionManager.instance.performMaximal(store, false);
 
             // check that all our keys are found correctly
@@ -206,16 +311,16 @@ public class SSTableReaderTest
             for (int j = 0; j < 10000; j += 2)
             {
                 DecoratedKey dk = Util.dk(String.valueOf(j));
-                FileDataInput file = sstable.getFileDataInput(sstable.getPosition(dk, SSTableReader.Operator.EQ));
+                FileDataInput file = sstable.getFileDataInput(sstable.getPosition(dk, SSTableReader.Operator.EQ).position);
                 DecoratedKey keyInDisk = sstable.decorateKey(ByteBufferUtil.readWithShortLength(file));
-                assert keyInDisk.equals(dk) : format("%s != %s in %s", keyInDisk, dk, file.getPath());
+                assert keyInDisk.equals(dk) : String.format("%s != %s in %s", keyInDisk, dk, file.getFile());
             }
 
             // check no false positives
             for (int j = 1; j < 11000; j += 2)
             {
                 DecoratedKey dk = Util.dk(String.valueOf(j));
-                assert sstable.getPosition(dk, SSTableReader.Operator.EQ) < 0;
+                assert sstable.getPosition(dk, SSTableReader.Operator.EQ) == null;
             }
         }
         finally
@@ -238,7 +343,7 @@ public class SSTableReaderTest
             .build()
             .applyUnsafe();
         }
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
 
         clearAndLoad(store);
         assert store.metric.maxPartitionSize.getValue() != 0;
@@ -266,43 +371,17 @@ public class SSTableReaderTest
             .applyUnsafe();
         }
 
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
 
-        boolean startState = DatabaseDescriptor.getSStableReadRatePersistenceEnabled();
-        try
-        {
-            DatabaseDescriptor.setSStableReadRatePersistenceEnabled(true);
+        SSTableReader sstable = store.getLiveSSTables().iterator().next();
+        assertEquals(0, sstable.getReadMeter().count());
 
-            SSTableReader sstable = store.getLiveSSTables().iterator().next();
-            assertEquals(0, sstable.getReadMeter().count());
+        DecoratedKey key = sstable.decorateKey(ByteBufferUtil.bytes("4"));
+        Util.getAll(Util.cmd(store, key).build());
+        assertEquals(1, sstable.getReadMeter().count());
 
-            DecoratedKey key = sstable.decorateKey(ByteBufferUtil.bytes("4"));
-            Util.getAll(Util.cmd(store, key).build());
-            assertEquals(1, sstable.getReadMeter().count());
-
-            Util.getAll(Util.cmd(store, key).includeRow("0").build());
-            assertEquals(2, sstable.getReadMeter().count());
-
-            // With persistence enabled, we should be able to retrieve the state of the meter.
-            sstable.maybePersistSSTableReadMeter();
-
-            UntypedResultSet meter = SystemKeyspace.readSSTableActivity(store.getKeyspaceName(), store.name, sstable.descriptor.id);
-            assertFalse(meter.isEmpty());
-
-            Util.getAll(Util.cmd(store, key).includeRow("0").build());
-            assertEquals(3, sstable.getReadMeter().count());
-
-            // After cleaning existing state and disabling persistence, there should be no meter state to read.
-            SystemKeyspace.clearSSTableReadMeter(store.getKeyspaceName(), store.name, sstable.descriptor.id);
-            DatabaseDescriptor.setSStableReadRatePersistenceEnabled(false);
-            sstable.maybePersistSSTableReadMeter();
-            meter = SystemKeyspace.readSSTableActivity(store.getKeyspaceName(), store.name, sstable.descriptor.id);
-            assertTrue(meter.isEmpty());
-        }
-        finally
-        {
-            DatabaseDescriptor.setSStableReadRatePersistenceEnabled(startState);
-        }
+        Util.getAll(Util.cmd(store, key).includeRow("0").build());
+        assertEquals(2, sstable.getReadMeter().count());
     }
 
     @Test
@@ -323,14 +402,14 @@ public class SSTableReaderTest
             .applyUnsafe();
 
         }
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
         CompactionManager.instance.performMaximal(store, false);
 
         SSTableReader sstable = store.getLiveSSTables().iterator().next();
-        long p2 = sstable.getPosition(dk(2), SSTableReader.Operator.EQ);
-        long p3 = sstable.getPosition(dk(3), SSTableReader.Operator.EQ);
-        long p6 = sstable.getPosition(dk(6), SSTableReader.Operator.EQ);
-        long p7 = sstable.getPosition(dk(7), SSTableReader.Operator.EQ);
+        long p2 = sstable.getPosition(k(2), SSTableReader.Operator.EQ).position;
+        long p3 = sstable.getPosition(k(3), SSTableReader.Operator.EQ).position;
+        long p6 = sstable.getPosition(k(6), SSTableReader.Operator.EQ).position;
+        long p7 = sstable.getPosition(k(7), SSTableReader.Operator.EQ).position;
 
         SSTableReader.PartitionPositionBounds p = sstable.getPositionsForRanges(makeRanges(t(2), t(6))).get(0);
 
@@ -354,7 +433,7 @@ public class SSTableReaderTest
             .build()
             .applyUnsafe();
 
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
 
         // check if opening and querying works
         assertIndexQueryWorks(store);
@@ -363,7 +442,7 @@ public class SSTableReaderTest
     @Test
     public void testGetPositionsKeyCacheStats()
     {
-        Assume.assumeTrue(KeyCacheSupport.isSupportedBy(DatabaseDescriptor.getSelectedSSTableFormat()));
+        Assume.assumeThat(SSTableFormat.Type.current(), is(SSTableFormat.Type.BIG));
         ColumnFamilyStore store = discardSSTables(KEYSPACE1, CF_STANDARD2);
         partitioner = store.getPartitioner();
         CacheService.instance.keyCache.setCapacity(1000);
@@ -377,211 +456,80 @@ public class SSTableReaderTest
             .build()
             .applyUnsafe();
         }
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
         CompactionManager.instance.performMaximal(store, false);
 
         SSTableReader sstable = store.getLiveSSTables().iterator().next();
-        KeyCache keyCache = ((KeyCacheSupport<?>) sstable).getKeyCache();
-        assumeTrue(keyCache.isEnabled());
         // existing, non-cached key
-        sstable.getPosition(dk(2), SSTableReader.Operator.EQ);
-        assertEquals(1, keyCache.getRequests());
-        assertEquals(0, keyCache.getHits());
+        sstable.getPosition(k(2), SSTableReader.Operator.EQ);
+        assertEquals(1, sstable.getKeyCacheRequest());
+        assertEquals(0, sstable.getKeyCacheHit());
         // existing, cached key
-        sstable.getPosition(dk(2), SSTableReader.Operator.EQ);
-        assertEquals(2, keyCache.getRequests());
-        assertEquals(1, keyCache.getHits());
+        assertEquals(1, store.getBloomFilterTracker().getTruePositiveCount());
+        sstable.getPosition(k(2), SSTableReader.Operator.EQ);
+        assertEquals(2, sstable.getKeyCacheRequest());
+        assertEquals(1, sstable.getKeyCacheHit());
         // non-existing key (it is specifically chosen to not be rejected by Bloom Filter check)
-        sstable.getPosition(dk(14), SSTableReader.Operator.EQ);
-        assertEquals(3, keyCache.getRequests());
-        assertEquals(1, keyCache.getHits());
+        sstable.getPosition(k(14), SSTableReader.Operator.EQ);
+        assertEquals(3, sstable.getKeyCacheRequest());
+        assertEquals(2, store.getBloomFilterTracker().getTruePositiveCount());
+        sstable.getPosition(k(15), SSTableReader.Operator.EQ);
+        assertEquals(1, sstable.getKeyCacheHit());
     }
 
     @Test
     public void testGetPositionsBloomFilterStats()
     {
-        SSTableReaderWithFilter sstable = prepareGetPositions();
-
-        // the keys are specifically chosen to cover certain use cases
-        // existing key is read from index
-        sstable.getPosition(dk(7), SSTableReader.Operator.EQ);
-        assertEquals(1, sstable.getFilterTracker().getTruePositiveCount());
-        assertEquals(0, sstable.getFilterTracker().getTrueNegativeCount());
-        assertEquals(0, sstable.getFilterTracker().getFalsePositiveCount());
-
-        // existing key is read from Cache Key (if used)
-        sstable.getPosition(dk(7), SSTableReader.Operator.EQ);
-        assertEquals(2, sstable.getFilterTracker().getTruePositiveCount());
-        assertEquals(0, sstable.getFilterTracker().getTrueNegativeCount());
-        assertEquals(0, sstable.getFilterTracker().getFalsePositiveCount());
-
-        // non-existing key is rejected by Bloom Filter check
-        sstable.getPosition(dk(45), SSTableReader.Operator.EQ);    // note: 45 falls between 4 and 5
-        assertEquals(2, sstable.getFilterTracker().getTruePositiveCount());
-        assertEquals(1, sstable.getFilterTracker().getTrueNegativeCount());
-        assertEquals(0, sstable.getFilterTracker().getFalsePositiveCount());
-
-        // GT should not affect bloom filter counts
-        sstable.getPosition(dk(56), SSTableReader.Operator.GE);    // note: 56 falls between 5 and 6
-        assertEquals(2, sstable.getFilterTracker().getTruePositiveCount());
-        assertEquals(1, sstable.getFilterTracker().getTrueNegativeCount());
-        assertEquals(0, sstable.getFilterTracker().getFalsePositiveCount());
-        sstable.getPosition(dk(57), SSTableReader.Operator.GT);    // note: 57 falls between 5 and 6
-        assertEquals(2, sstable.getFilterTracker().getTruePositiveCount());
-        assertEquals(1, sstable.getFilterTracker().getTrueNegativeCount());
-        assertEquals(0, sstable.getFilterTracker().getFalsePositiveCount());
-
-        // non-existing key is rejected by sstable keys range check, if performed, otherwise it's a false positive
-        sstable.getPosition(collisionFor(9), SSTableReader.Operator.EQ);
-        assertEquals(2, sstable.getFilterTracker().getTruePositiveCount());
-        assertEquals(1, sstable.getFilterTracker().getTrueNegativeCount());
-        long fpCount = sstable.getFilterTracker().getFalsePositiveCount();
-
-        // existing key filtered out by sstable keys range check, performed because of moved start
-        sstable.getPosition(dk(1), SSTableReader.Operator.EQ);
-        assertEquals(2, sstable.getFilterTracker().getTruePositiveCount());
-        assertEquals(1, sstable.getFilterTracker().getTrueNegativeCount());
-        assertEquals(fpCount, sstable.getFilterTracker().getFalsePositiveCount());
-        fpCount = sstable.getFilterTracker().getFalsePositiveCount();
-
-        // non-existing key is rejected by index interval check
-        sstable.getPosition(collisionFor(5), SSTableReader.Operator.EQ);
-        assertEquals(2, sstable.getFilterTracker().getTruePositiveCount());
-        assertEquals(1, sstable.getFilterTracker().getTrueNegativeCount());
-        assertEquals(fpCount + 1, sstable.getFilterTracker().getFalsePositiveCount());
-
-        // non-existing key is rejected by index lookup check
-        sstable.getPosition(dk(807), SSTableReader.Operator.EQ);
-        assertEquals(2, sstable.getFilterTracker().getTruePositiveCount());
-        assertEquals(1, sstable.getFilterTracker().getTrueNegativeCount());
-        assertEquals(fpCount + 2, sstable.getFilterTracker().getFalsePositiveCount());
-    }
-
-
-    @Test
-    public void testGetPositionsListenerCalls()
-    {
-        SSTableReaderWithFilter sstable = prepareGetPositions();
-
-        SSTableReadsListener listener = Mockito.mock(SSTableReadsListener.class);
-        // the keys are specifically chosen to cover certain use cases
-        // existing key is read from index
-        sstable.getPosition(dk(7), SSTableReader.Operator.EQ, listener);
-        Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.INDEX_ENTRY_FOUND);
-        Mockito.reset(listener);
-
-        // existing key is read from Cache Key (if used)
-        // Note: key cache may fail to cache the partition if it is wide.
-        sstable.getPosition(dk(7), SSTableReader.Operator.EQ, listener);
-        if (sstable instanceof BigTableReader)
-            Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.KEY_CACHE_HIT);
-        else
-            Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.INDEX_ENTRY_FOUND);
-        Mockito.reset(listener);
-
-        // As above with other ops
-        sstable.getPosition(dk(7), SSTableReader.Operator.GT, listener);    // GT does not engage key cache
-        Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.INDEX_ENTRY_FOUND);
-        Mockito.reset(listener);
-
-        sstable.getPosition(dk(7), SSTableReader.Operator.GE, listener);    // GE does
-        if (sstable instanceof BigTableReader)
-            Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.KEY_CACHE_HIT);
-        else
-            Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.INDEX_ENTRY_FOUND);
-        Mockito.reset(listener);
-
-        // non-existing key is rejected by Bloom Filter check
-        sstable.getPosition(dk(45), SSTableReader.Operator.EQ, listener);    // note: 45 falls between 4 and 5
-        Mockito.verify(listener).onSSTableSkipped(sstable, SSTableReadsListener.SkippingReason.BLOOM_FILTER);
-        Mockito.reset(listener);
-
-        // non-existing key is rejected by sstable keys range check, if performed, otherwise it's a false positive
-        sstable.getPosition(collisionFor(9), SSTableReader.Operator.EQ, listener);
-        if (sstable instanceof BigTableReader)
-            Mockito.verify(listener).onSSTableSkipped(sstable, SSTableReadsListener.SkippingReason.MIN_MAX_KEYS);
-        else
-            Mockito.verify(listener).onSSTableSkipped(sstable, SSTableReadsListener.SkippingReason.INDEX_ENTRY_NOT_FOUND);
-        Mockito.reset(listener);
-
-        sstable.getPosition(collisionFor(9), SSTableReader.Operator.GE, listener);
-        if (sstable instanceof BigTableReader)
-            Mockito.verify(listener).onSSTableSkipped(sstable, SSTableReadsListener.SkippingReason.MIN_MAX_KEYS);
-        else
-            Mockito.verify(listener).onSSTableSkipped(sstable, SSTableReadsListener.SkippingReason.INDEX_ENTRY_NOT_FOUND);
-        Mockito.reset(listener);
-
-        sstable.getPosition(dk(9), SSTableReader.Operator.GT, listener);
-        if (sstable instanceof BigTableReader)
-            Mockito.verify(listener).onSSTableSkipped(sstable, SSTableReadsListener.SkippingReason.MIN_MAX_KEYS);
-        else
-            Mockito.verify(listener).onSSTableSkipped(sstable, SSTableReadsListener.SkippingReason.INDEX_ENTRY_NOT_FOUND);
-        Mockito.reset(listener);
-
-        // existing key filtered out by sstable keys range check, performed because of moved start
-        sstable.getPosition(dk(1), SSTableReader.Operator.EQ, listener);
-        Mockito.verify(listener).onSSTableSkipped(sstable, SSTableReadsListener.SkippingReason.MIN_MAX_KEYS);
-        Mockito.reset(listener);
-        long pos = sstable.getPosition(dk(1), SSTableReader.Operator.GT, listener);
-        Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.INDEX_ENTRY_FOUND);
-        assertEquals(sstable.getPosition(dk(3), SSTableReader.Operator.EQ), pos);
-        Mockito.reset(listener);
-
-        // non-existing key is rejected by index interval check
-        sstable.getPosition(collisionFor(5), SSTableReader.Operator.EQ, listener);
-        if (sstable instanceof BigTableReader)
-            Mockito.verify(listener).onSSTableSkipped(sstable, SSTableReadsListener.SkippingReason.PARTITION_INDEX_LOOKUP);
-        else
-            Mockito.verify(listener).onSSTableSkipped(sstable, SSTableReadsListener.SkippingReason.INDEX_ENTRY_NOT_FOUND);
-        Mockito.reset(listener);
-
-        // non-existing key is rejected by index lookup
-        sstable.getPosition(dk(807), SSTableReader.Operator.EQ, listener);
-        Mockito.verify(listener).onSSTableSkipped(sstable, SSTableReadsListener.SkippingReason.PARTITION_INDEX_LOOKUP);
-        Mockito.reset(listener);
-
-        // Variations of non-equal match
-        sstable.getPosition(dk(31), SSTableReader.Operator.GE, listener);
-        Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.INDEX_ENTRY_FOUND);
-        Mockito.reset(listener);
-
-        sstable.getPosition(dk(81), SSTableReader.Operator.GE, listener);
-        Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.INDEX_ENTRY_FOUND);
-        Mockito.reset(listener);
-    }
-
-    private SSTableReaderWithFilter prepareGetPositions()
-    {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
         ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF_STANDARD_SMALL_BLOOM_FILTER);
-        store.truncateBlocking();
         partitioner = store.getPartitioner();
         CacheService.instance.keyCache.setCapacity(1000);
 
         // insert data and compact to a single sstable
         for (int j = 0; j < 10; j++)
         {
-            if (j == 8) // leave a missing prefix
-                continue;
-
-            int rowCount = j < 5 ? 2000 : 1;    // make some of the partitions wide
-            for (int r = 0; r < rowCount; ++r)
-            {
-                new RowUpdateBuilder(store.metadata(), j, String.valueOf(j))
-                .clustering(Integer.toString(r))
-                .add("val", ByteBufferUtil.EMPTY_BYTE_BUFFER)
-                .build()
-                .applyUnsafe();
-            }
+            new RowUpdateBuilder(store.metadata(), j, String.valueOf(j))
+                    .clustering("0")
+                    .add("val", ByteBufferUtil.EMPTY_BYTE_BUFFER)
+                    .build()
+                    .applyUnsafe();
         }
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
         CompactionManager.instance.performMaximal(store, false);
 
-        SSTableReaderWithFilter sstable = (SSTableReaderWithFilter) store.getLiveSSTables().iterator().next();
-        sstable = (SSTableReaderWithFilter) sstable.cloneWithNewStart(dk(3));
-        return sstable;
+        SSTableReader sstable = store.getLiveSSTables().iterator().next();
+        // the keys are specifically chosen to cover certain use cases
+        // existing key is read from index
+        sstable.getPosition(k(2), SSTableReader.Operator.EQ);
+        assertEquals(1, sstable.getBloomFilterTracker().getTruePositiveCount());
+        assertEquals(0, sstable.getBloomFilterTracker().getTrueNegativeCount());
+        assertEquals(0, sstable.getBloomFilterTracker().getFalsePositiveCount());
+        // existing key is read from Cache Key
+        sstable.getPosition(k(2), SSTableReader.Operator.EQ);
+        assertEquals(2, sstable.getBloomFilterTracker().getTruePositiveCount());
+        assertEquals(0, sstable.getBloomFilterTracker().getTrueNegativeCount());
+        assertEquals(0, sstable.getBloomFilterTracker().getFalsePositiveCount());
+        // non-existing key is rejected by Bloom Filter check
+        sstable.getPosition(k(10), SSTableReader.Operator.EQ);
+        assertEquals(2, sstable.getBloomFilterTracker().getTruePositiveCount());
+        assertEquals(1, sstable.getBloomFilterTracker().getTrueNegativeCount());
+        assertEquals(0, sstable.getBloomFilterTracker().getFalsePositiveCount());
+        // non-existing key is rejected by sstable keys range check
+        sstable.getPosition(k(99), SSTableReader.Operator.EQ);
+        assertEquals(2, sstable.getBloomFilterTracker().getTruePositiveCount());
+        assertEquals(1, sstable.getBloomFilterTracker().getTrueNegativeCount());
+        assertEquals(1, sstable.getBloomFilterTracker().getFalsePositiveCount());
+        // non-existing key is rejected by index interval check
+        sstable.getPosition(k(14), SSTableReader.Operator.EQ);
+        assertEquals(2, store.getBloomFilterTracker().getTruePositiveCount());
+        assertEquals(1, sstable.getBloomFilterTracker().getTrueNegativeCount());
+        assertEquals(2, sstable.getBloomFilterTracker().getFalsePositiveCount());
+        // non-existing key is rejected by index lookup check
+        sstable.getPosition(k(807), SSTableReader.Operator.EQ);
+        assertEquals(2, sstable.getBloomFilterTracker().getTruePositiveCount());
+        assertEquals(1, sstable.getBloomFilterTracker().getTrueNegativeCount());
+        assertEquals(3, sstable.getBloomFilterTracker().getFalsePositiveCount());
     }
-
 
     @Test
     public void testOpeningSSTable() throws Exception
@@ -613,230 +561,103 @@ public class SSTableReaderTest
                 .build()
                 .applyUnsafe();
         }
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
 
         SSTableReader sstable = store.getLiveSSTables().iterator().next();
+        assertTrue(SSTableReader.hasGlobalReference(sstable.descriptor));
         Descriptor desc = sstable.descriptor;
+        boolean hasSummary = desc.getFormat().supportedComponents().contains(Component.SUMMARY);
 
         // test to see if sstable can be opened as expected
-        SSTableReader target = SSTableReader.open(store, desc);
-        try
-        {
-            assert target.getFirst().equals(firstKey);
-            assert target.getLast().equals(lastKey);
-        }
-        finally
-        {
-            target.selfRef().close();
-        }
+        SSTableReader target = desc.getFormat().getReaderFactory().open(desc);
+        assert target.first.equals(firstKey);
+        assert target.last.equals(lastKey);
 
-        if (BigFormat.isSelected())
-            checkOpenedBigTable(ks, cf, store, desc);
-        else if (BtiFormat.isSelected())
-            checkOpenedBtiTable(ks, cf, store, desc);
-        else
-            throw Util.testMustBeImplementedForSSTableFormat();
-    }
+        executeInternal(String.format("ALTER TABLE \"%s\".\"%s\" WITH bloom_filter_fp_chance = 0.3", ks, cf));
 
-    private static void checkOpenedBigTable(String ks, String cf, ColumnFamilyStore store, Descriptor desc) throws Exception
-    {
-        executeInternal(format("ALTER TABLE \"%s\".\"%s\" WITH bloom_filter_fp_chance = 0.3", ks, cf));
+        File summaryFile = desc.fileFor(Component.SUMMARY);
+        Path bloomPath = desc.fileFor(Component.FILTER).toPath();
+        Path summaryPath = summaryFile.toPath();
 
-        File bloomFile = desc.fileFor(Components.FILTER);
-        long bloomModified = bloomFile.lastModified();
-
-        File summaryFile = desc.fileFor(Components.SUMMARY);
-        long summaryModified = summaryFile.lastModified();
+        long bloomModified = Files.getLastModifiedTime(bloomPath).toMillis();
+        long summaryModified = hasSummary ? Files.getLastModifiedTime(summaryPath).toMillis() : 0;
 
         TimeUnit.MILLISECONDS.sleep(1000); // sleep to ensure modified time will be different
 
         // Offline tests
         // check that bloomfilter/summary ARE NOT regenerated
-        SSTableReader target = SSTableReader.openNoValidation(store, desc, store.metadata);
-        try
-        {
-            assertEquals(bloomModified, bloomFile.lastModified());
-            assertEquals(summaryModified, summaryFile.lastModified());
-        }
-        finally
-        {
-            target.selfRef().close();
-        }
+        target = desc.getFormat().getReaderFactory().openNoValidation(desc, store.metadata);
+
+        assertEquals(bloomModified, Files.getLastModifiedTime(bloomPath).toMillis());
+        assertEquals(summaryModified, hasSummary ? Files.getLastModifiedTime(summaryPath).toMillis() : 0);
+
+        target.selfRef().release();
 
         // check that bloomfilter/summary ARE NOT regenerated and BF=AlwaysPresent when filter component is missing
-        Set<Component> components = desc.discoverComponents();
-        components.remove(Components.FILTER);
-        target = SSTableReader.openNoValidation(desc, components, store);
-        try
-        {
-            assertEquals(bloomModified, bloomFile.lastModified());
-            assertEquals(summaryModified, summaryFile.lastModified());
-            assertEquals(0, ((SSTableReaderWithFilter) target).getFilterOffHeapSize());
-        }
-        finally
-        {
-            target.selfRef().close();
-        }
+        Set<Component> components = SSTable.discoverComponentsFor(desc);
+        components.remove(Component.FILTER);
+        target = desc.getFormat().getReaderFactory().openNoValidation(desc, components, store);
+
+        assertEquals(bloomModified, Files.getLastModifiedTime(bloomPath).toMillis());
+        assertEquals(summaryModified, hasSummary ? Files.getLastModifiedTime(summaryPath).toMillis() : 0);
+        assertEquals(FilterFactory.AlwaysPresent, target.getBloomFilter());
+
+        target.selfRef().release();
 
         // #### online tests ####
         // check that summary & bloomfilter are not regenerated when SSTable is opened and BFFP has been changed
-        target = SSTableReader.open(store, desc, store.metadata);
-        try
-        {
-            assertEquals(bloomModified, bloomFile.lastModified());
-            assertEquals(summaryModified, summaryFile.lastModified());
-        }
-        finally
-        {
-            target.selfRef().close();
-        }
+        target = desc.getFormat().getReaderFactory().open(desc, store.metadata);
+
+        assertEquals(bloomModified, Files.getLastModifiedTime(bloomPath).toMillis());
+        assertEquals(summaryModified, hasSummary ? Files.getLastModifiedTime(summaryPath).toMillis() : 0);
+
+        target.selfRef().release();
 
         // check that bloomfilter is recreated when it doesn't exist and this causes the summary to be recreated
-        components = desc.discoverComponents();
-        components.remove(Components.FILTER);
-        components.remove(Components.SUMMARY);
+        components = SSTable.discoverComponentsFor(desc);
+        components.remove(Component.FILTER);
 
-        target = SSTableReader.open(store, desc, components, store.metadata);
-        try {
-            assertTrue("Bloomfilter was not recreated", bloomModified < bloomFile.lastModified());
-            assertTrue("Summary was not recreated", summaryModified < summaryFile.lastModified());
-        }
-        finally
-        {
-            target.selfRef().close();
-        }
+        target = desc.getFormat().getReaderFactory().open(desc, components, store.metadata);
+
+        assertTrue("Bloomfilter was not recreated", bloomModified < Files.getLastModifiedTime(bloomPath).toMillis());
+        assertTrue("Summary was not recreated", !hasSummary || summaryModified < Files.getLastModifiedTime(summaryPath).toMillis());
+
+        target.selfRef().release();
 
         // check that only the summary is regenerated when it is deleted
-        components.add(Components.FILTER);
-        summaryModified = summaryFile.lastModified();
-        summaryFile.tryDelete();
+        components.add(Component.FILTER);
+        summaryModified = hasSummary ? Files.getLastModifiedTime(summaryPath).toMillis() : 0;
+        if (hasSummary)
+            summaryFile.tryDelete();
 
         TimeUnit.MILLISECONDS.sleep(1000); // sleep to ensure modified time will be different
-        bloomModified = bloomFile.lastModified();
+        bloomModified = Files.getLastModifiedTime(bloomPath).toMillis();
 
-        target = SSTableReader.open(store, desc, components, store.metadata);
-        try
-        {
-            assertEquals(bloomModified, bloomFile.lastModified());
-            assertTrue("Summary was not recreated", summaryModified < summaryFile.lastModified());
-        }
-        finally
-        {
-            target.selfRef().close();
-        }
+        target = desc.getFormat().getReaderFactory().open(desc, components, store.metadata);
+
+        assertEquals(bloomModified, Files.getLastModifiedTime(bloomPath).toMillis());
+        assertTrue("Summary was not recreated", !hasSummary || summaryModified < Files.getLastModifiedTime(summaryPath).toMillis());
+
+        target.selfRef().release();
 
         // check that summary and bloomfilter is not recreated when the INDEX is missing
-        components.add(Components.SUMMARY);
-        components.remove(Components.PRIMARY_INDEX);
+        components.add(Component.SUMMARY);
+        components.remove(Component.PRIMARY_INDEX);
 
-        summaryModified = summaryFile.lastModified();
-        target = SSTableReader.open(store, desc, components, store.metadata, false, false);
-        try
-        {
-            TimeUnit.MILLISECONDS.sleep(1000); // sleep to ensure modified time will be different
-            assertEquals(bloomModified, bloomFile.lastModified());
-            assertEquals(summaryModified, summaryFile.lastModified());
-        }
-        finally
-        {
-            target.selfRef().close();
-        }
-    }
-
-    private static void checkOpenedBtiTable(String ks, String cf, ColumnFamilyStore store, Descriptor desc) throws Exception
-    {
-        executeInternal(format("ALTER TABLE \"%s\".\"%s\" WITH bloom_filter_fp_chance = 0.3", ks, cf));
-
-        File bloomFile = desc.fileFor(Components.FILTER);
-        long bloomModified = bloomFile.lastModified();
+        summaryModified = hasSummary ? Files.getLastModifiedTime(summaryPath).toMillis() : 0;
+        target = desc.getFormat().getReaderFactory().open(desc, components, store.metadata, false, false);
 
         TimeUnit.MILLISECONDS.sleep(1000); // sleep to ensure modified time will be different
+        assertEquals(bloomModified, Files.getLastModifiedTime(bloomPath).toMillis());
+        assertEquals(summaryModified, hasSummary ? Files.getLastModifiedTime(summaryPath).toMillis() : 0);
 
-        // Offline tests
-        // check that bloomfilter is not regenerated
-        SSTableReader target = SSTableReader.openNoValidation(store, desc, store.metadata);
-        try
-        {
-            assertEquals(bloomModified, bloomFile.lastModified());
-        }
-        finally
-        {
-            target.selfRef().close();
-        }
-
-        // check that bloomfilter is not regenerated and BF=AlwaysPresent when filter component is missing
-        Set<Component> components = desc.discoverComponents();
-        components.remove(Components.FILTER);
-        target = SSTableReader.openNoValidation(desc, components, store);
-        try
-        {
-            assertEquals(bloomModified, bloomFile.lastModified());
-            assertEquals(0, ((SSTableReaderWithFilter) target).getFilterOffHeapSize());
-        }
-        finally
-        {
-            target.selfRef().close();
-        }
-
-        // #### online tests ####
-        // check that bloomfilter is not regenerated when SSTable is opened and BFFP has been changed
-        TimeUnit.MILLISECONDS.sleep(1000); // sleep to ensure modified time will be different
-        target = SSTableReader.open(store, desc, store.metadata);
-        try
-        {
-            assertEquals(bloomModified, bloomFile.lastModified());
-        }
-        finally
-        {
-            target.selfRef().close();
-        }
-
-        // check that bloomfilter is recreated when it doesn't exist
-        components = desc.discoverComponents();
-        components.remove(Components.FILTER);
-
-        target = SSTableReader.open(store, desc, components, store.metadata);
-        try
-        {
-            assertTrue("Bloomfilter was not recreated", bloomModified < bloomFile.lastModified());
-        }
-        finally
-        {
-            target.selfRef().close();
-        }
-
-        bloomModified = bloomFile.lastModified();
-        TimeUnit.MILLISECONDS.sleep(1000); // sleep to ensure modified time will be different
-
-        components.add(Components.FILTER);
-        target = SSTableReader.open(store, desc, components, store.metadata);
-        try
-        {
-            assertEquals(bloomModified, bloomFile.lastModified());
-        }
-        finally
-        {
-            target.selfRef().close();
-        }
-
-        // check that bloomfilter is not recreated when the INDEX is missing
-        components.remove(BtiFormat.Components.PARTITION_INDEX);
-
-        target = SSTableReader.open(store, desc, components, store.metadata, false, false);
-        try
-        {
-            TimeUnit.MILLISECONDS.sleep(1000); // sleep to ensure modified time will be different
-            assertEquals(bloomModified, bloomFile.lastModified());
-        }
-        finally
-        {
-            target.selfRef().close();
-        }
+        target.selfRef().release();
     }
 
     @Test
-    public void testLoadingSummaryUsesCorrectPartitioner() throws Exception
+    public void testLoadingSummaryUsesCorrectPartitioner()
     {
+        Assume.assumeThat(SSTableFormat.Type.current(), is(SSTableFormat.Type.BIG));
         ColumnFamilyStore store = discardSSTables(KEYSPACE1, CF_INDEXED);
 
         new RowUpdateBuilder(store.metadata(), System.currentTimeMillis(), "k1")
@@ -845,31 +666,27 @@ public class SSTableReaderTest
         .build()
         .applyUnsafe();
 
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
 
-        for (ColumnFamilyStore indexCfs : store.indexManager.getAllIndexColumnFamilyStores())
+        for(ColumnFamilyStore indexCfs : store.indexManager.getAllIndexColumnFamilyStores())
         {
             assert indexCfs.isIndex();
-            SSTableReader sstable = indexCfs.getLiveSSTables().iterator().next();
-            assert sstable.getFirst().getToken() instanceof LocalToken;
+            SSTableReader sstable = (SSTableReader) indexCfs.getLiveSSTables().iterator().next();
+            assert sstable.first.getToken() instanceof LocalToken;
 
-            if (sstable instanceof IndexSummarySupport<?>)
-            {
-                new IndexSummaryComponent(((IndexSummarySupport<?>) sstable).getIndexSummary(), sstable.getFirst(), sstable.getLast()).save(sstable.descriptor.fileFor(Components.SUMMARY), true);
-                SSTableReader reopened = SSTableReader.open(store, sstable.descriptor);
-                assert reopened.getFirst().getToken() instanceof LocalToken;
-                reopened.selfRef().release();
-            }
+            SSTableReader.saveSummary(sstable.descriptor, sstable.first, sstable.last, sstable.indexSummary);
+            SSTableReader reopened = sstable.descriptor.getFormat().getReaderFactory().open(sstable.descriptor);
+            assert reopened.first.getToken() instanceof LocalToken;
+            reopened.selfRef().release();
         }
     }
 
-    /**
-     * see CASSANDRA-5407
-     */
+    /** see CASSANDRA-5407 */
     @Test
     public void testGetScannerForNoIntersectingRanges() throws Exception
     {
-        ColumnFamilyStore store = discardSSTables(KEYSPACE1, CF_STANDARD);
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF_STANDARD3);
         partitioner = store.getPartitioner();
 
         new RowUpdateBuilder(store.metadata(), 0, "k1")
@@ -878,22 +695,16 @@ public class SSTableReaderTest
             .build()
             .applyUnsafe();
 
-        Util.flush(store);
-        boolean foundScanner = false;
+        store.forceBlockingFlush(UNIT_TESTS);
 
         Set<SSTableReader> liveSSTables = store.getLiveSSTables();
         assertEquals("The table should have only one sstable", 1, liveSSTables.size());
 
-        for (SSTableReader s : liveSSTables)
-        {
-            try (ISSTableScanner scanner = s.getScanner(new Range<>(t(0), t(1))))
-            {
-                // Make sure no data is returned and nothing fails for non-intersecting range.
-                assertFalse(scanner.hasNext());
-                foundScanner = true;
-            }
-        }
-        assertTrue(foundScanner);
+        ISSTableScanner scanner = liveSSTables.iterator().next().getScanner(new Range<>(t(0), t(1)));
+        if (SSTableFormat.Type.current() == SSTableFormat.Type.BIG)
+            assertThat(scanner, instanceOf(BigTableScanner.EmptySSTableScanner.class));
+        else
+            assertThat(scanner, instanceOf(TrieIndexScanner.EmptySSTableScanner.class));
     }
 
     @Test
@@ -915,7 +726,7 @@ public class SSTableReaderTest
             .applyUnsafe();
 
         }
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
         CompactionManager.instance.performMaximal(store, false);
 
         // construct a range which is present in the sstable, but whose
@@ -925,13 +736,13 @@ public class SSTableReaderTest
 
         SSTableReader sstable = store.getLiveSSTables().iterator().next();
         List<SSTableReader.PartitionPositionBounds> sections = sstable.getPositionsForRanges(ranges);
-        assert sections.size() == 1 : "Expected to find range in sstable";
+        assert sections.size() == 1 : "Expected to find range in sstable" ;
 
         // re-open the same sstable as it would be during bulk loading
-        Set<Component> components = Sets.newHashSet(sstable.descriptor.getFormat().primaryComponents());
-        if (sstable.components.contains(Components.COMPRESSION_INFO))
-            components.add(Components.COMPRESSION_INFO);
-        SSTableReader bulkLoaded = SSTableReader.openForBatch(store, sstable.descriptor, components, store.metadata);
+        Set<Component> components = Sets.newHashSet(sstable.descriptor.getFormat().requiredComponents());
+        if (sstable.components().contains(Component.COMPRESSION_INFO))
+            components.add(Component.COMPRESSION_INFO);
+        SSTableReader bulkLoaded = sstable.descriptor.getFormat().getReaderFactory().openForBatch(sstable.descriptor, components, store.metadata);
         sections = bulkLoaded.getPositionsForRanges(ranges);
         assert sections.size() == 1 : "Expected to find range in sstable opened for bulk loading";
         bulkLoaded.selfRef().release();
@@ -940,30 +751,30 @@ public class SSTableReaderTest
     @Test
     public void testIndexSummaryReplacement() throws IOException, ExecutionException, InterruptedException
     {
-        assumeTrue(IndexSummarySupport.isSupportedBy(DatabaseDescriptor.getSelectedSSTableFormat()));
         ColumnFamilyStore store = discardSSTables(KEYSPACE1, CF_STANDARD_LOW_INDEX_INTERVAL); // index interval of 8, no key caching
 
         final int NUM_PARTITIONS = 512;
         for (int j = 0; j < NUM_PARTITIONS; j++)
         {
-            new RowUpdateBuilder(store.metadata(), j, format("%3d", j))
+            new RowUpdateBuilder(store.metadata(), j, String.format("%3d", j))
             .clustering("0")
-            .add("val", format("%3d", j))
+            .add("val", String.format("%3d", j))
             .build()
             .applyUnsafe();
+
         }
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
         CompactionManager.instance.performMaximal(store, false);
 
-        Collection<SSTableReader> sstables = store.getLiveSSTables();
+        List<SSTableReader> sstables = ImmutableList.copyOf(store.getLiveSSTables());
         assert sstables.size() == 1;
-        final SSTableReader sstable = sstables.iterator().next();
+        final SSTableReader sstable = sstables.get(0);
 
         ThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(5);
         List<Future<?>> futures = new ArrayList<>(NUM_PARTITIONS * 2);
         for (int i = 0; i < NUM_PARTITIONS; i++)
         {
-            final ByteBuffer key = ByteBufferUtil.bytes(format("%3d", i));
+            final ByteBuffer key = ByteBufferUtil.bytes(String.format("%3d", i));
             final int index = i;
 
             futures.add(executor.submit(new Runnable()
@@ -971,7 +782,7 @@ public class SSTableReaderTest
                 public void run()
                 {
                     Row row = Util.getOnlyRowUnfiltered(Util.cmd(store, key).build());
-                    assertEquals(0, ByteBufferUtil.compare(format("%3d", index).getBytes(), row.cells().iterator().next().buffer()));
+                    assertEquals(0, ByteBufferUtil.compare(String.format("%3d", index).getBytes(), row.cells().iterator().next().buffer()));
                 }
             }));
 
@@ -980,7 +791,7 @@ public class SSTableReaderTest
                 public void run()
                 {
                     Iterable<DecoratedKey> results = store.keySamples(
-                    new Range<>(sstable.getPartitioner().getMinimumToken(), sstable.getPartitioner().getToken(key)));
+                            new Range<>(sstable.getPartitioner().getMinimumToken(), sstable.getPartitioner().getToken(key)));
                     assertTrue(results.iterator().hasNext());
                 }
             }));
@@ -989,7 +800,7 @@ public class SSTableReaderTest
         SSTableReader replacement;
         try (LifecycleTransaction txn = store.getTracker().tryModify(Collections.singletonList(sstable), OperationType.UNKNOWN))
         {
-            replacement = ((IndexSummarySupport<?>) sstable).cloneWithNewSummarySamplingLevel(store, 1);
+            replacement = sstable.cloneWithNewSummarySamplingLevel(store, 1);
             txn.update(replacement, true);
             txn.finish();
         }
@@ -1002,7 +813,8 @@ public class SSTableReaderTest
     @Test
     public void testIndexSummaryUpsampleAndReload() throws Exception
     {
-        assumeTrue(IndexSummarySupport.isSupportedBy(DatabaseDescriptor.getSelectedSSTableFormat()));
+        Assume.assumeThat(SSTableFormat.Type.current(), is(SSTableFormat.Type.BIG));
+
         int originalMaxSegmentSize = MmappedRegions.MAX_SEGMENT_SIZE;
         MmappedRegions.MAX_SEGMENT_SIZE = 40; // each index entry is ~11 bytes, so this will generate lots of segments
 
@@ -1016,34 +828,35 @@ public class SSTableReaderTest
         }
     }
 
-    private <R extends SSTableReader & IndexSummarySupport<R>> void testIndexSummaryUpsampleAndReload0() throws Exception
+    private void testIndexSummaryUpsampleAndReload0() throws Exception
     {
         ColumnFamilyStore store = discardSSTables(KEYSPACE1, CF_STANDARD_LOW_INDEX_INTERVAL); // index interval of 8, no key caching
 
         final int NUM_PARTITIONS = 512;
         for (int j = 0; j < NUM_PARTITIONS; j++)
         {
-            new RowUpdateBuilder(store.metadata(), j, format("%3d", j))
+            new RowUpdateBuilder(store.metadata(), j, String.format("%3d", j))
             .clustering("0")
-            .add("val", format("%3d", j))
+            .add("val", String.format("%3d", j))
             .build()
             .applyUnsafe();
+
         }
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
         CompactionManager.instance.performMaximal(store, false);
 
-        Collection<R> sstables = ServerTestUtils.<R>getLiveIndexSummarySupportingReaders(store);
+        Collection<SSTableReader> sstables = selectOnlyBigTableReaders(store.getLiveSSTables(), Collectors.toList());
         assert sstables.size() == 1;
-        final R sstable = sstables.iterator().next();
+        final SSTableReader sstable = sstables.iterator().next();
 
         try (LifecycleTransaction txn = store.getTracker().tryModify(Collections.singletonList(sstable), OperationType.UNKNOWN))
         {
-            SSTableReader replacement = sstable.cloneWithNewSummarySamplingLevel(store, sstable.getIndexSummary().getSamplingLevel() + 1);
+            SSTableReader replacement = sstable.cloneWithNewSummarySamplingLevel(store, sstable.getIndexSummarySamplingLevel() + 1);
             txn.update(replacement, true);
             txn.finish();
         }
-        R reopen = (R) SSTableReader.open(store, sstable.descriptor);
-        assert reopen.getIndexSummary().getSamplingLevel() == sstable.getIndexSummary().getSamplingLevel() + 1;
+        SSTableReader reopen = sstable.descriptor.formatType.info.getReaderFactory().open(sstable.descriptor);
+        assert reopen.getIndexSummarySamplingLevel() == sstable.getIndexSummarySamplingLevel() + 1;
     }
 
     private void assertIndexQueryWorks(ColumnFamilyStore indexedCFS)
@@ -1060,7 +873,7 @@ public class SSTableReaderTest
                                              .columns("birthdate")
                                              .filterOn("birthdate", Operator.EQ, 1L)
                                              .build();
-        Index.Searcher searcher = rc.indexSearcher();
+        Index.Searcher searcher = rc.getIndex(indexedCFS).searcherFor(rc);
         assertNotNull(searcher);
         try (ReadExecutionController executionController = rc.executionController())
         {
@@ -1073,19 +886,9 @@ public class SSTableReaderTest
         return Collections.singletonList(new Range<>(left, right));
     }
 
-    private DecoratedKey dk(int i)
+    private DecoratedKey k(int i)
     {
-        return partitioner.decorateKey(keyFor(i));
-    }
-
-    private static ByteBuffer keyFor(int i)
-    {
-        return ByteBufferUtil.bytes(String.valueOf(i));
-    }
-
-    private DecoratedKey collisionFor(int i)
-    {
-        return partitioner.decorateKey(Util.generateMurmurCollision(ByteBufferUtil.bytes(String.valueOf(i))));
+        return new BufferDecoratedKey(t(i), ByteBufferUtil.bytes(String.valueOf(i)));
     }
 
     @Test(expected = RuntimeException.class)
@@ -1094,8 +897,8 @@ public class SSTableReaderTest
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
         ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD);
         SSTableReader sstable = getNewSSTable(cfs);
-        Descriptor notLiveDesc = new Descriptor(new File("/testdir"), "", "", SSTableIdFactory.instance.defaultBuilder().generator(Stream.empty()).get());
-        SSTableReader.moveAndOpenSSTable(cfs, sstable.descriptor, notLiveDesc, sstable.components, false);
+        Descriptor notLiveDesc = new Descriptor(new File("/tmp"), "", "", SSTableIdFactory.instance.defaultBuilder().generator(Stream.empty()).get());
+        notLiveDesc.getFormat().getReaderFactory().moveAndOpenSSTable(cfs, sstable.descriptor, notLiveDesc, sstable.components(), false);
     }
 
     @Test(expected = RuntimeException.class)
@@ -1104,8 +907,8 @@ public class SSTableReaderTest
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
         ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD);
         SSTableReader sstable = getNewSSTable(cfs);
-        Descriptor notLiveDesc = new Descriptor(new File("/testdir"), "", "", SSTableIdFactory.instance.defaultBuilder().generator(Stream.empty()).get());
-        SSTableReader.moveAndOpenSSTable(cfs, notLiveDesc, sstable.descriptor, sstable.components, false);
+        Descriptor notLiveDesc = new Descriptor(new File("/tmp"), "", "", SSTableIdFactory.instance.defaultBuilder().generator(Stream.empty()).get());
+        sstable.descriptor.getFormat().getReaderFactory().moveAndOpenSSTable(cfs, notLiveDesc, sstable.descriptor, sstable.components(), false);
     }
 
     @Test
@@ -1121,19 +924,19 @@ public class SSTableReaderTest
         SSTableId id = SSTableIdFactory.instance.defaultBuilder().generator(Stream.empty()).get();
         Descriptor notLiveDesc = new Descriptor(tmpdir, sstable.descriptor.ksname, sstable.descriptor.cfname, id);
         // make sure the new directory is empty and that the old files exist:
-        for (Component c : sstable.components)
+        for (Component c : sstable.components())
         {
             File f = notLiveDesc.fileFor(c);
             assertFalse(f.exists());
             assertTrue(sstable.descriptor.fileFor(c).exists());
         }
-        SSTableReader.moveAndOpenSSTable(cfs, sstable.descriptor, notLiveDesc, sstable.components, false);
+        notLiveDesc.getFormat().getReaderFactory().moveAndOpenSSTable(cfs, sstable.descriptor, notLiveDesc, sstable.components(), false);
         // make sure the files were moved:
-        for (Component c : sstable.components)
+        for (Component c : sstable.components())
         {
             File f = notLiveDesc.fileFor(c);
             assertTrue(f.exists());
-            assertTrue(f.toString().contains(format("-%s-", id)));
+            assertTrue(f.toString().contains(String.format("-%s-", id)));
             f.deleteOnExit();
             assertFalse(sstable.descriptor.fileFor(c).exists());
         }
@@ -1141,8 +944,13 @@ public class SSTableReaderTest
 
     private SSTableReader getNewSSTable(ColumnFamilyStore cfs)
     {
+        return getNewSSTable(cfs, 100, 2);
+    }
+
+    private SSTableReader getNewSSTable(ColumnFamilyStore cfs, int numKeys, int step)
+    {
         Set<SSTableReader> before = cfs.getLiveSSTables();
-        for (int j = 0; j < 100; j += 2)
+        for (int j = 0; j < numKeys; j += step)
         {
             new RowUpdateBuilder(cfs.metadata(), j, String.valueOf(j))
             .clustering("0")
@@ -1150,7 +958,7 @@ public class SSTableReaderTest
             .build()
             .applyUnsafe();
         }
-        Util.flush(cfs);
+        cfs.forceBlockingFlush(UNIT_TESTS);
         return Sets.difference(cfs.getLiveSSTables(), before).iterator().next();
     }
 
@@ -1179,40 +987,179 @@ public class SSTableReaderTest
         Descriptor desc = setUpForTestVerfiyCompressionInfoExistence();
 
         // delete the compression info, so it is corrupted.
-        File compressionInfoFile = desc.fileFor(Components.COMPRESSION_INFO);
+        File compressionInfoFile = desc.fileFor(Component.COMPRESSION_INFO);
         compressionInfoFile.tryDelete();
         assertFalse("CompressionInfo file should not exist", compressionInfoFile.exists());
 
         // discovert the components on disk after deletion
-        Set<Component> components = desc.discoverComponents();
+        Set<Component> components = SSTable.discoverComponentsFor(desc);
 
         expectedException.expect(CorruptSSTableException.class);
         expectedException.expectMessage("CompressionInfo.db");
-        CompressionInfoComponent.verifyCompressionInfoExistenceIfApplicable(desc, components);
+        SSTableReader.verifyCompressionInfoExistenceIfApplicable(desc, components);
     }
 
     @Test
     public void testVerifyCompressionInfoExistenceWhenTOCUnableToOpen()
     {
         Descriptor desc = setUpForTestVerfiyCompressionInfoExistence();
-        Set<Component> components = desc.discoverComponents();
-        CompressionInfoComponent.verifyCompressionInfoExistenceIfApplicable(desc, components);
+        Set<Component> components = SSTable.discoverComponentsFor(desc);
+        SSTableReader.verifyCompressionInfoExistenceIfApplicable(desc, components);
 
         // mark the toc file not readable in order to trigger the FSReadError
-        File tocFile = desc.fileFor(Components.TOC);
+        File tocFile = desc.fileFor(Component.TOC);
         tocFile.trySetReadable(false);
 
         expectedException.expect(FSReadError.class);
         expectedException.expectMessage("TOC.txt");
-        CompressionInfoComponent.verifyCompressionInfoExistenceIfApplicable(desc, components);
+        SSTableReader.verifyCompressionInfoExistenceIfApplicable(desc, components);
     }
 
     @Test
     public void testVerifyCompressionInfoExistencePasses()
     {
         Descriptor desc = setUpForTestVerfiyCompressionInfoExistence();
-        Set<Component> components = desc.discoverComponents();
-        CompressionInfoComponent.verifyCompressionInfoExistenceIfApplicable(desc, components);
+        Set<Component> components = SSTable.discoverComponentsFor(desc);
+        SSTableReader.verifyCompressionInfoExistenceIfApplicable(desc, components);
+    }
+
+    @Test
+    public void testBloomFilterIsCreatedOnLoad() throws IOException
+    {
+        BloomFilter.recreateOnFPChanceChange = true;
+
+        final int numKeys = 100;
+        final Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        final ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD_NO_BLOOM_FILTER);
+
+        SSTableReader sstable = getNewSSTable(cfs, numKeys, 1);
+        Assert.assertTrue(sstable.getBloomFilterSerializedSize() == 0);
+        Assert.assertSame(FilterFactory.AlwaysPresent, sstable.getBloomFilter());
+
+        // should do nothing
+        checkSSTableOpenedWithGivenFPChance(sstable, 1, false, numKeys, false);
+
+        // should create BF because the FP has changed
+        checkSSTableOpenedWithGivenFPChance(sstable, BloomCalculations.minSupportedBloomFilterFpChance(), true, numKeys, true);
+        checkSSTableOpenedWithGivenFPChance(sstable, 0.05, true, numKeys, true);
+        checkSSTableOpenedWithGivenFPChance(sstable, 0.1, true, numKeys, true);
+
+        // should deserialize the existing BF
+        checkSSTableOpenedWithGivenFPChance(sstable, 0.1, true, numKeys, false);
+        // should create BF because the FP has changed
+        checkSSTableOpenedWithGivenFPChance(sstable, 1 - BloomFilter.fpChanceTolerance, true, numKeys, true);
+        // should install empty filter without changing file or metadata
+        checkSSTableOpenedWithGivenFPChance(sstable, 1, false, numKeys, false);
+
+        // corrupted bf file should fail to deserialize and we should fall back to recreating it
+        Files.write(sstable.descriptor.fileFor(Component.FILTER).toPath(), new byte[] { 0, 0, 0, 0});
+        checkSSTableOpenedWithGivenFPChance(sstable, 1 - BloomFilter.fpChanceTolerance, true, numKeys, true);
+
+        // missing primary index file should make BF fail to load and we should install the empty one
+        if (sstable.descriptor.getFormat().getType() == SSTableFormat.Type.BIG)
+            sstable.descriptor.fileFor(Component.PRIMARY_INDEX).delete();
+        else
+            sstable.descriptor.fileFor(Component.PARTITION_INDEX).delete();
+
+        checkSSTableOpenedWithGivenFPChance(sstable, 0.05, false, numKeys, false);
+    }
+
+    private void checkSSTableOpenedWithGivenFPChance(SSTableReader sstable, double fpChance, boolean bfShouldExist, int numKeys, boolean expectRecreated) throws IOException
+    {
+        Descriptor desc = sstable.descriptor;
+        TableMetadata metadata = sstable.metadata.get().unbuild().bloomFilterFpChance(fpChance).build();
+        ValidationMetadata prevValidationMetadata = getValidationMetadata(desc);
+        Assert.assertNotNull(prevValidationMetadata);
+        File bfFile = desc.fileFor(Component.FILTER);
+
+        SSTableReader target = null;
+        try
+        {
+            FileTime bf0Time = bfFile.exists() ? Files.getLastModifiedTime(bfFile.toPath()) : FileTime.from(Instant.MIN);
+
+            // make sure we wait enough - some JDK implementations use seconds granularity and we need to wait a bit to actually see the change
+            Uninterruptibles.sleepUninterruptibly(1, Util.supportedMTimeGranularity);
+
+            target = desc.getFormat().getReaderFactory().open(desc,
+                                                              SSTableReader.discoverComponentsFor(desc),
+                                                              TableMetadataRef.forOfflineTools(metadata),
+                                                              false,
+                                                              false);
+            IFilter bloomFilter = target.getBloomFilter();
+            ValidationMetadata validationMetadata = getValidationMetadata(desc);
+            Assert.assertNotNull(validationMetadata);
+            FileTime bf1Time = bfFile.exists() ? Files.getLastModifiedTime(bfFile.toPath()) : FileTime.from(Instant.MIN);
+
+            if (expectRecreated)
+            {
+                Assert.assertTrue(bf0Time.compareTo(bf1Time) < 0);
+            }
+            else
+            {
+                assertEquals(bf0Time, bf1Time);
+            }
+
+            if (bfShouldExist)
+            {
+                Assert.assertNotEquals(FilterFactory.AlwaysPresent, bloomFilter);
+                Assert.assertTrue(bloomFilter.serializedSize() > 0);
+                Assert.assertEquals(fpChance, validationMetadata.bloomFilterFPChance, BloomFilter.fpChanceTolerance);
+                Assert.assertTrue(bfFile.exists());
+                Assert.assertEquals(bloomFilter.serializedSize(), bfFile.length());
+            }
+            else
+            {
+                Assert.assertEquals(FilterFactory.AlwaysPresent, sstable.getBloomFilter());
+                Assert.assertTrue(sstable.getBloomFilterSerializedSize() == 0);
+                Assert.assertEquals(prevValidationMetadata.bloomFilterFPChance, validationMetadata.bloomFilterFPChance, BloomFilter.fpChanceTolerance);
+                Assert.assertEquals(bfFile.exists(), bfFile.exists());
+            }
+
+            // verify all keys are present according to the BF
+            Token token = new Murmur3Partitioner.LongToken(0L);
+            for (int i = 0; i < numKeys; i++)
+            {
+                DecoratedKey key = new BufferDecoratedKey(token, ByteBufferUtil.bytes(String.valueOf(i)));
+                Assert.assertTrue("Expected key to be in BF: " + i, bloomFilter.isPresent(key));
+            }
+        }
+        finally
+        {
+            if (target != null)
+                target.selfRef().release();
+        }
+    }
+
+    @Test
+    public void testOnDiskComponentsSize()
+    {
+        final int numKeys = 1000;
+        final Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        final ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD);
+
+        SSTableReader sstable = getNewSSTable(cfs, numKeys, 1);
+        assertEquals(sstable.onDiskLength(), FileUtils.size(sstable.descriptor.pathFor(Component.DATA)));
+
+        assertTrue(sstable.components().contains(Component.DATA));
+        assertTrue(sstable.components().size() > 1);
+        assertTrue(sstable.onDiskComponentsSize() > sstable.onDiskLength());
+    }
+
+    private static ValidationMetadata getValidationMetadata(Descriptor descriptor)
+    {
+        EnumSet<MetadataType> types = EnumSet.of(MetadataType.VALIDATION);
+
+        Map<MetadataType, MetadataComponent> sstableMetadata;
+        try
+        {
+            sstableMetadata = descriptor.getMetadataSerializer().deserialize(descriptor, types);
+        }
+        catch (Throwable t)
+        {
+            throw new CorruptSSTableException(t, descriptor.fileFor(Component.STATS));
+        }
+
+        return (ValidationMetadata) sstableMetadata.get(MetadataType.VALIDATION);
     }
 
     private Descriptor setUpForTestVerfiyCompressionInfoExistence()
@@ -1223,8 +1170,8 @@ public class SSTableReaderTest
         cfs.clearUnsafe();
         Descriptor desc = sstable.descriptor;
 
-        File compressionInfoFile = desc.fileFor(Components.COMPRESSION_INFO);
-        File tocFile = desc.fileFor(Components.TOC);
+        File compressionInfoFile = desc.fileFor(Component.COMPRESSION_INFO);
+        File tocFile = desc.fileFor(Component.TOC);
         assertTrue("CompressionInfo file should exist", compressionInfoFile.exists());
         assertTrue("TOC file should exist", tocFile.exists());
         return desc;

@@ -22,14 +22,16 @@ import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.apache.cassandra.cql3.AssignmentTestable;
 import org.apache.cassandra.cql3.CQL3Type;
 
+import org.apache.cassandra.cql3.Json;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.FunctionExecutionException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.serializers.MarshalException;
-import org.apache.cassandra.utils.JsonUtils;
+import org.apache.cassandra.transport.ProtocolVersion;
 
 import static java.lang.String.format;
 
@@ -53,27 +55,24 @@ public class FromJsonFct extends NativeScalarFunction
         super(name.name, returnType, UTF8Type.instance);
     }
 
-    @Override
-    public ByteBuffer execute(Arguments arguments)
+    public ByteBuffer execute(ProtocolVersion protocolVersion, List<ByteBuffer> parameters)
     {
-        assert arguments.size() == 1 : format("Unexpectedly got %d arguments for %s()", arguments.size(), name.name);
-
-        if (arguments.containsNulls())
+        assert parameters.size() == 1 : format("Unexpectedly got %d arguments for %s()", parameters.size(), name.name);
+        ByteBuffer argument = parameters.get(0);
+        if (argument == null)
             return null;
 
-        String jsonArg = arguments.get(0);
+        String jsonArg = UTF8Type.instance.getSerializer().deserialize(argument);
         try
         {
-            Object object = JsonUtils.JSON_OBJECT_MAPPER.readValue(jsonArg, Object.class);
+            Object object = Json.JSON_OBJECT_MAPPER.readValue(jsonArg, Object.class);
             if (object == null)
                 return null;
-
-            return returnType.fromJSONObject(object)
-                             .bindAndGet(QueryOptions.forProtocolVersion(arguments.getProtocolVersion()));
+            return returnType.fromJSONObject(object).bindAndGet(QueryOptions.forProtocolVersion(protocolVersion));
         }
         catch (IOException exc)
         {
-            throw FunctionExecutionException.create(name(), 
+            throw FunctionExecutionException.create(name(),
                                                     Collections.singletonList("text"),
                                                     format("Could not decode JSON string '%s': %s", jsonArg, exc));
         }
@@ -88,7 +87,7 @@ public class FromJsonFct extends NativeScalarFunction
         functions.add(new Factory("from_json"));
         functions.add(new Factory("fromjson"));
     }
-    
+
     private static class Factory extends FunctionFactory
     {
         private Factory(String name)
@@ -97,7 +96,9 @@ public class FromJsonFct extends NativeScalarFunction
         }
 
         @Override
-        protected NativeFunction doGetOrCreateFunction(List<AbstractType<?>> argTypes, AbstractType<?> receiverType)
+        protected NativeFunction doGetOrCreateFunction(List<? extends AssignmentTestable> args,
+                                                       List<AbstractType<?>> argTypes,
+                                                       AbstractType<?> receiverType)
         {
             if (receiverType == null)
                 throw new InvalidRequestException(format("%s() cannot be used in the selection clause of a SELECT statement", name.name));

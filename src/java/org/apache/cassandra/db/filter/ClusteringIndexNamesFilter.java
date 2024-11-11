@@ -20,7 +20,6 @@ package org.apache.cassandra.db.filter;
 import java.io.IOException;
 import java.util.*;
 
-import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.db.rows.*;
@@ -162,36 +161,18 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
         return sb.append(')').toString();
     }
 
-    @Override
-    public String toCQLString(TableMetadata metadata, RowFilter rowFilter)
+    public String toCQLString(TableMetadata metadata)
     {
         if (metadata.clusteringColumns().isEmpty() || clusterings.isEmpty())
-            return rowFilter.toCQLString();
-
-        boolean isSingleColumn = metadata.clusteringColumns().size() == 1;
-        boolean isSingleClustering = clusterings.size() == 1;
+            return "";
 
         StringBuilder sb = new StringBuilder();
-        sb.append(isSingleColumn ? "" : '(')
-          .append(ColumnMetadata.toCQLString(metadata.clusteringColumns()))
-          .append(isSingleColumn ? "" : ')');
-
-        sb.append(isSingleClustering ? " = " : " IN (");
+        sb.append('(').append(ColumnMetadata.toCQLString(metadata.clusteringColumns())).append(')');
+        sb.append(clusterings.size() == 1 ? " = " : " IN (");
         int i = 0;
         for (Clustering<?> clustering : clusterings)
-        {
-            sb.append(i++ == 0 ? "" : ", ")
-              .append(isSingleColumn ? "" : '(')
-              .append(clustering.toCQLString(metadata))
-              .append(isSingleColumn ? "" : ')');
-
-            for (int j = 0; j < clustering.size(); j++)
-                rowFilter = rowFilter.without(metadata.clusteringColumns().get(j), Operator.EQ, clustering.bufferAt(j));
-        }
-        sb.append(isSingleClustering ? "" : ")");
-
-        if (!rowFilter.isEmpty())
-            sb.append(" AND ").append(rowFilter.toCQLString());
+            sb.append(i++ == 0 ? "" : ", ").append('(').append(clustering.toCQLString(metadata)).append(')');
+        sb.append(clusterings.size() == 1 ? "" : ")");
 
         appendOrderByToCQLString(metadata, sb);
         return sb.toString();
@@ -219,7 +200,7 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
     protected void serializeInternal(DataOutputPlus out, int version) throws IOException
     {
         ClusteringComparator comparator = (ClusteringComparator)clusterings.comparator();
-        out.writeUnsignedVInt32(clusterings.size());
+        out.writeUnsignedVInt(clusterings.size());
         for (Clustering<?> clustering : clusterings)
             Clustering.serializer.serialize(clustering, out, version, comparator.subtypes());
     }
@@ -238,7 +219,7 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
         public ClusteringIndexFilter deserialize(DataInputPlus in, int version, TableMetadata metadata, boolean reversed) throws IOException
         {
             ClusteringComparator comparator = metadata.comparator;
-            int size = in.readUnsignedVInt32();
+            int size = (int)in.readUnsignedVInt();
             try (BTree.FastBuilder<Clustering<?>> builder = BTree.fastBuilder())
             {
                 for (int i = 0; i < size; i++)

@@ -22,18 +22,20 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.NavigableSet;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Iterators;
 
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.rows.*;
+import org.apache.cassandra.utils.ObjectSizes;
 import org.apache.cassandra.utils.SearchIterator;
 import org.apache.cassandra.utils.btree.BTree;
 
 import static org.apache.cassandra.utils.btree.BTree.Dir.desc;
 
-public abstract class AbstractBTreePartition implements Partition, Iterable<Row>
+public abstract class AbstractBTreePartition implements Partition
 {
     protected final DecoratedKey partitionKey;
 
@@ -352,50 +354,7 @@ public abstract class AbstractBTreePartition implements Partition, Iterable<Row>
     @Override
     public String toString()
     {
-        return toString(true);
-    }
-
-    public String toString(boolean includeFullDetails)
-    {
-        StringBuilder sb = new StringBuilder();
-        if (includeFullDetails)
-        {
-            sb.append(String.format("[%s.%s] key=%s partition_deletion=%s columns=%s",
-                                    metadata().keyspace,
-                                    metadata().name,
-                                    metadata().partitionKeyType.getString(partitionKey().getKey()),
-                                    partitionLevelDeletion(),
-                                    columns()));
-        }
-        else
-        {
-            sb.append("key=").append(metadata().partitionKeyType.getString(partitionKey().getKey()));
-        }
-
-        if (staticRow() != Rows.EMPTY_STATIC_ROW)
-            sb.append("\n    ").append(staticRow().toString(metadata(), includeFullDetails));
-
-        try (UnfilteredRowIterator iter = unfilteredIterator())
-        {
-            while (iter.hasNext())
-                sb.append("\n    ").append(iter.next().toString(metadata(), includeFullDetails));
-        }
-        return sb.toString();
-    }
-
-    @Override
-    public boolean equals(Object obj)
-    {
-        if (!(obj instanceof PartitionUpdate))
-            return false;
-
-        PartitionUpdate that = (PartitionUpdate) obj;
-        BTreePartitionData a = this.holder(), b = that.holder();
-        return partitionKey.equals(that.partitionKey)
-               && metadata().id.equals(that.metadata().id)
-               && a.deletionInfo.equals(b.deletionInfo)
-               && a.staticRow.equals(b.staticRow)
-               && Iterators.elementsEqual(iterator(), that.iterator());
+        return Partition.toString(this);
     }
 
     public int rowCount()
@@ -403,7 +362,7 @@ public abstract class AbstractBTreePartition implements Partition, Iterable<Row>
         return BTree.size(holder().tree);
     }
 
-    public Iterator<Row> iterator()
+    public Iterator<Row> rowIterator()
     {
         return BTree.<Row>iterator(holder().tree);
     }
@@ -415,5 +374,17 @@ public abstract class AbstractBTreePartition implements Partition, Iterable<Row>
             return null;
 
         return BTree.findByIndex(tree, BTree.size(tree) - 1);
+    }
+
+    @VisibleForTesting
+    public static BTreePartitionData unsafeGetEmptyHolder()
+    {
+        return BTreePartitionData.EMPTY;
+    }
+
+    @VisibleForTesting
+    public static BTreePartitionData unsafeConstructHolder(RegularAndStaticColumns columns, Object[] tree, DeletionInfo deletionInfo, Row staticRow, EncodingStats stats)
+    {
+        return new BTreePartitionData(columns, tree, deletionInfo, staticRow, stats);
     }
 }

@@ -18,33 +18,27 @@
 package org.apache.cassandra.cql3;
 
 import java.nio.ByteBuffer;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.EnumSet;
-import java.util.List;
+import java.util.*;
 import java.util.stream.Collectors;
 
 import org.junit.Before;
 import org.junit.Test;
 
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.exceptions.SyntaxError;
+import com.khulnasoft.driver.core.Cluster;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.ResultSet;
+import com.khulnasoft.driver.core.Session;
+import com.khulnasoft.driver.core.exceptions.SyntaxError;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.exceptions.PreparedQueryNotFoundException;
 import org.apache.cassandra.index.StubIndex;
 import org.apache.cassandra.serializers.BooleanSerializer;
 import org.apache.cassandra.serializers.Int32Serializer;
-import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.service.ClientWarn;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.transport.SimpleClient;
 import org.apache.cassandra.transport.messages.ResultMessage;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -62,100 +56,9 @@ public class PreparedStatementsTest extends CQLTester
     }
 
     @Test
-    public void testUnqualifiedPreparedSelectOrModificationStatementsEmitWarning()
-    {
-        for (String query : new String[]
-                            {
-                            "SELECT id, v1, v2 FROM %s WHERE id = 1",
-                            "INSERT INTO %s (id, v1, v2) VALUES (1, 2, 3)",
-                            "UPDATE %s SET v1 = 2, v2 = 3 where id = 1"
-                            })
-        {
-            assertWarningsOnPreparedStatements(query, true, true, true);
-        }
-    }
-
-    @Test
-    public void testQualifiedPreparedSelectOrModificationStatementsDoNotEmitWarning()
-    {
-        for (String query : new String[]
-                            {
-                            "SELECT id, v1, v2 FROM %keyspace%.%s WHERE id = 1",
-                            "INSERT INTO %keyspace%.%s (id, v1, v2) VALUES (1, 2, 3)",
-                            "UPDATE %keyspace%.%s SET v1 = 2, v2 = 3 where id = 1"
-                            })
-        {
-            assertWarningsOnPreparedStatements(query, false, true, true);
-            assertWarningsOnPreparedStatements(query, false, true, false);
-        }
-    }
-
-    @Test
-    public void testSchemaTransformationPreparedStatementEmitsWaring()
-    {
-        assertWarningsOnPreparedStatements("ALTER TABLE %s ADD c3 int", true, false, true);
-        assertWarningsOnPreparedStatements("ALTER TABLE %keyspace%.%s ADD c3 int", true, false, false);
-    }
-
-    @Test
-    public void testBatchPreparedStatementsEmitWarnings()
-    {
-        assertWarningsOnPreparedStatements("BEGIN BATCH INSERT INTO %s (id, v1, v2) VALUES (1,2,3) APPLY BATCH", true, true, true);
-
-        // this will evaluate a statement as unqualified because not all are qualified
-        assertWarningsOnPreparedStatements("BEGIN BATCH" +
-                                           "  INSERT INTO %keyspace%.%s (id, v1, v2) VALUES (1,2,3); " +
-                                           "  INSERT INTO %s (id, v1, v2) VALUES (3, 4, 5) " +
-                                           "APPLY BATCH;", true, true, true);
-
-        assertWarningsOnPreparedStatements("BEGIN BATCH INSERT INTO %keyspace%.%s (id, v1, v2) VALUES (1,2,3) APPLY BATCH;", false, true, true);
-        assertWarningsOnPreparedStatements("BEGIN BATCH INSERT INTO %keyspace%.%s (id, v1, v2) VALUES (1,2,3) APPLY BATCH;", false, true, false);
-    }
-
-    private void assertWarningsOnPreparedStatements(String query, boolean expectWarn, boolean forModificationOrSelectStatement, boolean useUse)
-    {
-        try
-        {
-            createKeyspace("CREATE KEYSPACE %s WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}");
-            createTable(currentKeyspace(),"CREATE TABLE %s (id int, v1 int, v2 int, primary key (id))");
-
-            ClientState clientState = ClientState.forInternalCalls();
-            if (useUse)
-                clientState.setKeyspace(currentKeyspace());
-
-            ClientWarn.instance.captureWarnings();
-
-            String maybeQueryWithKeyspace = query.replaceAll("%keyspace%", currentKeyspace());
-            String queryWithTable = maybeQueryWithKeyspace.replaceAll("%s", currentTable());
-
-            // two times is not a mistake, a warning is emitted just once
-            QueryProcessor.instance.prepare(queryWithTable, clientState);
-            QueryProcessor.instance.prepare(queryWithTable, clientState);
-
-            List<String> warnings = ClientWarn.instance.getWarnings();
-
-            if (expectWarn && forModificationOrSelectStatement)
-                assertTrue(warnings != null &&
-                           warnings.size() == 1 &&
-                           warnings.get(0).startsWith("`USE <keyspace>` with prepared statements is considered to be an anti-pattern"));
-            else if (expectWarn)
-                assertTrue(warnings != null &&
-                           warnings.size() == 1 &&
-                           warnings.get(0).startsWith("Prepared statements for other than modification and selection statements should be avoided,"));
-            else
-                assertNull(warnings);
-        }
-        finally
-        {
-            execute("DROP KEYSPACE " + currentKeyspace());
-            ClientWarn.instance.resetWarnings();
-        }
-    }
-
-    @Test
     public void testInvalidatePreparedStatementsOnDrop()
     {
-        Session session = sessionNet(ProtocolVersion.V5);
+        Session session = getSession(ProtocolVersion.V5);
         session.execute(dropKsStatement);
         session.execute(createKsStatement);
 
@@ -199,7 +102,7 @@ public class PreparedStatementsTest extends CQLTester
 
     private void testInvalidatePreparedStatementOnAlter(ProtocolVersion version, boolean supportsMetadataChange)
     {
-        Session session = sessionNet(version);
+        Session session = getSession(version);
         String createTableStatement = "CREATE TABLE IF NOT EXISTS " + KEYSPACE + ".qp_cleanup (a int PRIMARY KEY, b int, c int);";
         String alterTableStatement = "ALTER TABLE " + KEYSPACE + ".qp_cleanup ADD d int;";
 
@@ -259,7 +162,7 @@ public class PreparedStatementsTest extends CQLTester
 
     private void testInvalidatePreparedStatementOnAlterUnchangedMetadata(ProtocolVersion version)
     {
-        Session session = sessionNet(version);
+        Session session = getSession(version);
         String createTableStatement = "CREATE TABLE IF NOT EXISTS " + KEYSPACE + ".qp_cleanup (a int PRIMARY KEY, b int, c int);";
         String alterTableStatement = "ALTER TABLE " + KEYSPACE + ".qp_cleanup ADD d int;";
 
@@ -297,7 +200,7 @@ public class PreparedStatementsTest extends CQLTester
     @Test
     public void testStatementRePreparationOnReconnect()
     {
-        Session session = sessionNet(ProtocolVersion.V5);
+        Session session = getSession(ProtocolVersion.V5);
         session.execute("USE " + keyspace());
 
         session.execute(dropKsStatement);
@@ -338,7 +241,7 @@ public class PreparedStatementsTest extends CQLTester
     @Test
     public void prepareAndExecuteWithCustomExpressions() throws Throwable
     {
-        Session session = sessionNet(ProtocolVersion.V5);
+        Session session = getSession(ProtocolVersion.V5);
 
         session.execute(dropKsStatement);
         session.execute(createKsStatement);
@@ -648,7 +551,7 @@ public class PreparedStatementsTest extends CQLTester
         execute("INSERT INTO %s (pk, v1, v2) VALUES (1,1,1)");
         execute("INSERT INTO %s (pk, v1, v2) VALUES (2,2,2)");
 
-        com.datastax.driver.core.ResultSet rs;
+        com.khulnasoft.driver.core.ResultSet rs;
 
         rs = session.execute(prepared1.bind(10, 1, 20, 1));
         assertRowsNet(rs,

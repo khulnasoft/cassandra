@@ -19,8 +19,6 @@ package org.apache.cassandra.gms;
 
 import java.io.*;
 
-import com.google.common.annotations.VisibleForTesting;
-
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputPlus;
@@ -29,7 +27,6 @@ import org.apache.cassandra.io.util.DataOutputPlus;
 /**
  * HeartBeat State associated with any given endpoint.
  */
-
 public class HeartBeatState
 {
     public static final int EMPTY_VERSION = -1;
@@ -70,7 +67,7 @@ public class HeartBeatState
         return version == EMPTY_VERSION;
     }
 
-    public int getGeneration()
+    int getGeneration()
     {
         return generation;
     }
@@ -80,7 +77,7 @@ public class HeartBeatState
         version = VersionGenerator.getNextVersion();
     }
 
-    public int getHeartBeatVersion()
+    int getHeartBeatVersion()
     {
         return version;
     }
@@ -90,8 +87,7 @@ public class HeartBeatState
         generation += 1;
     }
 
-    @VisibleForTesting
-    public void forceHighestPossibleVersionUnsafe()
+    void forceHighestPossibleVersionUnsafe()
     {
         version = Integer.MAX_VALUE;
     }

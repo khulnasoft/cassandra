@@ -29,13 +29,13 @@ import com.google.common.collect.ImmutableMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.FSError;
 import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.FSWriteError;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.utils.NativeLibrary;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.INativeLibrary;
 import org.apache.cassandra.utils.SyncUtil;
 
 import static java.util.stream.Collectors.groupingBy;
@@ -148,33 +148,23 @@ final class HintsCatalog
 
     void fsyncDirectory()
     {
-        int fd = NativeLibrary.tryOpenDirectory(hintsDirectory.absolutePath());
+        int fd = INativeLibrary.instance.tryOpenDirectory(hintsDirectory.toAbsolute());
         if (fd != -1)
         {
             try
             {
                 SyncUtil.trySync(fd);
-                NativeLibrary.tryCloseFD(fd);
+                INativeLibrary.instance.tryCloseFD(fd);
             }
             catch (FSError e) // trySync failed
             {
-                logger.error("Unable to sync directory {}", hintsDirectory.absolutePath(), e);
+                logger.error("Unable to sync directory {}", hintsDirectory.toAbsolute(), e);
                 FileUtils.handleFSErrorAndPropagate(e);
             }
         }
-        else if (!NativeLibrary.isEnabled())
+        else if (!FBUtilities.isWindows)
         {
-            return;
-        }
-        else if (DatabaseDescriptor.isClientInitialized())
-        {
-            logger.warn("Unable to open hint directory using Native library. Skipping sync.");
-        }
-        else
-        {
-            if (SyncUtil.SKIP_SYNC)
-                return;
-            logger.error("Unable to open directory {}", hintsDirectory.absolutePath());
+            logger.error("Unable to open directory {}", hintsDirectory.toAbsolute());
             FileUtils.handleFSErrorAndPropagate(new FSWriteError(new IOException(String.format("Unable to open hint directory %s", hintsDirectory.absolutePath())), hintsDirectory.absolutePath()));
         }
     }

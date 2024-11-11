@@ -18,9 +18,9 @@
 
 package org.apache.cassandra.db.marshal;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.io.UncheckedIOException;
 import java.lang.reflect.Modifier;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
@@ -31,15 +31,14 @@ import java.nio.file.StandardOpenOption;
 import java.security.CodeSource;
 import java.security.ProtectionDomain;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -48,7 +47,6 @@ import java.util.zip.GZIPOutputStream;
 
 import com.google.common.base.Charsets;
 import com.google.common.collect.HashMultimap;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
@@ -60,21 +58,9 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import net.minidev.json.JSONArray;
-import net.minidev.json.JSONObject;
-import net.minidev.json.parser.JSONParser;
-import net.minidev.json.parser.ParseException;
 import net.openhft.chronicle.core.util.ThrowingFunction;
-import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.cql3.AssignmentTestable;
 import org.apache.cassandra.cql3.ColumnIdentifier;
-import org.apache.cassandra.cql3.ColumnSpecification;
-import org.apache.cassandra.cql3.terms.Constants;
-import org.apache.cassandra.cql3.Json;
-import org.apache.cassandra.cql3.QueryOptions;
-import org.apache.cassandra.cql3.terms.Term;
-import org.apache.cassandra.cql3.VariableSpecifications;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.rows.BTreeRow;
@@ -88,61 +74,37 @@ import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.db.rows.SerializationHelper;
 import org.apache.cassandra.db.rows.UnfilteredSerializer;
 import org.apache.cassandra.io.util.DataInputBuffer;
-import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputBuffer;
-import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.schema.CQLTypeParser;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.schema.Types;
 import org.apache.cassandra.serializers.MarshalException;
-import org.apache.cassandra.serializers.TypeSerializer;
-import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.AbstractTypeGenerators;
-import org.apache.cassandra.utils.AbstractTypeGenerators.Releaser;
-import org.apache.cassandra.utils.AbstractTypeGenerators.TypeGenBuilder;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.CassandraVersion;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.FastByteOperations;
-import org.apache.cassandra.utils.Generators;
 import org.apache.cassandra.utils.asserts.SoftAssertionsWithLimit;
-import org.apache.cassandra.utils.bytecomparable.ByteComparable;
-import org.apache.cassandra.utils.bytecomparable.ByteSource;
-import org.apache.cassandra.utils.bytecomparable.ByteSourceInverse;
 import org.assertj.core.api.SoftAssertions;
 import org.assertj.core.description.Description;
+import org.json.simple.JSONArray;
+import org.json.simple.JSONObject;
+import org.json.simple.parser.JSONParser;
+import org.json.simple.parser.ParseException;
 import org.quicktheories.core.Gen;
-import org.quicktheories.generators.SourceDSL;
 import org.reflections.Reflections;
 import org.reflections.scanners.Scanners;
 import org.reflections.util.ConfigurationBuilder;
 
 import static org.apache.cassandra.db.marshal.AbstractType.ComparisonType.CUSTOM;
-import static org.apache.cassandra.utils.AbstractTypeGenerators.TypeKind.COMPOSITE;
-import static org.apache.cassandra.utils.AbstractTypeGenerators.TypeKind.COUNTER;
-import static org.apache.cassandra.utils.AbstractTypeGenerators.TypeKind.DYNAMIC_COMPOSITE;
-import static org.apache.cassandra.utils.AbstractTypeGenerators.TypeKind.PRIMITIVE;
-import static org.apache.cassandra.utils.AbstractTypeGenerators.TypeKind.UDT;
-import static org.apache.cassandra.utils.AbstractTypeGenerators.TypeSupport.of;
 import static org.apache.cassandra.utils.AbstractTypeGenerators.UNSUPPORTED;
-import static org.apache.cassandra.utils.AbstractTypeGenerators.allowsEmpty;
-import static org.apache.cassandra.utils.AbstractTypeGenerators.extractUDTs;
 import static org.apache.cassandra.utils.AbstractTypeGenerators.forEachPrimitiveTypePair;
 import static org.apache.cassandra.utils.AbstractTypeGenerators.forEachTypesPair;
 import static org.apache.cassandra.utils.AbstractTypeGenerators.getTypeSupport;
-import static org.apache.cassandra.utils.AbstractTypeGenerators.overridePrimitiveTypeSupport;
-import static org.apache.cassandra.utils.AbstractTypeGenerators.stringComparator;
-import static org.apache.cassandra.utils.AbstractTypeGenerators.typeTree;
 import static org.apache.cassandra.utils.AbstractTypeGenerators.unfreeze;
 import static org.apache.cassandra.utils.AbstractTypeGenerators.unwrap;
 import static org.apache.cassandra.utils.ByteBufferUtil.bytesToHex;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.quicktheories.QuickTheory.qt;
-import static org.quicktheories.generators.SourceDSL.doubles;
-import static org.quicktheories.generators.SourceDSL.floats;
 
 @SuppressWarnings({ "unchecked", "rawtypes" })
 public class AbstractTypeTest
@@ -151,58 +113,36 @@ public class AbstractTypeTest
 
     private static final Pattern TYPE_PREFIX_PATTERN = Pattern.compile("org\\.apache\\.cassandra\\.db\\.marshal\\.");
 
-    static
-    {
-        // make sure blob is always the same
-        CassandraRelevantProperties.TEST_BLOB_SHARED_SEED.setInt(42);
-    }
-
     private static final Reflections reflections = new Reflections(new ConfigurationBuilder()
                                                                    .forPackage("org.apache.cassandra")
                                                                    .setScanners(Scanners.SubTypes)
                                                                    .setExpandSuperTypes(true)
                                                                    .setParallel(true));
 
-    // TODO
-    // withUpdatedUserType/expandUserTypes/referencesDuration - types that recursive check types
-
     private static TypesCompatibility currentTypesCompatibility;
+    private static LoadedTypesCompatibility legacyCC40TypesCompatibility;
+    private static LoadedTypesCompatibility cc40TypesCompatibility;
     private static LoadedTypesCompatibility cassandra40TypesCompatibility;
-    private static LoadedTypesCompatibility cassandra41TypesCompatibility;
-    private static LoadedTypesCompatibility cassandra50TypesCompatibility;
+    private static LoadedTypesCompatibility dse68cndbTypesCompatibility;
 
-    private final static String CASSANDRA_VERSION = new CassandraVersion(FBUtilities.getReleaseVersionString()).toMajorMinorString();
+    private final static String CURRENT_VERSION = "cc-4.0";
     private final static Path BASE_OUTPUT_PATH = Paths.get("test", "data", "types-compatibility");
 
     @BeforeClass
     public static void beforeClass() throws IOException
     {
         DatabaseDescriptor.daemonInitialization();
-        cassandra40TypesCompatibility = new LoadedTypesCompatibility(compatibilityFile(CassandraVersion.CASSANDRA_4_0.toMajorMinorString()), Set.of());
-        cassandra41TypesCompatibility = new LoadedTypesCompatibility(compatibilityFile(CassandraVersion.CASSANDRA_4_1.toMajorMinorString()), Set.of());
-        cassandra50TypesCompatibility = new LoadedTypesCompatibility(compatibilityFile(CassandraVersion.CASSANDRA_5_0.toMajorMinorString()), Set.of());
+        legacyCC40TypesCompatibility = new LoadedTypesCompatibility(compatibilityFile("legacy-cc-4.0"), ImmutableSet.of());
+        cc40TypesCompatibility = new LoadedTypesCompatibility(compatibilityFile("cc-4.0"), ImmutableSet.of());
+        cassandra40TypesCompatibility = new LoadedTypesCompatibility(compatibilityFile("4.0"), ImmutableSet.of());
+        dse68cndbTypesCompatibility = new LoadedTypesCompatibility(compatibilityFile("dse-6.8-cndb"), ImmutableSet.of());
         currentTypesCompatibility = new CurrentTypesCompatibility();
-    }
-
-    @Test
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    public void maskedValue()
-    {
-        qt().forAll(genBuilder().withoutTypeKinds(COMPOSITE, DYNAMIC_COMPOSITE).build())
-            .checkAssert(type -> {
-                ByteBuffer maskedValue = type.getMaskedValue();
-                type.validate(maskedValue);
-
-                Object composed = type.compose(maskedValue);
-                ByteBuffer decomposed = ((AbstractType) type).decompose(composed);
-                assertThat(decomposed).isEqualTo(maskedValue);
-            });
     }
 
     @Test
     public void empty()
     {
-        qt().forAll(genBuilder().build()).checkAssert(type -> {
+        qt().forAll(AbstractTypeGenerators.primitiveTypeGen()).checkAssert(type -> {
             if (type.allowsEmpty())
             {
                 type.validate(ByteBufferUtil.EMPTY_BYTE_BUFFER);
@@ -213,14 +153,11 @@ public class AbstractTypeTest
             {
                 assertThatThrownBy(() -> type.validate(ByteBufferUtil.EMPTY_BYTE_BUFFER)).isInstanceOf(MarshalException.class);
                 assertThatThrownBy(() -> type.getSerializer().validate(ByteBufferUtil.EMPTY_BYTE_BUFFER)).isInstanceOf(MarshalException.class);
-                // ByteSerializer returns null
-//                assertThatThrownBy(() -> type.compose(ByteBufferUtil.EMPTY_BYTE_BUFFER)).isInstanceOf(MarshalException.class);
             }
         });
     }
 
     @Test
-    @SuppressWarnings("rawtypes")
     public void allTypesCovered()
     {
         // this test just makes sure that all types are covered and no new type is left out
@@ -242,7 +179,6 @@ public class AbstractTypeTest
             throw new AssertionError("Uncovered types:\n" + sb);
     }
 
-    @SuppressWarnings("rawtypes")
     private boolean isTestType(Class<? extends AbstractType> klass)
     {
         String name = klass.getCanonicalName();
@@ -256,598 +192,7 @@ public class AbstractTypeTest
         if (domain == null) return false;
         CodeSource src = domain.getCodeSource();
         if (src == null) return false;
-        return "test".equals(new File(src.getLocation().getPath()).name());
-    }
-
-    @Test
-    public void unsafeSharedSerializer()
-    {
-        // For all types, make sure the serializer returned is unique to that type,
-        // this is required as some places, such as SetSerializer, cache at this level!
-        Map<TypeSerializer<?>, AbstractType<?>> lookup = new HashMap<>();
-        qt().forAll(genBuilder().withMaxDepth(0).build()).checkAssert(t -> {
-            AbstractType<?> old = lookup.put(t.getSerializer(), t);
-            // for frozen types, ignore the fact that the mapping breaks...  The reason this test exists is that
-            // org.apache.cassandra.db.marshal.AbstractType.comparatorSet needs to match the serializer, but when serialziers
-            // break this mapping they may cause the wrong comparator (happened in cases like uuid and lexecal uuid; which have different orderings!).
-            // Frozen types (as of this writing) do not change the sort ordering, so this simplification is fine...
-            if (old != null && !old.unfreeze().equals(t.unfreeze()))
-                throw new AssertionError(String.format("Different types detected that shared the same serializer: %s != %s", old.asCQL3Type(), t.asCQL3Type()));
-        });
-    }
-
-    @Test
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    public void eqHashSafe()
-    {
-        StringBuilder sb = new StringBuilder();
-        outter: for (Class<? extends AbstractType> type : reflections.getSubTypesOf(AbstractType.class))
-        {
-            if (Modifier.isAbstract(type.getModifiers()) || isTestType(type) || AbstractTypeGenerators.UNSUPPORTED.containsKey(type))
-                continue;
-            boolean hasEq = false;
-            boolean hasHashCode = false;
-            for (Class<? extends AbstractType> t = type; !t.equals(AbstractType.class); t = (Class<? extends AbstractType>) t.getSuperclass())
-            {
-                try
-                {
-                    t.getDeclaredMethod("getInstance");
-                    continue outter;
-                }
-                catch (NoSuchMethodException e)
-                {
-                    // ignore
-                }
-                try
-                {
-                    t.getDeclaredField("instance");
-                    continue outter;
-                }
-                catch (NoSuchFieldException e)
-                {
-                    // ignore
-                }
-                try
-                {
-                    t.getDeclaredMethod("equals", Object.class);
-                    hasEq = true;
-                }
-                catch (NoSuchMethodException e)
-                {
-                    // ignore
-                }
-                try
-                {
-                    t.getDeclaredMethod("hashCode");
-                    hasHashCode = true;
-                }
-                catch (NoSuchMethodException e)
-                {
-                    // ignore
-                }
-                if (hasEq && hasHashCode)
-                    continue outter;
-            }
-            sb.append("AbstractType must be safe for map keys, so must either be a singleton or define ");
-            if (!hasEq)
-                sb.append("equals");
-            if (!hasHashCode)
-            {
-                if (!hasEq)
-                    sb.append('/');
-                sb.append("hashCode");
-            }
-            sb.append("; ").append(type).append('\n');
-        }
-        if (sb.length() != 0)
-        {
-            sb.setLength(sb.length() - 1);
-            throw new AssertionError(sb.toString());
-        }
-    }
-
-    @Test
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    public void comparableBytes()
-    {
-        // decimal "normalizes" the data to compare, so primary columns "may" mutate the data, causing missmatches
-        // see CASSANDRA-18530
-        TypeGenBuilder baseline = genBuilder().withoutPrimitive(DecimalType.instance)
-                                              .withoutTypeKinds(COUNTER);
-        // composite requires all elements fit into Short.MAX_VALUE bytes
-        // so try to limit the possible expansion of types
-        Gen<AbstractType<?>> gen = baseline.withCompositeElementGen(new TypeGenBuilder(baseline).withDefaultSizeGen(1).withMaxDepth(1).build())
-                                   .build();
-        qt().withShrinkCycles(0).forAll(examples(1, gen)).checkAssert(example -> {
-            AbstractType type = example.type;
-            for (Object value : example.samples)
-            {
-                ByteBuffer bb = type.decompose(value);
-                for (ByteComparable.Version bcv : ByteComparable.Version.values())
-                {
-                    // LEGACY, // Encoding used in legacy sstable format; forward (value to byte-comparable) translation only
-                    // Legacy is a one-way conversion, so for this test ignore
-                    if (bcv == ByteComparable.Version.LEGACY)
-                        continue;
-                    // Test normal type APIs
-                    ByteSource.Peekable comparable = ByteSource.peekable(type.asComparableBytes(bb, bcv));
-                    if (comparable == null)
-                        throw new NullPointerException();
-                    ByteBuffer read;
-                    try
-                    {
-                        read = type.fromComparableBytes(comparable, bcv);
-                    }
-                    catch (Exception | Error e)
-                    {
-                        throw new AssertionError(String.format("Unable to parse comparable bytes for type %s and version %s; value %s", type.asCQL3Type(), bcv, type.toCQLString(bb)), e);
-                    }
-                    assertBytesEquals(read, bb, "fromComparableBytes(asComparableBytes(bb)) != bb; version %s", bcv);
-
-                    // test byte[] api
-                    byte[] bytes = ByteSourceInverse.readBytes(type.asComparableBytes(bb, bcv));
-                    assertBytesEquals(type.fromComparableBytes(ByteSource.peekable(ByteSource.fixedLength(bytes)), bcv), bb, "fromOrderedBytes(toOrderedBytes(bb)) != bb");
-                }
-            }
-        });
-    }
-
-    @Test
-    public void knowThySelf()
-    {
-        qt().withShrinkCycles(0).forAll(AbstractTypeGenerators.typeGen()).checkAssert(type -> {
-            assertThat(type.testAssignment(null, new ColumnSpecification(null, null, null, type))).isEqualTo(AssignmentTestable.TestResult.EXACT_MATCH);
-            assertThat(type.testAssignment(type)).isEqualTo(AssignmentTestable.TestResult.EXACT_MATCH);
-        });
-    }
-
-    @Test
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    public void json()
-    {
-        // Double type is special as NaN and Infinite are treated differently than other code paths as they are convered to null!
-        // This is fine in most cases, but when found in a collection, this is not allowed and can cause flakeyness
-        try (Releaser i1 = overridePrimitiveTypeSupport(DoubleType.instance,
-                                                        of(DoubleType.instance, doubles().between(Double.MIN_VALUE, Double.MAX_VALUE)));
-             Releaser i2 = overridePrimitiveTypeSupport(FloatType.instance,
-                                                        of(FloatType.instance, floats().between(Float.MIN_VALUE, Float.MAX_VALUE))))
-        {
-            Gen<AbstractType<?>> typeGen = genBuilder()
-                                           .withDefaultSetKey(AbstractTypeGenerators.withoutUnsafeEquality().withoutTypeKinds(COMPOSITE, DYNAMIC_COMPOSITE, COUNTER))
-                                           // toCQLLiteral is lossy, which causes deserialization to produce different bytes
-                                           .withoutPrimitive(DecimalType.instance)
-                                           // does not support toJSONString
-                                           .withoutTypeKinds(COMPOSITE, DYNAMIC_COMPOSITE, COUNTER)
-                                           .build();
-            qt().withShrinkCycles(0).forAll(examples(1, typeGen)).checkAssert(es -> {
-                AbstractType type = es.type;
-                for (Object example : es.samples)
-                {
-                    ByteBuffer bb = type.decompose(example);
-                    String json = type.toJSONString(bb, ProtocolVersion.CURRENT);
-                    ColumnMetadata column = fake(type);
-                    String cqlJson = "{\"" + column.name + "\": " + json + "}";
-                    try
-                    {
-                        Json.Prepared prepared = new Json.Literal(cqlJson).prepareAndCollectMarkers(null, Collections.singletonList(column), VariableSpecifications.empty());
-                        Term.Raw literal = prepared.getRawTermForColumn(column, false);
-                        assertThat(literal).isNotEqualTo(Constants.NULL_LITERAL);
-                        Term term = literal.prepare(column.ksName, column);
-                        ByteBuffer read = term.bindAndGet(QueryOptions.DEFAULT);
-                        assertBytesEquals(read, bb, "fromJSONString(toJSONString(bb)) != bb");
-                    }
-                    catch (Exception e)
-                    {
-                        throw new AssertionError("Unable to parse JSON for " + json + "; type " + type.asCQL3Type(), e);
-                    }
-                }
-            });
-        }
-    }
-
-    @Test
-    @SuppressWarnings("rawtypes")
-    public void nested()
-    {
-        Map<Class<? extends AbstractType>, Function<? super AbstractType<?>, Integer>> complexTypes = ImmutableMap.of(MapType.class, ignore -> 2,
-                                                                                                                      TupleType.class, t -> ((TupleType) t).size(),
-                                                                                                                      UserType.class, t -> ((UserType) t).size(),
-                                                                                                                      CompositeType.class, t -> ((CompositeType) t).types.size(),
-                                                                                                                      DynamicCompositeType.class, t -> ((DynamicCompositeType) t).size());
-        qt().withShrinkCycles(0).forAll(AbstractTypeGenerators.builder().withoutTypeKinds(PRIMITIVE, COUNTER).build()).checkAssert(type -> {
-            int expectedSize = complexTypes.containsKey(type.getClass()) ? complexTypes.get(type.getClass()).apply(type) : 1;
-            assertThat(type.subTypes()).hasSize(expectedSize);
-        });
-    }
-
-    @Test
-    @SuppressWarnings("rawtypes")
-    public void nestedDuration()
-    {
-        qt().forAll(AbstractTypeGenerators.builder()
-                                          .withoutTypeKinds(COUNTER)
-                                          .withPrimitives(DurationType.instance)
-                                          .build())
-            .checkAssert(type -> {
-                assertThat(type.referencesDuration()).isTrue();
-                assertThat(ReversedType.getInstance(type).referencesDuration()).isTrue();
-            });
-    }
-
-    @Test
-    public void nestedWithoutDuration()
-    {
-        qt().forAll(AbstractTypeGenerators.builder()
-                                          .withoutTypeKinds(PRIMITIVE, COUNTER)
-                                          .withoutPrimitive(DurationType.instance)
-                                          .build())
-            .checkAssert(type -> {
-                assertThat(type.referencesDuration()).isFalse();
-                assertThat(ReversedType.getInstance(type).referencesDuration()).isFalse();
-            });
-    }
-
-    /**
-     * @see <pre>CASSANDRA-18526: TupleType getString and fromString are not safe with string types</pre>
-     */
-    private static boolean containsUnsafeGetString(AbstractType<?> type)
-    {
-        type = type.unwrap();
-        if (type instanceof TupleType)
-        {
-            TupleType tt = (TupleType) type;
-            for (AbstractType<?> e : tt.subTypes())
-            {
-                AbstractType<?> unwrap = e.unwrap();
-                if (unwrap instanceof StringType || unwrap instanceof TupleType)
-                    return true;
-            }
-        }
-        else if (type instanceof DynamicCompositeType || type instanceof CompositeType)
-        {
-            for (AbstractType<?> e : type.subTypes())
-            {
-                AbstractType<?> unwrap = e.unwrap();
-                if (unwrap instanceof StringType)
-                    return true;
-            }
-        }
-        for (AbstractType<?> e : type.subTypes())
-        {
-            if (containsUnsafeGetString(e))
-                return true;
-        }
-        return false;
-    }
-
-    private boolean containsUnsafeToLiteral(AbstractType<?> type)
-    {
-        type = type.unwrap();
-        if (type instanceof DecimalType)
-            // toCQLLiteral is loss
-            return true;
-        for (AbstractType<?> e : type.subTypes())
-        {
-            if (containsUnsafeToLiteral(e))
-                return true;
-        }
-        return false;
-    }
-
-    @Test
-    public void typeParser()
-    {
-        Gen<AbstractType<?>> gen = genBuilder()
-                                   .withMaxDepth(1)
-                                   // UDTs produce bad type strings, which is required by org.apache.cassandra.io.sstable.SSTableHeaderFix
-                                   // fixing this may have bad side effects between 3.6 upgrading to 5.0...
-                                   .withoutTypeKinds(UDT)
-                                   .build();
-        qt().withShrinkCycles(0).forAll(gen).checkAssert(type -> {
-            AbstractType<?> parsed = TypeParser.parse(type.toString());
-            assertThat(parsed).describedAs("TypeParser mismatch:\nExpected: %s\nActual: %s", typeTree(type), typeTree(parsed)).isEqualTo(type);
-        });
-    }
-
-    @Test
-    public void toStringIsCQLYo()
-    {
-        cqlTypeSerde(type -> "'" + type.toString() + "'");
-    }
-
-    @Test
-    public void cqlTypeSerde()
-    {
-        cqlTypeSerde(type -> type.asCQL3Type().toString());
-    }
-
-    private static void cqlTypeSerde(Function<AbstractType<?>, String> cqlFunc)
-    {
-        // TODO : add UDT back
-        // exclude UDT from CQLTypeParser as the different toString methods do not produce a consistent types, unlike TypeParser
-        Gen<AbstractType<?>> gen = genBuilder()
-                                   .withDefaultSetKey(AbstractTypeGenerators.withoutUnsafeEquality().withoutTypeKinds(UDT))
-                                   .withoutTypeKinds(UDT)
-                                   .build();
-        qt().withShrinkCycles(0).forAll(gen).checkAssert(type -> {
-            // to -> from cql
-            String cqlType = cqlFunc.apply(type);
-            // just easier to read this way...
-            cqlType = cqlType.replaceAll("org.apache.cassandra.db.marshal.", "");
-            AbstractType<?> fromCQLTypeParser = CQLTypeParser.parse(null, cqlType, toTypes(extractUDTs(type)));
-            assertThat(fromCQLTypeParser)
-            .describedAs("CQL type %s parse did not match the expected type:\nExpected: %s\nActual: %s", cqlType, typeTree(type), typeTree(fromCQLTypeParser))
-            .isEqualTo(type);
-        });
-    }
-
-    @Test
-    public void serdeFromString()
-    {
-        // avoid empty bytes as fromString can't figure out what to do in cases such as tuple(bytes); the tuple getString = "" so was the column not defined or was it empty?
-        try (Releaser i1 = overridePrimitiveTypeSupport(BytesType.instance, of(BytesType.instance, Generators.bytes(1, 1024), FastByteOperations::compareUnsigned));
-             Releaser i2 = overridePrimitiveTypeSupport(AsciiType.instance, of(AsciiType.instance, SourceDSL.strings().ascii().ofLengthBetween(1, 1024), stringComparator(AsciiType.instance)));
-             Releaser i3 = overridePrimitiveTypeSupport(UTF8Type.instance, of(UTF8Type.instance, Generators.utf8(1, 1024), stringComparator(UTF8Type.instance))))
-        {
-            Gen<AbstractType<?>> typeGen = genBuilder()
-                                           // a type maybe safe, but for some container types, specific element types are unsafe
-                                           .withTypeFilter(type -> !containsUnsafeGetString(type))
-                                           // fromString(getString(bb)) does not work
-                                           .withoutPrimitive(DurationType.instance)
-                                           .withDefaultSetKey(AbstractTypeGenerators.withoutUnsafeEquality().withTypeFilter(type -> !containsUnsafeGetString(type)))
-                                           // composite requires all elements fit into Short.MAX_VALUE bytes
-                                           // so try to limit the possible expansion of types
-                                           .withCompositeElementGen(genBuilder().withoutPrimitive(DurationType.instance).withDefaultSizeGen(1).withMaxDepth(1).withTypeFilter(type -> !containsUnsafeGetString(type)).build())
-                                           .build();
-            qt().withShrinkCycles(0).forAll(examples(1, typeGen)).checkAssert(example -> {
-                AbstractType type = example.type;
-
-                for (Object expected : example.samples)
-                {
-                    ByteBuffer bb = type.decompose(expected);
-                    type.validate(bb);
-                    String str = type.getString(bb);
-                    assertBytesEquals(type.fromString(str), bb, "fromString(getString(bb)) != bb; %s", str);
-                }
-            });
-        }
-    }
-
-    @Test
-    public void serdeFromCQLLiteral()
-    {
-        Gen<AbstractType<?>> typeGen = genBuilder()
-                                       // parseLiteralType(toCQLLiteral(bb)) does not work
-                                       .withoutPrimitive(DurationType.instance)
-                                       .withDefaultSetKey(AbstractTypeGenerators.withoutUnsafeEquality())
-                                       // composite requires all elements fit into Short.MAX_VALUE bytes
-                                       // so try to limit the possible expansion of types
-                                       .withCompositeElementGen(genBuilder().withoutPrimitive(DurationType.instance).withDefaultSizeGen(1).withMaxDepth(1).build())
-                                       .build();
-        qt().withShrinkCycles(0).forAll(examples(1, typeGen)).checkAssert(example -> {
-            AbstractType type = example.type;
-
-            for (Object expected : example.samples)
-            {
-                ByteBuffer bb = type.decompose(expected);
-                type.validate(bb);
-
-                String literal = type.asCQL3Type().toCQLLiteral(bb);
-                ByteBuffer cqlBB = parseLiteralType(type, literal);
-                assertBytesEquals(cqlBB, bb, "Deserializing literal %s did not match expected bytes", literal);
-            }});
-    }
-
-    @Test
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    public void serde()
-    {
-        Gen<AbstractType<?>> typeGen = genBuilder()
-                                       .withDefaultSetKey(AbstractTypeGenerators.withoutUnsafeEquality())
-                                       // composite requires all elements fit into Short.MAX_VALUE bytes
-                                       // so try to limit the possible expansion of types
-                                       .withCompositeElementGen(genBuilder().withDefaultSizeGen(1).withMaxDepth(1).build())
-                                       .build();
-        qt().withShrinkCycles(0).forAll(examples(1, typeGen)).checkAssert(example -> {
-            AbstractType type = example.type;
-
-            for (Object expected : example.samples)
-            {
-                ByteBuffer bb = type.decompose(expected);
-                int position = bb.position();
-                type.validate(bb);
-                Object read = type.compose(bb);
-                assertThat(bb.position()).describedAs("ByteBuffer was mutated by %s", type).isEqualTo(position);
-                assertThat(read).isEqualTo(expected);
-
-                try (DataOutputBuffer out = DataOutputBuffer.scratchBuffer.get())
-                {
-                    type.writeValue(bb, out);
-                    ByteBuffer written = out.unsafeGetBufferAndFlip();
-                    DataInputPlus in = new DataInputBuffer(written, true);
-                    assertBytesEquals(type.readBuffer(in), bb, "readBuffer(writeValue(bb)) != bb");
-                    in = new DataInputBuffer(written, false);
-                    type.skipValue(in);
-                    assertThat(written.remaining()).isEqualTo(0);
-                }
-                catch (IOException e)
-                {
-                    throw new UncheckedIOException(e);
-                }
-            }
-        });
-    }
-
-    private static void assertBytesEquals(ByteBuffer actual, ByteBuffer expected, String msg, Object... args)
-    {
-        assertThat(ByteBufferUtil.bytesToHex(actual)).describedAs(msg, args).isEqualTo(ByteBufferUtil.bytesToHex(expected));
-    }
-
-    private static ColumnMetadata fake(AbstractType<?> type)
-    {
-        return new ColumnMetadata(null, null, new ColumnIdentifier("", true), type, 0, ColumnMetadata.Kind.PARTITION_KEY, null);
-    }
-
-    private static ByteBuffer parseLiteralType(AbstractType<?> type, String literal)
-    {
-        try
-        {
-            return type.asCQL3Type().fromCQLLiteral(literal);
-        }
-        catch (Exception e)
-        {
-            throw new AssertionError(String.format("Unable to parse CQL literal %s from type %s", literal, type.asCQL3Type()), e);
-        }
-    }
-
-    private static Types toTypes(Set<UserType> udts)
-    {
-        if (udts.isEmpty())
-            return Types.none();
-        Types.Builder builder = Types.builder();
-        for (UserType udt : udts)
-            builder.add(udt.unfreeze());
-        return builder.build();
-    }
-
-    private static ByteComparable fromBytes(AbstractType<?> type, ByteBuffer bb)
-    {
-        return version -> type.asComparableBytes(bb, version);
-    }
-
-    @Test
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    public void ordering()
-    {
-        TypeGenBuilder baseline = genBuilder()
-                                  .withoutPrimitive(DurationType.instance) // this uses byte ordering and vint, which makes the ordering effectivlly random from a user's point of view
-                                  .withoutTypeKinds(COUNTER); // counters don't allow ordering
-        // composite requires all elements fit into Short.MAX_VALUE bytes
-        // so try to limit the possible expansion of types
-        Gen<AbstractType<?>> types = baseline.withCompositeElementGen(new TypeGenBuilder(baseline).withDefaultSizeGen(1).withMaxDepth(1).build())
-                                             .build();
-        qt().withShrinkCycles(0).forAll(examples(10, types)).checkAssert(example -> {
-            AbstractType type = example.type;
-            List<ByteBuffer> actual = decompose(type, example.samples);
-            actual.sort(type);
-            List<ByteBuffer>[] byteOrdered = new List[ByteComparable.Version.values().length];
-            List<OrderedBytes>[] rawByteOrdered = new List[ByteComparable.Version.values().length];
-            for (int i = 0; i < byteOrdered.length; i++)
-            {
-                byteOrdered[i] = new ArrayList<>(actual);
-                ByteComparable.Version version = ByteComparable.Version.values()[i];
-                byteOrdered[i].sort((a, b) -> ByteComparable.compare(fromBytes(type, a), fromBytes(type, b), version));
-
-                rawByteOrdered[i] = actual.stream()
-                                          .map(bb -> new OrderedBytes(ByteSourceInverse.readBytes(fromBytes(type, bb).asComparableBytes(version)), bb))
-                                          .collect(Collectors.toList());
-                rawByteOrdered[i].sort(Comparator.naturalOrder());
-            }
-
-            example.samples.sort(comparator(type));
-            List<Object> real = new ArrayList<>(actual.size());
-            for (ByteBuffer bb : actual)
-                real.add(type.compose(bb));
-            assertThat(real).isEqualTo(example.samples);
-            List<Object>[] realBytesOrder = new List[byteOrdered.length];
-            for (int i = 0; i < realBytesOrder.length; i++)
-            {
-                ByteComparable.Version version = ByteComparable.Version.values()[i];
-                assertThat(compose(type, byteOrdered[i])).describedAs("Bad ordering for type %s", version).isEqualTo(real);
-                assertThat(compose(type, rawByteOrdered[i].stream().map(ob -> ob.src).collect(Collectors.toList()))).describedAs("Bad ordering for type %s", version).isEqualTo(real);
-            }
-        });
-    }
-
-    /**
-     * For {@link AbstractType#asComparableBytes(ByteBuffer, ByteComparable.Version)} not all versions can be inverted,
-     * but all versions must be comparable... so this class stores the ordered bytes and the original src.
-     */
-    private static class OrderedBytes implements Comparable<OrderedBytes>
-    {
-        private final byte[] orderedBytes;
-        private final ByteBuffer src;
-
-        private OrderedBytes(byte[] orderedBytes, ByteBuffer src)
-        {
-            this.orderedBytes = orderedBytes;
-            this.src = src;
-        }
-
-        @Override
-        public int compareTo(OrderedBytes o)
-        {
-            return FastByteOperations.compareUnsigned(orderedBytes, o.orderedBytes);
-        }
-    }
-
-    private static List<Object> compose(AbstractType<?> type, List<ByteBuffer> bbs)
-    {
-        List<Object> os = new ArrayList<>(bbs.size());
-        for (ByteBuffer bb : bbs)
-            os.add(type.compose(bb));
-        return os;
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Comparator<Object> comparator(AbstractType<?> type)
-    {
-        return (Comparator<Object>) AbstractTypeGenerators.comparator(type);
-    }
-
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    private List<ByteBuffer> decompose(AbstractType type, List<Object> value)
-    {
-        List<ByteBuffer> expected = new ArrayList<>(value.size());
-        for (int i = 0; i < value.size(); i++)
-            expected.add(type.decompose(value.get(i)));
-        return expected;
-    }
-
-    private static TypeGenBuilder genBuilder()
-    {
-        return AbstractTypeGenerators.builder()
-                                     // empty is a legacy from 2.x and is only allowed in special cases and not allowed in all... as this class tests all cases, need to limit this type out
-                                     .withoutEmpty();
-    }
-
-    private static Gen<Example> examples(int samples, Gen<AbstractType<?>> typeGen)
-    {
-        Gen<Example> gen = rnd -> {
-            AbstractType<?> type = typeGen.generate(rnd);
-            AbstractTypeGenerators.TypeSupport<?> support = AbstractTypeGenerators.getTypeSupport(type);
-            List<Object> list = new ArrayList<>(samples);
-            for (int i = 0; i < samples; i++)
-                list.add(support.valueGen.generate(rnd));
-            return new Example(type, list);
-        };
-        return gen.describedAs(e -> {
-            StringBuilder sb = new StringBuilder();
-            sb.append("Type:\n").append(typeTree(e.type));
-            sb.append("\nValues: ").append(e.samples);
-            return sb.toString();
-        });
-    }
-
-    private static class Example
-    {
-        private final AbstractType<?> type;
-        private final List<Object> samples;
-
-        private Example(AbstractType<?> type, List<Object> samples)
-        {
-            this.type = type;
-            this.samples = samples;
-        }
-
-        @Override
-        public String toString()
-        {
-            return "{" +
-                   "type=" + type +
-                   ", value=" + samples +
-                   '}';
-        }
+        return "test".equals(new File(src.getLocation().getPath()).getName());
     }
 
     @Test
@@ -861,33 +206,62 @@ public class AbstractTypeTest
     @Test
     public void testBackwardCompatibility()
     {
+        // verify we can load all the types (all the type classes are available)
+        cc40TypesCompatibility.assertLoaded();
+        legacyCC40TypesCompatibility.assertLoaded();
+        dse68cndbTypesCompatibility.assertLoaded();
+
+        // test whether this patch version is compatible with the last release for which the compatibility file was created
+        testBackwardCompatibility(currentTypesCompatibility, cc40TypesCompatibility);
+        // test whether we can downgrade to the last release for which the compatibility file was created
+        testBackwardCompatibility(cc40TypesCompatibility, currentTypesCompatibility);
+
+        // test the mutual compatibility between this and DSE
+        testBackwardCompatibility(currentTypesCompatibility, dse68cndbTypesCompatibility, t -> t != VectorType.class && t != DateRangeType.class, t -> ! ((t instanceof VectorType) || (t instanceof DateRangeType)));
+        testBackwardCompatibility(dse68cndbTypesCompatibility, currentTypesCompatibility, t -> t != VectorType.class && t != DateRangeType.class, t -> ! ((t instanceof VectorType) || (t instanceof DateRangeType)));
+
+        // test mutual compatibility between this and legacy CC
+        testBackwardCompatibility(currentTypesCompatibility, legacyCC40TypesCompatibility, t -> t != VectorType.class, t -> ! (t instanceof VectorType));
+        testBackwardCompatibility(legacyCC40TypesCompatibility, currentTypesCompatibility, t -> t != VectorType.class, t -> ! (t instanceof VectorType));
+    }
+
+    @Test
+    @Ignore("we are not compatible with OSS unfortunately so this test would fail")
+    public void testOSSCompatibility()
+    {
+        // verify we can load all the types (all the type classes are available)
         cassandra40TypesCompatibility.assertLoaded();
+
+        // check whether we can upgrade from OSS 4.0
         testBackwardCompatibility(currentTypesCompatibility, cassandra40TypesCompatibility);
-
-        cassandra41TypesCompatibility.assertLoaded();
-        testBackwardCompatibility(currentTypesCompatibility, cassandra41TypesCompatibility);
-
-        cassandra50TypesCompatibility.assertLoaded();
-        testBackwardCompatibility(currentTypesCompatibility, cassandra50TypesCompatibility);
     }
 
     public void testBackwardCompatibility(TypesCompatibility upgradeTo, TypesCompatibility upgradeFrom)
     {
+        testBackwardCompatibility(upgradeTo, upgradeFrom, t -> true, t -> true);
+    }
+
+    public void testBackwardCompatibility(TypesCompatibility upgradeTo, TypesCompatibility upgradeFrom, Predicate<Class<? extends AbstractType>> classFilter, Predicate<AbstractType<?>> typeFilter)
+    {
         SoftAssertions assertions = new SoftAssertionsWithLimit(100);
 
-        assertions.assertThat(upgradeTo.knownTypes()).containsAll(upgradeFrom.knownTypes());
-        assertions.assertThat(upgradeTo.primitiveTypes()).containsAll(upgradeFrom.primitiveTypes());
+        assertions.assertThat(upgradeTo.knownTypes().stream().filter(classFilter).collect(Collectors.toSet())).containsAll(upgradeFrom.knownTypes().stream().filter(classFilter).collect(Collectors.toSet()));
+        assertions.assertThat(upgradeTo.primitiveTypes().stream().filter(typeFilter).collect(Collectors.toSet())).containsAll(upgradeFrom.primitiveTypes().stream().filter(typeFilter).collect(Collectors.toSet()));
 
         // for compatibility, we ensure that this version can read values of all the types the previous version can write
         assertions.assertThat(upgradeTo.multiCellSupportingTypesForReading()).containsAll(upgradeFrom.multiCellSupportingTypes());
 
         forEachTypesPair(true, (l, r) -> {
-            if (upgradeFrom.expectCompatibleWith(l, r))
-                assertions.assertThat(upgradeTo.expectCompatibleWith(l, r)).describedAs(isCompatibleWithDesc(l, r)).isTrue();
-            if (upgradeFrom.expectSerializationCompatibleWith(l, r))
-                assertions.assertThat(upgradeTo.expectSerializationCompatibleWith(l, r)).describedAs(isSerializationCompatibleWithDesc(l, r)).isTrue();
-            if (upgradeFrom.expectValueCompatibleWith(l, r))
-                assertions.assertThat(upgradeTo.expectValueCompatibleWith(l, r)).describedAs(isValueCompatibleWithDesc(l, r)).isTrue();
+            if (typeFilter.test(l) && typeFilter.test(r))
+            {
+                if (upgradeFrom.expectCompatibleWith(l, r))
+                    assertions.assertThat(upgradeTo.expectCompatibleWith(l, r)).describedAs(isCompatibleWithDesc(l, r)).isTrue();
+// TODO after https://issues.apache.org/jira/browse/CASSANDRA-18760
+//            if (upgradeFrom.expectSerializationCompatibleWith(l, r))
+//                assertions.assertThat(upgradeTo.expectSerializationCompatibleWith(l, r)).describedAs(isSerializationCompatibleWithDesc(l, r)).isTrue();
+                if (upgradeFrom.expectValueCompatibleWith(l, r))
+                    assertions.assertThat(upgradeTo.expectValueCompatibleWith(l, r)).describedAs(isValueCompatibleWithDesc(l, r)).isTrue();
+            }
         });
 
         assertions.assertAll();
@@ -906,6 +280,11 @@ public class AbstractTypeTest
         assertions.assertAll();
     }
 
+    private static Path compatibilityFile(CassandraVersion version)
+    {
+        return BASE_OUTPUT_PATH.resolve(String.format("%s.%s.json.gz", version.major, version.minor));
+    }
+
     private static Path compatibilityFile(String version)
     {
         return BASE_OUTPUT_PATH.resolve(String.format("%s.json.gz", version));
@@ -915,7 +294,7 @@ public class AbstractTypeTest
     @Ignore
     public void testStoreAllCompatibleTypePairs() throws IOException
     {
-        currentTypesCompatibility.store(compatibilityFile(CASSANDRA_VERSION));
+        currentTypesCompatibility.store(compatibilityFile(CURRENT_VERSION));
     }
 
     private static void verifyTypesCompatibility(AbstractType left, AbstractType right, Gen rightGen, SoftAssertions assertions)
@@ -924,13 +303,14 @@ public class AbstractTypeTest
             return;
 
         verifyTypeSerializers(left, right, assertions);
+
         if (!left.isValueCompatibleWith(right))
             return;
 
-        ColumnMetadata rightColumn1 = new ColumnMetadata("k", "t", ColumnIdentifier.getInterned("c", false), right, ColumnMetadata.NO_POSITION, ColumnMetadata.Kind.REGULAR, null);
-        ColumnMetadata rightColumn2 = new ColumnMetadata("k", "t", ColumnIdentifier.getInterned("d", false), right, ColumnMetadata.NO_POSITION, ColumnMetadata.Kind.REGULAR, null);
-        ColumnMetadata leftColumn1 = new ColumnMetadata("k", "t", ColumnIdentifier.getInterned("c", false), left, ColumnMetadata.NO_POSITION, ColumnMetadata.Kind.REGULAR, null);
-        ColumnMetadata leftColumn2 = new ColumnMetadata("k", "t", ColumnIdentifier.getInterned("d", false), left, ColumnMetadata.NO_POSITION, ColumnMetadata.Kind.REGULAR, null);
+        ColumnMetadata rightColumn1 = new ColumnMetadata("k", "t", ColumnIdentifier.getInterned("c", false), right, ColumnMetadata.NO_POSITION, ColumnMetadata.Kind.REGULAR);
+        ColumnMetadata rightColumn2 = new ColumnMetadata("k", "t", ColumnIdentifier.getInterned("d", false), right, ColumnMetadata.NO_POSITION, ColumnMetadata.Kind.REGULAR);
+        ColumnMetadata leftColumn1 = new ColumnMetadata("k", "t", ColumnIdentifier.getInterned("c", false), left, ColumnMetadata.NO_POSITION, ColumnMetadata.Kind.REGULAR);
+        ColumnMetadata leftColumn2 = new ColumnMetadata("k", "t", ColumnIdentifier.getInterned("d", false), left, ColumnMetadata.NO_POSITION, ColumnMetadata.Kind.REGULAR);
 
         TableMetadata leftTable = TableMetadata.builder("k", "t").addPartitionKeyColumn("pk", EmptyType.instance).addColumn(leftColumn1).addColumn(leftColumn2).build();
         TableMetadata rightTable = TableMetadata.builder("k", "t").addPartitionKeyColumn("pk", EmptyType.instance).addColumn(rightColumn1).addColumn(rightColumn2).build();
@@ -952,7 +332,9 @@ public class AbstractTypeTest
                 // serialization compatibility means that we can read a cell written using right's type serializer with left's type serializer;
                 // this additinoally imposes the requirement for storing the buffer lenght in the serialized form if the value is of variable length
                 // as well as, either both types serialize into a single or multiple cells
-                if (left.isSerializationCompatibleWith(right))
+// TODO after https://issues.apache.org/jira/browse/CASSANDRA-18760
+//                if (left.isSerializationCompatibleWith(right))
+                if (left.isValueCompatibleWith(right) && left.valueLengthIfFixed() == right.valueLengthIfFixed() && left.isMultiCell() == right.isMultiCell())
                 {
                     if (!left.isMultiCell() && !right.isMultiCell())
                         verifySerializationCompatibilityForSimpleCells(left, right, v, rightTable, rightColumn1, rightHelper, leftHeader, leftHelper, leftColumn1);
@@ -1006,11 +388,12 @@ public class AbstractTypeTest
 
         assertions.assertThat(l.getSerializer()).describedAs(typeRelDesc("should have different serializer to", l, r)).isNotEqualTo(r.getSerializer());
     }
+
     private static int sign(int value)
     {
         return Integer.compare(value, 0);
     }
-    
+
     private static <T> void verifyComparison(Comparator<T> leftComparator, Comparator<T> rightComparator, T lv1, T lv2, T rv1, T rv2, int expectedResult, Function<String, Description> desc)
     {
         SoftAssertions checks = new SoftAssertions();
@@ -1187,11 +570,8 @@ public class AbstractTypeTest
                     {
                         assertions.assertThat(l.freeze()).isSameAs(l);
                         assertions.assertThat(unfreeze(l)).isSameAs(l);
-                        assertions.assertThat(unfreeze(l)).isEqualTo(l.unfreeze());
                     }
                 }
-
-                assertions.assertThat(l.allowsEmpty()).isEqualTo(allowsEmpty(l));
             }
         });
 
@@ -1232,8 +612,9 @@ public class AbstractTypeTest
                             out.append(" cmp");
                         if (l.isValueCompatibleWith(r))
                             out.append(" val");
-                        if (l.isSerializationCompatibleWith(r))
-                            out.append(" ser");
+// TODO after https://issues.apache.org/jira/browse/CASSANDRA-18760
+//                        if (l.isSerializationCompatibleWith(r))
+//                            out.append(" ser");
                         if (out.length() > 0)
                             return String.format("%s is%s compatible with %s", l, out, r);
                         else
@@ -1259,10 +640,11 @@ public class AbstractTypeTest
         return typeRelDesc("isValueCompatibleWith", left, right);
     }
 
-    private static Description isSerializationCompatibleWithDesc(AbstractType<?> left, AbstractType<?> right)
-    {
-        return typeRelDesc("isSerializationCompatibleWith", left, right);
-    }
+// TODO after https://issues.apache.org/jira/browse/CASSANDRA-18760
+//    private static Description isSerializationCompatibleWithDesc(AbstractType<?> left, AbstractType<?> right)
+//    {
+//        return typeRelDesc("isSerializationCompatibleWith", left, right);
+//    }
 
     /**
      * The instances of this class provides types compatibility checks valid for a certain version of Cassandra.
@@ -1291,7 +673,7 @@ public class AbstractTypeTest
         public <T extends AbstractType> void checkExpectedTypeCompatibility(T left, T right, SoftAssertions assertions)
         {
             assertions.assertThat(left.isCompatibleWith(right)).as(isCompatibleWithDesc(left, right)).isEqualTo(expectCompatibleWith(left, right));
-            assertions.assertThat(left.isSerializationCompatibleWith(right)).as(isSerializationCompatibleWithDesc(left, right)).isEqualTo(expectSerializationCompatibleWith(left, right));
+//            assertions.assertThat(left.isSerializationCompatibleWith(right)).as(isSerializationCompatibleWithDesc(left, right)).isEqualTo(expectSerializationCompatibleWith(left, right));
             assertions.assertThat(left.isValueCompatibleWith(right)).as(isValueCompatibleWithDesc(left, right)).isEqualTo(expectValueCompatibleWith(left, right));
         }
 
@@ -1299,7 +681,7 @@ public class AbstractTypeTest
 
         public abstract boolean expectValueCompatibleWith(AbstractType left, AbstractType right);
 
-        public abstract boolean expectSerializationCompatibleWith(AbstractType left, AbstractType right);
+//        public abstract boolean expectSerializationCompatibleWith(AbstractType left, AbstractType right);
 
         public abstract Set<Class<? extends AbstractType>> knownTypes();
 
@@ -1347,12 +729,12 @@ public class AbstractTypeTest
                     assertThat(l1.isCompatibleWith(r1)).isTrue();
                     compatibleWithMap.put(l.toString(), r.toString());
                 }
-
-                if (l.isSerializationCompatibleWith(r))
-                {
-                    assertThat(l1.isSerializationCompatibleWith(r1)).isTrue();
-                    serializationCompatibleWithMap.put(l.toString(), r.toString());
-                }
+// TODO after https://issues.apache.org/jira/browse/CASSANDRA-18760
+//                if (l.isSerializationCompatibleWith(r))
+//                {
+//                    assertThat(l1.isSerializationCompatibleWith(r1)).isTrue();
+//                    serializationCompatibleWithMap.put(l.toString(), r.toString());
+//                }
 
                 if (l.isValueCompatibleWith(r))
                 {
@@ -1363,7 +745,6 @@ public class AbstractTypeTest
 
             // make sure that all pairs were covered
             assertThat(knownPairs.entries()).isEmpty();
-
             assertThat(typeToStringMap).hasSameSizeAs(stringToTypeMap);
 
             JSONObject json = new JSONObject();
@@ -1416,7 +797,7 @@ public class AbstractTypeTest
                 if (refersExcludedType(typeName))
                     return Stream.empty();
                 try
-        {
+                {
                     return Stream.of(consumer.apply(typeName));
                 }
                 catch (InterruptedException ex)
@@ -1442,10 +823,10 @@ public class AbstractTypeTest
 
         private Set<Class<? extends AbstractType>> getTypesArray(Object json)
         {
-            return ((JSONArray) json).stream()
-                                     .map(String.class::cast)
-                                     .flatMap(safeParse(((ThrowingFunction<String, Class<? extends AbstractType>, Exception>) className -> (Class<? extends AbstractType>) Class.forName(className))))
-                                     .collect(Collectors.toUnmodifiableSet());
+            return (Set<Class<? extends AbstractType>>) ((JSONArray) json).stream()
+                                                                          .map(String.class::cast)
+                                                                          .flatMap(safeParse(((ThrowingFunction<String, Class<?>, Exception>) Class::forName)))
+                                                                          .collect(Collectors.toSet());
         }
 
         private Multimap<AbstractType<?>, AbstractType<?>> getTypesCompatibilityMultimap(Object json)
@@ -1472,7 +853,7 @@ public class AbstractTypeTest
                 multiCellSupportingTypes = getTypesArray(json.get(MULTICELL_TYPES_KEY));
                 multiCellSupportingTypesForReading = getTypesArray(json.get(MULTICELL_TYPES_FOR_READING_KEY));
                 unsupportedTypes = getTypesArray(json.get(UNSUPPORTED_TYPES_KEY));
-                primitiveTypes = ((JSONArray) json.get(PRIMITIVE_TYPES_KEY)).stream().flatMap(safeParse(TypeParser::parse)).collect(Collectors.toSet());
+                primitiveTypes = (Set<AbstractType<?>>) ((JSONArray) json.get(PRIMITIVE_TYPES_KEY)).stream().flatMap(safeParse(TypeParser::parse)).collect(Collectors.toSet());
                 compatibleWith = getTypesCompatibilityMultimap(json.get(COMPATIBLE_TYPES_KEY));
                 serializationCompatibleWith = getTypesCompatibilityMultimap(json.get(SERIALIZATION_COMPATIBLE_TYPES_KEY));
                 valueCompatibleWith = getTypesCompatibilityMultimap(json.get(VALUE_COMPATIBLE_TYPES_KEY));
@@ -1497,20 +878,26 @@ public class AbstractTypeTest
         @Override
         public boolean expectCompatibleWith(AbstractType left, AbstractType right)
         {
+            if (left.equals(right))
+                return true;
             return compatibleWith.containsEntry(left, right);
         }
 
         @Override
         public boolean expectValueCompatibleWith(AbstractType left, AbstractType right)
         {
+            if (left.equals(right))
+                return true;
             return valueCompatibleWith.containsEntry(left, right);
         }
-
-        @Override
-        public boolean expectSerializationCompatibleWith(AbstractType left, AbstractType right)
-        {
-            return serializationCompatibleWith.containsEntry(left, right);
-        }
+// TODO after https://issues.apache.org/jira/browse/CASSANDRA-18760
+//        @Override
+//        public boolean expectSerializationCompatibleWith(AbstractType left, AbstractType right)
+//        {
+//            if (left.equals(right))
+//              return true;
+//            return serializationCompatibleWith.containsEntry(left, right);
+//        }
 
         @Override
         public Set<Class<? extends AbstractType>> knownTypes()
@@ -1578,6 +965,10 @@ public class AbstractTypeTest
             primitiveValueCompatibleWith.put(BytesType.instance, TimestampType.instance);
             primitiveValueCompatibleWith.put(BytesType.instance, UTF8Type.instance);
             primitiveValueCompatibleWith.put(BytesType.instance, UUIDType.instance);
+            primitiveValueCompatibleWith.put(BytesType.instance, DateRangeType.instance);
+            primitiveValueCompatibleWith.put(BytesType.instance, PointType.instance);
+            primitiveValueCompatibleWith.put(BytesType.instance, LineStringType.instance);
+            primitiveValueCompatibleWith.put(BytesType.instance, PolygonType.instance);
             primitiveValueCompatibleWith.put(IntegerType.instance, Int32Type.instance);
             primitiveValueCompatibleWith.put(IntegerType.instance, LongType.instance);
             primitiveValueCompatibleWith.put(IntegerType.instance, TimestampType.instance);
@@ -1677,10 +1068,11 @@ public class AbstractTypeTest
             return expectedCompatibility(left, right, primitiveValueCompatibleWith::containsEntry, AbstractType::isValueCompatibleWith);
         }
 
-        @Override
-        public boolean expectSerializationCompatibleWith(AbstractType left, AbstractType right)
-        {
-            return expectedCompatibility(left, right, primitiveSerializationCompatibleWith::containsEntry, AbstractType::isSerializationCompatibleWith);
-        }
+// TODO after https://issues.apache.org/jira/browse/CASSANDRA-18760
+//        @Override
+//        public boolean expectSerializationCompatibleWith(AbstractType left, AbstractType right)
+//        {
+//            return expectedCompatibility(left, right, primitiveSerializationCompatibleWith::containsEntry, AbstractType::isSerializationCompatibleWith);
+//        }
     }
 }

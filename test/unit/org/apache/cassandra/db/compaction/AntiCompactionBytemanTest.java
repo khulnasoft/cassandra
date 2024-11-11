@@ -23,6 +23,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -47,7 +48,6 @@ import org.jboss.byteman.contrib.bmunit.BMRule;
 import org.jboss.byteman.contrib.bmunit.BMRules;
 import org.jboss.byteman.contrib.bmunit.BMUnitRunner;
 
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 
@@ -126,7 +126,7 @@ public class AntiCompactionBytemanTest extends CQLTester
 
         try (LifecycleTransaction txn = getCurrentColumnFamilyStore().getTracker().tryModify(getCurrentColumnFamilyStore().getLiveSSTables(), OperationType.ANTICOMPACTION))
         {
-            CompactionManager.instance.antiCompactGroup(getCurrentColumnFamilyStore(), ranges, txn, nextTimeUUID(), () -> false);
+            CompactionManager.instance.antiCompactGroup(getCurrentColumnFamilyStore(), ranges, txn, UUID.randomUUID(), () -> false);
         }
         finished.set(true);
         t.join();

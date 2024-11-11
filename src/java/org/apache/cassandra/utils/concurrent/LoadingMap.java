@@ -18,58 +18,234 @@
 
 package org.apache.cassandra.utils.concurrent;
 
-import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 
 import com.google.common.annotations.VisibleForTesting;
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
 
 /**
- * An extension of {@link NonBlockingHashMap} where all values are wrapped by {@link Future}.
+ * An extension of {@link NonBlockingHashMap} where all values are wrapped by {@link CompletableFuture}.
  * <p>
- * The main purpose of this class is to provide the functionality of concurrent hash map which may perform operations like
- * {@link ConcurrentHashMap#computeIfAbsent(Object, Function)} and {@link ConcurrentHashMap#computeIfPresent(Object, BiFunction)}
- * with synchronization scope reduced to the single key - that is, when dealing with a single key, unlike
- * {@link ConcurrentHashMap} we do not lock the whole map for the time the mapping function is running. This may help
- * to avoid the case when we want to load/unload a value for a key K1 while loading/unloading a value for a key K2. Such
- * scenario is forbidden in case of {@link ConcurrentHashMap} and leads to a deadlock. On the other hand, {@link NonBlockingHashMap}
- * does not guarantee at-most-once semantics of running the mapping function for a single key.
- *
- * @param <K>
- * @param <V>
+ * The main purpose of this class is to provide the functionality of concurrent hash map which may perform operations
+ * like {@link ConcurrentHashMap#compute(Object, BiFunction)} with synchronization scope reduced to the single key -
+ * that is, when dealing with a single key, unlike {@link ConcurrentHashMap} the whole map is not locked for the time
+ * the mapping function is running. This may help to avoid the case when loading/unloading a value for a key K1 while
+ * loading/unloading a value for a key K2. Such scenario is forbidden in case of {@link ConcurrentHashMap} and leads to
+ * a deadlock. On the other hand, {@link NonBlockingHashMap} does not guarantee at-most-once semantics of running the
+ * mapping function for a single key.
  */
 public class LoadingMap<K, V>
 {
-    private final NonBlockingHashMap<K, Future<V>> internalMap = new NonBlockingHashMap<>();
+    // The map of futures lets us synchronize on per key basis rather than synchronizing the whole map.
+    // It works in the way that when there is an ongoing computation (update) on a key, the other thread
+    // trying to access that key recevies an incomplete future and needs to wait until the computation is done.
+    // This way we can achieve serial execution for each key while different keys can be processed concurrently.
+    // It also ensures exactly-once semantics for the update operation.
+    private final Map<K, CompletableFuture<V>> internalMap;
+
+    public LoadingMap()
+    {
+        this.internalMap = new NonBlockingHashMap<>();
+    }
+
+    public LoadingMap(int initialSize)
+    {
+        this.internalMap = new NonBlockingHashMap<>(initialSize);
+    }
 
     /**
-     * Returns a promise for the given key or null if there is nothing associated with the key.
-     * <p/>if the promise is not fulfilled, it means that there a loading process associated with the key
-     * <p/>if the promise is fulfilled with {@code null} value, it means that there is an unloading process associated with the key
-     * <p/>if the promise is fulfilled with a failure, it means that a loading process associated with the key failed
-     * but the exception was not propagated yet (a failed promise is eventually removed from the map)
+     * Recomputes the given object in the map in a thread-safe way.
+     * The remapping function is applied for the entry of the provided key with the following rules:
+     * - if entry exists, it is passed to the remapping function
+     * - if entry does not exist, null is passed to the remapping function
+     * - if the remapping function returns non-null value, the entry is added or replaced
+     * - if the remapping function returns null value, the entry is removed
+     * <p>
+     * The remapping function is guaranteed to be applied exactly once.
+     * <p>
+     * The method blocks until the update is applied. The method waits for the ongoing updates for the same key, but
+     * it does not wait for any updates for other keys.
      */
+    public V compute(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction)
+    {
+        CompletableFuture<V> newEntry = new CompletableFuture<>();
+        CompletableFuture<V> previousEntry = replaceEntry(key, newEntry, false, false);
+        return updateOrRemoveEntry(key, remappingFunction, previousEntry, newEntry);
+    }
+
+    /**
+     * Similar to {@link #compute(Object, BiFunction)} but the mapping function is applied only if there is no existing
+     * entry in the map. Thus, the mapping function will be applied at-most-once.
+     */
+    public V computeIfAbsent(K key, Function<? super K, ? extends V> mappingFunction)
+    {
+        CompletableFuture<V> newEntry = new CompletableFuture<>();
+        CompletableFuture<V> previousEntry = replaceEntry(key, newEntry, false, true);
+        if (previousEntry != null)
+            return previousEntry.join();
+
+        return updateOrRemoveEntry(key, (k, v) -> mappingFunction.apply(k), previousEntry, newEntry);
+    }
+
+    /**
+     * Similar to {@link #compute(Object, BiFunction)} but the remapping function is applied only if there is existing
+     * item in the map. Thus, the remapping function will be applied at-most-once and the value parameter will never be
+     * {@code null}.
+     */
+    public V computeIfPresent(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction)
+    {
+        CompletableFuture<V> newEntry = new CompletableFuture<>();
+        CompletableFuture<V> previousEntry = replaceEntry(key, newEntry, true, false);
+        if (previousEntry == null)
+            return null;
+
+        return updateOrRemoveEntry(key, remappingFunction, previousEntry, newEntry);
+    }
+
+    /**
+     * Safely replaces the future entry in the internal map, reattempting if the existing entry resolves to {@code null},
+     *
+     * @param key           key for which the entry is to be replaced
+     * @param newEntry      new entry to be put into the map
+     * @param skipIfMissing if set, the entry will be replaced only if there is an existing entry in the map
+     *                      (which resolves to a non-null value); otherwise, the method returns {@code null}
+     * @param skipIfExists  if set, the entry will be put into the map only if there is no existing entry (which resolves
+     *                      to a non-null value); otherwise, the method returns the existing entry
+     * @return the existing entry or {@code null} if there was no entry in the map
+     */
+    private CompletableFuture<V> replaceEntry(K key, CompletableFuture<V> newEntry, boolean skipIfMissing, boolean skipIfExists)
+    {
+        CompletableFuture<V> previousEntry;
+        V previousValue;
+        do
+        {
+            previousEntry = internalMap.get(key);
+
+            if (previousEntry == null)
+            {
+                if (skipIfMissing || internalMap.putIfAbsent(key, newEntry) == null)
+                    // skip-if-missing: break fast if we are aiming to remove the entry - if it does not exist, there is nothing to do
+                    // put-if-abset: there were no entry for the provided key, so we put a promise there and break
+                    return null;
+            }
+            else
+            {
+                previousValue = previousEntry.join();
+
+                if (previousValue != null)
+                {
+                    if (skipIfExists || internalMap.replace(key, previousEntry, newEntry))
+                        // skip-if-exist: break fast if we are aiming to compute a new entry only if it is missing
+                        // replace: there was a legitmate entry with a non-null value - we replace it with a promise and break
+                        return previousEntry;
+                }
+
+                // otherwise, if previousValue == null, some other thread deleted the entry in the meantime; we need
+                // to try again because yet another thread might have attempted to do something for that key
+            }
+        } while (true);
+    }
+
+    /**
+     * Applies the transformation on entry in a safe way. If the transformation throws an exception, the previous state
+     * is recovered.
+     *
+     * @param key               key for which we process entries
+     * @param remappingFunction remapping function which gets the key, the current entry value and is expected to return
+     *                          a new value or null if the entry is to be removed
+     * @param previousEntry     previous entry, which is no longer in the map but its value is already resolved and non-null
+     * @param newEntry          new entry, which is already in the map and is a non-completed promise
+     * @return the resolved value of the new entry
+     */
+    private V updateOrRemoveEntry(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction, CompletableFuture<V> previousEntry, CompletableFuture<V> newEntry)
+    {
+        V previousValue = previousEntry != null ? previousEntry.join() : null;
+
+        try
+        {
+            // apply the provided remapping function
+            V newValue = remappingFunction.apply(key, previousValue);
+            if (newValue == null)
+            {
+                // null result means we should remove the entry
+                CompletableFuture<V> removedEntry = internalMap.remove(key);
+                newEntry.complete(null);
+                assert removedEntry == newEntry;
+                return null;
+            }
+            else
+            {
+                // non-null result means we should complete the new entry promise with the returned value
+                newEntry.complete(newValue);
+                return newValue;
+            }
+        }
+        catch (RuntimeException ex)
+        {
+            // in case of exception (which may happen only in remapping function), we simply revert the change and
+            // rethrow the exception
+            if (previousEntry != null)
+            {
+                // if the entry existed before, the new entry promise is simply completed with the old value
+                newEntry.complete(previousValue);
+            }
+            else
+            {
+                // if the entry did not exist before, the new entry is removed and promise is completed with null, which
+                // tells other threads waiting for the promise completion to try again
+                CompletableFuture<V> f = internalMap.remove(key);
+                assert f == newEntry;
+                newEntry.complete(null);
+            }
+
+            throw ex;
+        }
+    }
+
     @VisibleForTesting
-    Future<V> get(K key)
+    Future<V> getUnsafe(K key)
     {
         return internalMap.get(key);
     }
 
-    /**
-     * Get a value for a given key. Returns a non-null object only if there is a successfully initialized value associated,
-     * with the provided key. It returns {@code null} if there is no value for the key, or the value is being initialized
-     * or removed. It does not throw if the last attempt to initialize the value failed.
-     */
     public V getIfReady(K key)
     {
-        Future<V> future = internalMap.get(key);
-        return future != null ? future.getNow() : null;
+        CompletableFuture<V> f = internalMap.get(key);
+        return f != null ? f.getNow(null) : null;
+    }
+
+    public V get(K key)
+    {
+        while (true)
+        {
+            CompletableFuture<V> entry = internalMap.get(key);
+            if (entry == null)
+                // value not found
+                return null;
+
+            V value = entry.join();
+            if (value != null)
+                return value;
+
+            // we need to retry because info == null means that the entry got removed
+            Thread.yield();
+        }
+    }
+
+    public Stream<V> valuesStream()
+    {
+        return internalMap.keySet().stream().map(this::get).filter(Objects::nonNull);
     }
 
     /**
@@ -86,55 +262,19 @@ public class LoadingMap<K, V>
      * throws exception, it is rethrown by this method. In both cases nothing gets added to the map.
      * <p/>
      * It is allowed to nest loading for a different key, though nested loading for the same key results in a deadlock.
+     * <p/>
+     * Note that this is just a special case of {@link #computeIfAbsent(Object, Function)} which would just throw
+     * {@link NullPointerException} if the mapping function returns {@code null}. This method is there mostly to ensure
+     * parity with OSS implementation.
      */
     public V blockingLoadIfAbsent(K key, Supplier<? extends V> loadFunction) throws RuntimeException
     {
-        while (true)
-        {
-            Future<V> future = internalMap.get(key);
-            boolean attemptedInThisThread = false;
-            if (future == null)
-            {
-                AsyncPromise<V> newEntry = new AsyncPromise<>();
-                future = internalMap.putIfAbsent(key, newEntry);
-                if (future == null)
-                {
-                    // We managed to create an entry for the value. Now initialize it.
-                    attemptedInThisThread = true;
-                    future = newEntry;
-                    try
-                    {
-                        V v = loadFunction.get();
-                        if (v == null)
-                            throw new NullPointerException("The mapping function returned null");
-                        else
-                            newEntry.setSuccess(v);
-                    }
-                    catch (Throwable t)
-                    {
-                        newEntry.setFailure(t);
-                        // Remove future so that construction can be retried later
-                        internalMap.remove(key, future);
-                    }
-                }
-
-                // Else some other thread beat us to it, but we now have the reference to the future which we can wait for.
-            }
-
-            V v = future.awaitUninterruptibly().getNow();
-
-            if (v != null) // implies success
-                return v;
-
-            if (attemptedInThisThread)
-                // Rethrow if the failing attempt was initiated by us (failed and attemptedInThisThread)
-                future.rethrowIfFailed();
-
-            // Retry in other cases, that is, if blockingUnloadIfPresent was called in the meantime
-            // (success and getNow == null) hoping that unloading gets finished soon, and if the concurrent attempt
-            // to load entry fails
-            Thread.yield();
-        }
+        return computeIfAbsent(key, k -> {
+            V result = loadFunction.get();
+            if (result == null)
+                throw new NullPointerException("The mapping function returned null");
+            return result;
+        });
     }
 
     /**
@@ -145,6 +285,13 @@ public class LoadingMap<K, V>
      * When unload function fails, the value is removed from the map anyway and the failure is rethrown.
      * <p/>
      * When the key was not found, the method returns {@code null}.
+     * <p>
+     * Note that this has slightly different semantics than {@link #computeIfPresent(Object, BiFunction)} where
+     * the mapping function returns {@code null} - in particular, the value is removed from the map regardless the
+     * mapping function succeedes or not. The value removed from the map (if existed) is returned (unlike in case of
+     * {@link #computeIfPresent(Object, BiFunction)} which always return new value - {@code null} in case of removing).
+     * If the mapping function fails, the value associated with the provided key (if existed) is encapsulated in the
+     * exception.
      *
      * @throws UnloadExecutionException when the unloading failed to complete - this is checked exception because
      *                                  the value is removed from the map regardless of the result of unloading;
@@ -152,35 +299,24 @@ public class LoadingMap<K, V>
      */
     public V blockingUnloadIfPresent(K key, Consumer<? super V> unloadFunction) throws UnloadExecutionException
     {
-        Promise<V> droppedFuture = new AsyncPromise<V>().setSuccess(null);
-
-        Future<V> existingFuture;
-        do
-        {
-            existingFuture = internalMap.get(key);
-            if (existingFuture == null || existingFuture.isDone() && existingFuture.getNow() == null)
-                return null;
-        } while (!internalMap.replace(key, existingFuture, droppedFuture));
-
-        V v = existingFuture.awaitUninterruptibly().getNow();
-        try
-        {
-            if (v == null)
-                // which means that either the value failed to load or a concurrent attempt to unload already did the work
-                return null;
-
-            unloadFunction.accept(v);
-            return v;
-        }
-        catch (Throwable t)
-        {
-            throw new UnloadExecutionException(v, t);
-        }
-        finally
-        {
-            Future<V> future = internalMap.remove(key);
-            assert future == droppedFuture;
-        }
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicReference<V> value = new AtomicReference<>();
+        computeIfPresent(key, (k, v) -> {
+            try
+            {
+                value.set(v);
+                unloadFunction.accept(v);
+            }
+            catch (Throwable t)
+            {
+                failure.set(t);
+            }
+            return null;
+        });
+        if (failure.get() == null)
+            return value.get();
+        else
+            throw new UnloadExecutionException(value.get(), failure.get());
     }
 
     /**
@@ -200,10 +336,5 @@ public class LoadingMap<K, V>
         {
             return (T) value;
         }
-    }
-
-    public Map<K, Future<V>> copyInternal()
-    {
-        return new HashMap<K, Future<V>>(internalMap);
     }
 }

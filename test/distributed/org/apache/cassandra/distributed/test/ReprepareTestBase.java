@@ -29,14 +29,14 @@ import java.util.function.BiConsumer;
 import com.google.common.collect.Iterators;
 import org.junit.Assert;
 
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.Host;
-import com.datastax.driver.core.HostDistance;
-import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.Session;
-import com.datastax.driver.core.Statement;
-import com.datastax.driver.core.exceptions.DriverInternalError;
-import com.datastax.driver.core.policies.LoadBalancingPolicy;
+import com.khulnasoft.driver.core.Cluster;
+import com.khulnasoft.driver.core.Host;
+import com.khulnasoft.driver.core.HostDistance;
+import com.khulnasoft.driver.core.PreparedStatement;
+import com.khulnasoft.driver.core.Session;
+import com.khulnasoft.driver.core.Statement;
+import com.khulnasoft.driver.core.exceptions.DriverInternalError;
+import com.khulnasoft.driver.core.policies.LoadBalancingPolicy;
 import net.bytebuddy.ByteBuddy;
 import net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
 import net.bytebuddy.implementation.FixedValue;
@@ -79,7 +79,7 @@ public class ReprepareTestBase extends TestBaseImpl
                 // 1 has old behaviour
                 for (int firstContact : new int[]{ 1, 2 })
                 {
-                    try (com.datastax.driver.core.Cluster cluster = com.datastax.driver.core.Cluster.builder()
+                    try (com.khulnasoft.driver.core.Cluster cluster = com.khulnasoft.driver.core.Cluster.builder()
                                                                                                     .addContactPoint("127.0.0.1")
                                                                                                     .addContactPoint("127.0.0.2")
                                                                                                     .withLoadBalancingPolicy(lbp)
@@ -129,7 +129,7 @@ public class ReprepareTestBase extends TestBaseImpl
             ForceHostLoadBalancingPolicy lbp = new ForceHostLoadBalancingPolicy();
 
             for (int firstContact : new int[]{ 1, 2 })
-                try (com.datastax.driver.core.Cluster cluster = com.datastax.driver.core.Cluster.builder()
+                try (com.khulnasoft.driver.core.Cluster cluster = com.khulnasoft.driver.core.Cluster.builder()
                                                                                                 .addContactPoint("127.0.0.1")
                                                                                                 .addContactPoint("127.0.0.2")
                                                                                                 .withLoadBalancingPolicy(lbp)

@@ -29,7 +29,6 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
-import org.apache.cassandra.Util;
 import org.apache.cassandra.config.Config.DiskFailurePolicy;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
@@ -47,13 +46,13 @@ import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.io.FSError;
 import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
-import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.format.ForwardingSSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.SSTableReadsListener;
 import org.apache.cassandra.service.CassandraDaemon;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.Throwables;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.apache.cassandra.distributed.api.Feature.GOSSIP;
 import static org.apache.cassandra.distributed.api.Feature.NATIVE_PROTOCOL;
 import static org.apache.cassandra.distributed.api.Feature.NETWORK;
@@ -102,8 +101,6 @@ public class JVMStabilityInspectorThrowableTest extends TestBaseImpl
         String table = policy.name();
         try (final Cluster cluster = init(getCluster(policy).start()))
         {
-            cluster.setUncaughtExceptionsFilter(t -> Throwables.anyCauseMatches(
-            t, t2 -> Arrays.asList(CorruptSSTableException.class.getCanonicalName(), FSReadError.class.getCanonicalName()).contains(t2.getClass().getCanonicalName())));
             IInvokableInstance node = cluster.get(1);
             boolean[] setup = node.callOnInstance(() -> {
                 CassandraDaemon instanceForTesting = CassandraDaemon.getInstanceForTesting();
@@ -192,7 +189,7 @@ public class JVMStabilityInspectorThrowableTest extends TestBaseImpl
     {
         node.runOnInstance(() -> {
             ColumnFamilyStore cf = Keyspace.open(keyspace).getColumnFamilyStore(table);
-            Util.flush(cf);
+            cf.forceBlockingFlush(UNIT_TESTS);
 
             Set<SSTableReader> remove = cf.getLiveSSTables();
             Set<SSTableReader> replace = new HashSet<>();
@@ -222,21 +219,22 @@ public class JVMStabilityInspectorThrowableTest extends TestBaseImpl
         }
 
         @Override
-        public UnfilteredRowIterator rowIterator(DecoratedKey key, Slices slices, ColumnFilter selectedColumns, boolean reversed, SSTableReadsListener listener)
+        public UnfilteredRowIterator iterator(DecoratedKey key, Slices slices, ColumnFilter selectedColumns, boolean reversed, SSTableReadsListener listener)
         {
             if (shouldThrowCorrupted)
                 throw throwCorrupted();
             throw throwFSError();
         }
 
+
         private CorruptSSTableException throwCorrupted()
         {
-            throw new CorruptSSTableException(new IOException("failed to get position"), descriptor.baseFile());
+            throw new CorruptSSTableException(new IOException("failed to get position"), descriptor.baseFileUri());
         }
 
         private FSError throwFSError()
         {
-            throw new FSReadError(new IOException("failed to get position"), descriptor.baseFile());
+            throw new FSReadError(new IOException("failed to get position"), descriptor.baseFilename());
         }
     }
 }

@@ -20,54 +20,51 @@ package org.apache.cassandra.db.marshal;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Stream;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
-import static org.junit.Assert.fail;
-
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.partitions.Partition;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.Row;
-import org.apache.cassandra.db.partitions.ImmutableBTreePartition;
 import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.serializers.MarshalException;
-import org.apache.cassandra.utils.*;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.UUIDGen;
 import org.assertj.core.api.Assertions;
+
+import static org.junit.Assert.fail;
 
 public class DynamicCompositeTypeTest
 {
     private static final String KEYSPACE1 = "DynamicCompositeType";
     private static final String CF_STANDARDDYNCOMPOSITE = "StandardDynamicComposite";
-    public static Map<Byte, AbstractType<?>> aliases = new HashMap<>();
 
-    private static final DynamicCompositeType comparator;
-    static
-    {
-        aliases.put((byte)'b', BytesType.instance);
-        aliases.put((byte)'B', ReversedType.getInstance(BytesType.instance));
-        aliases.put((byte)'t', TimeUUIDType.instance);
-        aliases.put((byte)'T', ReversedType.getInstance(TimeUUIDType.instance));
-        comparator = DynamicCompositeType.getInstance(aliases);
-    }
+    public final static Map<Byte, AbstractType<?>> aliases = ImmutableMap.<Byte, AbstractType<?>>builder()
+                                                             .put((byte) 'b', BytesType.instance)
+                                                             .put((byte) 'B', ReversedType.getInstance(BytesType.instance))
+                                                             .put((byte) 't', TimeUUIDType.instance)
+                                                             .put((byte) 'T', ReversedType.getInstance(TimeUUIDType.instance))
+                                                             .build();
 
-    private static final int UUID_COUNT = 3;
-    public static final UUID[] uuids = new UUID[UUID_COUNT];
-    static
-    {
-        for (int i = 0; i < UUID_COUNT; ++i)
-            uuids[i] = nextTimeUUID().asUUID();
-    }
+    public static final DynamicCompositeType comparator = DynamicCompositeType.getInstance(aliases);
+
+    public static final int UUID_COUNT = 3;
+    public static final UUID[] uuids = Stream.generate(UUIDGen::getTimeUUID).limit(UUID_COUNT).toArray(UUID[]::new);
 
     @BeforeClass
     public static void defineSchema() throws ConfigurationException
@@ -209,8 +206,8 @@ public class DynamicCompositeTypeTest
 
         ColumnMetadata cdef = cfs.metadata().getColumn(ByteBufferUtil.bytes("val"));
 
-        ImmutableBTreePartition readPartition = Util.getOnlyPartitionUnfiltered(Util.cmd(cfs, key).build());
-        Iterator<Row> iter = readPartition.iterator();
+        Partition readPartition = Util.getOnlyPartitionUnfiltered(Util.cmd(cfs, key).build());
+        Iterator<Row> iter = readPartition.rowIterator();
 
         compareValues(iter.next().getCell(cdef), "cname1");
         compareValues(iter.next().getCell(cdef), "cname2");
@@ -246,8 +243,8 @@ public class DynamicCompositeTypeTest
 
         ColumnMetadata cdef = cfs.metadata().getColumn(ByteBufferUtil.bytes("val"));
 
-        ImmutableBTreePartition readPartition = Util.getOnlyPartitionUnfiltered(Util.cmd(cfs, key).build());
-        Iterator<Row> iter = readPartition.iterator();
+        Partition readPartition = Util.getOnlyPartitionUnfiltered(Util.cmd(cfs, key).build());
+        Iterator<Row> iter = readPartition.rowIterator();
 
         compareValues(iter.next().getCell(cdef), "cname5");
         compareValues(iter.next().getCell(cdef), "cname4");
@@ -322,17 +319,18 @@ public class DynamicCompositeTypeTest
         assert !TypeParser.parse("DynamicCompositeType(a => BytesType)").isCompatibleWith(TypeParser.parse("DynamicCompositeType(a => BytesType, b => AsciiType)"));
     }
 
-    private static ByteBuffer createDynamicCompositeKey(String s, UUID uuid, int i, boolean lastIsOne)
+    private ByteBuffer createDynamicCompositeKey(String s, UUID uuid, int i, boolean lastIsOne)
     {
         return createDynamicCompositeKey(s, uuid, i, lastIsOne, false);
     }
 
+    @VisibleForTesting
     public static ByteBuffer createDynamicCompositeKey(String s, UUID uuid, int i, boolean lastIsOne, boolean reversed)
     {
         String intType = (reversed ? "ReversedType(IntegerType)" : "IntegerType");
-        ByteBuffer bytes = ByteBufferUtil.bytes(s);
+        ByteBuffer bytes = s != null ? ByteBufferUtil.bytes(s) : null;
         int totalSize = 0;
-        if (s != null)
+        if (bytes != null)
         {
             totalSize += 2 + 2 + bytes.remaining() + 1;
             if (uuid != null)
@@ -347,7 +345,7 @@ public class DynamicCompositeTypeTest
 
         ByteBuffer bb = ByteBuffer.allocate(totalSize);
 
-        if (s != null)
+        if (bytes != null)
         {
             bb.putShort((short)(0x8000 | (reversed ? 'B' : 'b')));
             bb.putShort((short) bytes.remaining());

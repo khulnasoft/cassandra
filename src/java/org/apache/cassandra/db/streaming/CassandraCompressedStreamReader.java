@@ -19,10 +19,12 @@ package org.apache.cassandra.db.streaming;
 
 import java.io.IOException;
 
+import com.google.common.base.Throwables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.io.sstable.SSTableMultiWriter;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.DataInputPlus;
@@ -32,6 +34,8 @@ import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.messages.StreamMessageHeader;
 import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.FBUtilities;
+
+import static org.apache.cassandra.utils.Throwables.extractIOExceptionCause;
 
 /**
  * CassandraStreamReader that reads from streamed compressed SSTable
@@ -53,7 +57,8 @@ public class CassandraCompressedStreamReader extends CassandraStreamReader
      * @throws java.io.IOException if reading the remote sstable fails. Will throw an RTE if local write fails.
      */
     @Override
-    public SSTableMultiWriter read(DataInputPlus inputPlus) throws Throwable
+    @SuppressWarnings("resource") // input needs to remain open, streams on top of it can't be closed
+    public SSTableMultiWriter read(DataInputPlus inputPlus) throws IOException
     {
         long totalSize = totalSize();
 
@@ -66,7 +71,7 @@ public class CassandraCompressedStreamReader extends CassandraStreamReader
         }
 
         logger.debug("[Stream #{}] Start receiving file #{} from {}, repairedAt = {}, size = {}, ks = '{}', pendingRepair = '{}', table = '{}'.",
-                     session.planId(), fileSeqNum, session.peer, repairedAt, totalSize, cfs.getKeyspaceName(), pendingRepair,
+                     session.planId(), fileSeqNum, session.peer, repairedAt, totalSize, cfs.keyspace.getName(), pendingRepair,
                      cfs.getTableName());
 
         StreamDeserializer deserializer = null;
@@ -74,37 +79,29 @@ public class CassandraCompressedStreamReader extends CassandraStreamReader
         try (CompressedInputStream cis = new CompressedInputStream(inputPlus, compressionInfo, ChecksumType.CRC32, cfs::getCrcCheckChance))
         {
             TrackedDataInputPlus in = new TrackedDataInputPlus(cis);
-            writer = createWriter(cfs, totalSize, repairedAt, pendingRepair, inputVersion.format);
-            deserializer = new StreamDeserializer(cfs.metadata(), in, inputVersion, getHeader(cfs.metadata()), session, writer);
+            deserializer = new StreamDeserializer(cfs.metadata(), in, inputVersion, getHeader(cfs.metadata()));
+            writer = createWriter(cfs, totalSize, repairedAt, pendingRepair, format);
             String filename = writer.getFilename();
-            String sectionName = filename + '-' + fileSeqNum;
             int sectionIdx = 0;
             for (SSTableReader.PartitionPositionBounds section : sections)
             {
                 assert cis.chunkBytesRead() <= totalSize;
                 long sectionLength = section.upperPosition - section.lowerPosition;
 
-                sectionIdx++;
-                if (logger.isTraceEnabled())
-                    logger.trace("[Stream #{}] Reading section {} with length {} from stream.", session.planId(), sectionIdx, sectionLength);
-
+                logger.trace("[Stream #{}] Reading section {} with length {} from stream.", session.planId(), sectionIdx++, sectionLength);
                 // skip to beginning of section inside chunk
                 cis.position(section.lowerPosition);
                 in.reset(0);
 
-                long lastBytesRead = 0;
                 while (in.getBytesRead() < sectionLength)
                 {
                     writePartition(deserializer, writer);
                     // when compressed, report total bytes of compressed chunks read since remoteFile.size is the sum of chunks transferred
-                    long bytesRead = cis.chunkBytesRead();
-                    long bytesDelta = bytesRead - lastBytesRead;
-                    lastBytesRead = bytesRead;
-                    session.progress(sectionName, ProgressInfo.Direction.IN, bytesRead, bytesDelta, totalSize);
+                    session.progress(filename + '-' + fileSeqNum, ProgressInfo.Direction.IN, cis.chunkBytesRead(), totalSize);
                 }
                 assert in.getBytesRead() == sectionLength;
             }
-            logger.info("[Stream #{}] Finished receiving file #{} from {} readBytes = {}, totalSize = {}", session.planId(), fileSeqNum,
+            logger.trace("[Stream #{}] Finished receiving file #{} from {} readBytes = {}, totalSize = {}", session.planId(), fileSeqNum,
                          session.peer, FBUtilities.prettyPrintMemory(cis.chunkBytesRead()), FBUtilities.prettyPrintMemory(totalSize));
             return writer;
         }
@@ -112,10 +109,14 @@ public class CassandraCompressedStreamReader extends CassandraStreamReader
         {
             Object partitionKey = deserializer != null ? deserializer.partitionKey() : "";
             logger.warn("[Stream {}] Error while reading partition {} from stream on ks='{}' and table='{}'.",
-                        session.planId(), partitionKey, cfs.getKeyspaceName(), cfs.getTableName());
+                        session.planId(), partitionKey, cfs.keyspace.getName(), cfs.getTableName());
             if (writer != null)
-                e = writer.abort(e);
-            throw e;
+            {
+                writer.abort(e);
+            }
+            if (extractIOExceptionCause(e).isPresent())
+                throw e;
+            throw Throwables.propagate(e);
         }
     }
 

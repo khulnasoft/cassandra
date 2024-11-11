@@ -49,7 +49,7 @@ public final class PurgeFunctionTest
     private TableMetadata metadata;
     private DecoratedKey key;
 
-    private static UnfilteredPartitionIterator withoutPurgeableTombstones(UnfilteredPartitionIterator iterator, long gcBefore)
+    private static UnfilteredPartitionIterator withoutPurgeableTombstones(UnfilteredPartitionIterator iterator, int gcBefore)
     {
         class WithoutPurgeableTombstones extends PurgeFunction
         {
@@ -70,7 +70,6 @@ public final class PurgeFunctionTest
     @Before
     public void setUp()
     {
-        DatabaseDescriptor.clientInitialization();
         DatabaseDescriptor.setPartitionerUnsafe(Murmur3Partitioner.instance);
 
         metadata =
@@ -235,29 +234,29 @@ public final class PurgeFunctionTest
 
     private RangeTombstoneBoundMarker bound(ClusteringPrefix.Kind kind,
                                             long timestamp,
-                                            long localDeletionTime,
+                                            int localDeletionTime,
                                             Object clusteringValue)
     {
         ByteBuffer[] clusteringByteBuffers =
             new ByteBuffer[] { decompose(metadata.clusteringColumns().get(0).type, clusteringValue) };
 
         return new RangeTombstoneBoundMarker(BufferClusteringBound.create(kind, clusteringByteBuffers),
-                                             DeletionTime.build(timestamp, localDeletionTime));
+                                             new DeletionTime(timestamp, localDeletionTime));
     }
 
     private RangeTombstoneBoundaryMarker boundary(ClusteringPrefix.Kind kind,
                                                   long closeTimestamp,
-                                                  long closeLocalDeletionTime,
+                                                  int closeLocalDeletionTime,
                                                   long openTimestamp,
-                                                  long openDeletionTime,
+                                                  int openDeletionTime,
                                                   Object clusteringValue)
     {
         ByteBuffer[] clusteringByteBuffers =
             new ByteBuffer[] { decompose(metadata.clusteringColumns().get(0).type, clusteringValue) };
 
         return new RangeTombstoneBoundaryMarker(BufferClusteringBoundary.create(kind, clusteringByteBuffers),
-                                                DeletionTime.build(closeTimestamp, closeLocalDeletionTime),
-                                                DeletionTime.build(openTimestamp, openDeletionTime));
+                                                new DeletionTime(closeTimestamp, closeLocalDeletionTime),
+                                                new DeletionTime(openTimestamp, openDeletionTime));
     }
 
     @SuppressWarnings("unchecked")

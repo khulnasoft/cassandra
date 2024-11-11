@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.dht;
 
-import java.io.IOException;
 import java.io.Serializable;
 import java.util.*;
 import java.util.function.Predicate;
@@ -26,12 +25,6 @@ import com.google.common.collect.Iterables;
 import org.apache.commons.lang3.ObjectUtils;
 
 import org.apache.cassandra.db.PartitionPosition;
-import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.tcm.serialization.MetadataSerializer;
-import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.utils.Pair;
 
 /**
@@ -45,7 +38,6 @@ import org.apache.cassandra.utils.Pair;
  */
 public class Range<T extends RingPosition<T>> extends AbstractBounds<T> implements Comparable<Range<T>>, Serializable
 {
-    public static final Serializer serializer = new Serializer();
     public static final long serialVersionUID = 1L;
 
     public Range(T left, T right)
@@ -78,7 +70,7 @@ public class Range<T extends RingPosition<T>> extends AbstractBounds<T> implemen
         }
     }
 
-    public boolean contains(Range<T> that)
+    public boolean contains(AbstractBounds<T> that)
     {
         if (this.left.equals(this.right))
         {
@@ -133,7 +125,34 @@ public class Range<T extends RingPosition<T>> extends AbstractBounds<T> implemen
             return intersects((Range<T>) that);
         if (that instanceof Bounds)
             return intersects((Bounds<T>) that);
+        if (that instanceof ExcludingBounds)
+            return intersects((ExcludingBounds<T>) that);
+        if (that instanceof IncludingExcludingBounds)
+            return intersects((IncludingExcludingBounds<T>) that);
+
         throw new UnsupportedOperationException("Intersection is only supported for Bounds and Range objects; found " + that.getClass());
+    }
+
+    public boolean intersects(IncludingExcludingBounds<T> that)
+    {
+        if (!isWrapAround() && !that.right.isMinimum() && (this.left.compareTo(that.right) == 0))
+            return false;
+        else if (isWrapAround() && !that.right.isMinimum() && (this.right.compareTo(that.right) == 0))
+            return false;
+        return contains(that.left) || (!that.left.equals(that.right) && intersects(new Range<T>(that.left, that.right)));
+    }
+
+    public boolean intersects(ExcludingBounds<T> that)
+    {
+        if (!isWrapAround() &&
+            ((!that.right.isMinimum() && (this.left.compareTo(that.right) == 0)) ||
+             (this.right.compareTo(that.left) == 0)))
+            return false;
+        else if (isWrapAround() &&
+                 ((this.left.compareTo(that.left) == 0) ||
+                  (!that.right.isMinimum() && (this.right.compareTo(that.right) == 0))))
+            return false;
+        return contains(that.left) || (!that.left.equals(that.right) && intersects(new Range<T>(that.left, that.right)));
     }
 
     /**
@@ -209,26 +228,6 @@ public class Range<T extends RingPosition<T>> extends AbstractBounds<T> implemen
         return intersectionOneWrapping(that, this);
     }
 
-    private static <T extends RingPosition<T>> Set<Range<T>> intersectionBothWrapping(Range<T> first, Range<T> that)
-    {
-        Set<Range<T>> intersection = new HashSet<Range<T>>(2);
-        if (that.right.compareTo(first.left) > 0)
-            intersection.add(new Range<T>(first.left, that.right));
-        intersection.add(new Range<T>(that.left, first.right));
-        return Collections.unmodifiableSet(intersection);
-    }
-
-    private static <T extends RingPosition<T>> Set<Range<T>> intersectionOneWrapping(Range<T> wrapping, Range<T> other)
-    {
-        Set<Range<T>> intersection = new HashSet<Range<T>>(2);
-        if (other.contains(wrapping.right))
-            intersection.add(new Range<T>(other.left, wrapping.right));
-        // need the extra compareto here because ranges are asymmetrical; wrapping.left _is not_ contained by the wrapping range
-        if (other.contains(wrapping.left) && wrapping.left.compareTo(other.right) < 0)
-            intersection.add(new Range<T>(wrapping.left, other.right));
-        return Collections.unmodifiableSet(intersection);
-    }
-
     /**
      * Returns the intersection of this range with the provided one, assuming neither are wrapping.
      *
@@ -237,8 +236,7 @@ public class Range<T extends RingPosition<T>> extends AbstractBounds<T> implemen
      */
     public Range<T> intersectionNonWrapping(Range<T> that)
     {
-        assert !isTrulyWrapAround() : "wraparound " + this;
-        assert !that.isTrulyWrapAround() : "wraparound " + that;
+        assert !isTrulyWrapAround() && !that.isTrulyWrapAround() : this + " and " + that;
 
         if (left.compareTo(that.left) < 0)
         {
@@ -260,6 +258,26 @@ public class Range<T extends RingPosition<T>> extends AbstractBounds<T> implemen
 
             return new Range<>(left, that.right);
         }
+    }
+
+    private static <T extends RingPosition<T>> Set<Range<T>> intersectionBothWrapping(Range<T> first, Range<T> that)
+    {
+        Set<Range<T>> intersection = new HashSet<Range<T>>(2);
+        if (that.right.compareTo(first.left) > 0)
+            intersection.add(new Range<T>(first.left, that.right));
+        intersection.add(new Range<T>(that.left, first.right));
+        return Collections.unmodifiableSet(intersection);
+    }
+
+    private static <T extends RingPosition<T>> Set<Range<T>> intersectionOneWrapping(Range<T> wrapping, Range<T> other)
+    {
+        Set<Range<T>> intersection = new HashSet<Range<T>>(2);
+        if (other.contains(wrapping.right))
+            intersection.add(new Range<T>(other.left, wrapping.right));
+        // need the extra compareto here because ranges are asymmetrical; wrapping.left _is not_ contained by the wrapping range
+        if (other.contains(wrapping.left) && wrapping.left.compareTo(other.right) < 0)
+            intersection.add(new Range<T>(wrapping.left, other.right));
+        return Collections.unmodifiableSet(intersection);
     }
 
     public Pair<AbstractBounds<T>, AbstractBounds<T>> split(T position)
@@ -301,29 +319,6 @@ public class Range<T extends RingPosition<T>> extends AbstractBounds<T> implemen
     public static <T extends RingPosition<T>> boolean isWrapAround(T left, T right)
     {
        return left.compareTo(right) >= 0;
-    }
-
-    /**
-     * Checks if the range truly wraps around.
-     *
-     * This exists only because {@link #isWrapAround()} is a tad dumb and return true if right is the minimum token,
-     * no matter what left is, but for most intent and purposes, such range doesn't truly warp around (unwrap produces
-     * the identity in this case).
-     * <p>
-     * Also note that it could be that the remaining uses of {@link #isWrapAround()} could be replaced by this method,
-     * but that is to be checked carefully at some other time (Sylvain).
-     * <p>
-     * The one thing this method guarantees is that if it's true, then {@link #unwrap()} will return a list with
-     * exactly 2 ranges, never one.
-     */
-    public boolean isTrulyWrapAround()
-    {
-        return isTrulyWrapAround(left, right);
-    }
-
-    public static <T extends RingPosition<T>> boolean isTrulyWrapAround(T left, T right)
-    {
-        return isWrapAround(left, right) && !right.isMinimum();
     }
 
     /**
@@ -521,6 +516,32 @@ public class Range<T extends RingPosition<T>> extends AbstractBounds<T> implemen
     }
 
     /**
+     * Checks if the range truly wraps around.
+     *
+     * This exists only because {@link #isWrapAround()} is a tad dumb and return true if right is the minimum token,
+     * no matter what left is, but for most intent and purposes, such range doesn't truly warp around (unwrap produces
+     * the identity in this case).
+     * <p>
+     * Also note that it could be that the remaining uses of {@link #isWrapAround()} could be replaced by this method,
+     * but that is to be checked carefully at some other time (Sylvain).
+     * <p>
+     * The one thing this method guarantees is that if it's true, then {@link #unwrap()} will return a list with
+     * exactly 2 ranges, never one.
+     *
+     * @return whether the range "true" wraps around.
+     */
+    public boolean isTrulyWrapAround()
+    {
+        return isTrulyWrapAround(left, right);
+    }
+
+    public static <T extends RingPosition<T>> boolean isTrulyWrapAround(T left, T right)
+    {
+        T minValue = right.minValue();
+        return isWrapAround(left, right) && !right.equals(minValue);
+    }
+
+    /**
      * @return A copy of the given list of with all ranges unwrapped, sorted by left bound and with overlapping bounds merged.
      */
     public static <T extends RingPosition<T>> List<Range<T>> normalize(Collection<Range<T>> ranges)
@@ -547,7 +568,7 @@ public class Range<T extends RingPosition<T>> extends AbstractBounds<T> implemen
      * Given a list of unwrapped ranges sorted by left position, return an
      * equivalent list of ranges but with no overlapping ranges.
      */
-    public static <T extends RingPosition<T>> List<Range<T>> deoverlap(List<Range<T>> ranges)
+    private static <T extends RingPosition<T>> List<Range<T>> deoverlap(List<Range<T>> ranges)
     {
         if (ranges.isEmpty())
             return ranges;
@@ -688,26 +709,6 @@ public class Range<T extends RingPosition<T>> extends AbstractBounds<T> implemen
                                                        lastRange.intersects(range),
                                                        ranges));
             }
-        }
-    }
-
-    public static class Serializer implements MetadataSerializer<Range<Token>>
-    {
-        private static final int SERDE_VERSION = MessagingService.VERSION_40;
-
-        public void serialize(Range<Token> t, DataOutputPlus out, Version version) throws IOException
-        {
-            tokenSerializer.serialize(t, out, SERDE_VERSION);
-        }
-
-        public Range<Token> deserialize(DataInputPlus in, Version version) throws IOException
-        {
-            return (Range<Token>) tokenSerializer.deserialize(in, ClusterMetadata.current().partitioner, SERDE_VERSION);
-        }
-
-        public long serializedSize(Range<Token> t, Version version)
-        {
-            return tokenSerializer.serializedSize(t, SERDE_VERSION);
         }
     }
 }

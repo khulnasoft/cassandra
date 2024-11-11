@@ -22,6 +22,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.WritableByteChannel;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -45,7 +46,6 @@ import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.Util;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
@@ -56,10 +56,10 @@ import org.apache.cassandra.dht.ByteOrderedPartitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.Descriptor;
+import org.apache.cassandra.io.sstable.IndexSummaryManager;
+import org.apache.cassandra.io.sstable.IndexSummaryRedistribution;
 import org.apache.cassandra.io.sstable.SSTableUtils;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.indexsummary.IndexSummaryManager;
-import org.apache.cassandra.io.sstable.indexsummary.IndexSummaryRedistribution;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.RangesAtEndpoint;
@@ -71,6 +71,7 @@ import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.SchemaTestUtil;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ActiveRepairService;
+import org.apache.cassandra.streaming.DefaultConnectionFactory;
 import org.apache.cassandra.streaming.OutgoingStream;
 import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.streaming.SessionInfo;
@@ -79,7 +80,6 @@ import org.apache.cassandra.streaming.StreamOperation;
 import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.StreamSummary;
-import org.apache.cassandra.streaming.async.NettyStreamingConnectionFactory;
 import org.apache.cassandra.streaming.messages.StreamMessageHeader;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
@@ -87,8 +87,8 @@ import org.apache.cassandra.utils.Throwables;
 import org.jboss.byteman.contrib.bmunit.BMRule;
 import org.jboss.byteman.contrib.bmunit.BMUnitRunner;
 
+import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.apache.cassandra.service.ActiveRepairService.NO_PENDING_REPAIR;
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 import static org.junit.Assert.assertTrue;
 
 @RunWith(BMUnitRunner.class)
@@ -129,7 +129,7 @@ public class EntireSSTableStreamConcurrentComponentMutationTest
             .build()
             .applyUnsafe();
         }
-        Util.flush(store);
+        store.forceBlockingFlush(UNIT_TESTS);
         CompactionManager.instance.performMaximal(store, false);
 
         Token start = ByteOrderedPartitioner.instance.getTokenFactory().fromString(Long.toHexString(0));
@@ -161,7 +161,7 @@ public class EntireSSTableStreamConcurrentComponentMutationTest
     }
 
     @Test
-    public void testStream() throws Throwable
+    public void testStream() throws Exception
     {
         testStreamWithConcurrentComponentMutation(NO_OP, NO_OP);
     }
@@ -171,12 +171,12 @@ public class EntireSSTableStreamConcurrentComponentMutationTest
      * update causes the actual transfered file size to be different from the one in {@link ComponentManifest}
      */
     @Test
-    public void testStreamWithStatsMutation() throws Throwable
+    public void testStreamWithStatsMutation() throws Exception
     {
         testStreamWithConcurrentComponentMutation(() -> {
 
             Descriptor desc = sstable.descriptor;
-            desc.getMetadataSerializer().mutate(desc, "testing", stats -> stats.mutateRepairedMetadata(0, nextTimeUUID(), false));
+            desc.getMetadataSerializer().mutate(desc, "testing", stats -> stats.mutateRepairedMetadata(0, UUID.randomUUID(), false));
 
             return null;
         }, NO_OP);
@@ -189,7 +189,7 @@ public class EntireSSTableStreamConcurrentComponentMutationTest
             targetLocation = "AFTER INVOKE serialize",
             condition = "$descriptor.cfname.contains(\"Standard1\")",
             action = "org.apache.cassandra.db.streaming.EntireSSTableStreamConcurrentComponentMutationTest.countDown();Thread.sleep(5000);")
-    public void testStreamWithIndexSummaryRedistributionDelaySavingSummary() throws Throwable
+    public void testStreamWithIndexSummaryRedistributionDelaySavingSummary() throws Exception
     {
         testStreamWithConcurrentComponentMutation(() -> {
             // wait until new index summary is partially written
@@ -204,7 +204,7 @@ public class EntireSSTableStreamConcurrentComponentMutationTest
         latch.countDown();
     }
 
-    private void testStreamWithConcurrentComponentMutation(Callable<?> runBeforeStreaming, Callable<?> runConcurrentWithStreaming) throws Throwable
+    private void testStreamWithConcurrentComponentMutation(Callable<?> runBeforeStreaming, Callable<?> runConcurrentWithStreaming) throws Exception
     {
         ByteBuf serializedFile = Unpooled.buffer(8192);
         InetAddressAndPort peer = FBUtilities.getBroadcastAddressAndPort();
@@ -320,13 +320,13 @@ public class EntireSSTableStreamConcurrentComponentMutationTest
 
     private StreamSession setupStreamingSessionForTest()
     {
-        StreamCoordinator streamCoordinator = new StreamCoordinator(StreamOperation.BOOTSTRAP, 1, new NettyStreamingConnectionFactory(), false, false, null, PreviewKind.NONE);
-        StreamResultFuture future = StreamResultFuture.createInitiator(nextTimeUUID(), StreamOperation.BOOTSTRAP, Collections.emptyList(), streamCoordinator);
+        StreamCoordinator streamCoordinator = new StreamCoordinator(StreamOperation.BOOTSTRAP, 1, new DefaultConnectionFactory(), false, false, null, PreviewKind.NONE);
+        StreamResultFuture future = StreamResultFuture.createInitiator(UUID.randomUUID(), StreamOperation.BOOTSTRAP, Collections.emptyList(), streamCoordinator);
 
         InetAddressAndPort peer = FBUtilities.getBroadcastAddressAndPort();
-        streamCoordinator.addSessionInfo(new SessionInfo(peer, 0, peer, Collections.emptyList(), Collections.emptyList(), StreamSession.State.INITIALIZED, null));
+        streamCoordinator.addSessionInfo(new SessionInfo(peer, 0, peer, Collections.emptyList(), Collections.emptyList(), StreamSession.State.INITIALIZED));
 
-        StreamSession session = streamCoordinator.getOrCreateOutboundSession(peer);
+        StreamSession session = streamCoordinator.getOrCreateNextSession(peer);
         session.init(future);
         return session;
     }

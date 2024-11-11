@@ -30,16 +30,12 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
 
-import com.google.common.collect.Iterables;
-
-import org.apache.cassandra.config.CassandraRelevantProperties;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.io.util.File;
 import org.apache.commons.io.FileUtils;
 import org.junit.BeforeClass;
 import org.slf4j.LoggerFactory;
+
+import org.apache.cassandra.io.util.File;
 
 import static org.apache.cassandra.utils.FBUtilities.preventIllegalAccessWarnings;
 import static org.junit.Assert.assertFalse;
@@ -58,12 +54,17 @@ public abstract class OfflineToolUtils
 
     private static List<ThreadInfo> initialThreads;
 
+    static final String[] EXPECTED_THREADS_WITH_SCHEMA = {
+    "PerDiskMemtableFlushWriter_0:[1-9]",
+    "MemtablePostFlush:[1-9]",
+    "MemtableFlushWriter:[1-9]",
+    "MemtableReclaimMemory:[1-9]",
+    };
     static final String[] OPTIONAL_THREADS_WITH_SCHEMA = {
     "ScheduledTasks:[1-9]",
-    "ScheduledFastTasks:[1-9]",
     "OptionalTasks:[1-9]",
-    "Reference-Reaper",
-    "LocalPool-Cleaner(-networking|-chunk-cache)",
+    "Reference-Reaper:[1-9]",
+    "LocalPool-Cleaner:[1-9]",
     "CacheCleanupExecutor:[1-9]",
     "CompactionExecutor:[1-9]",
     "ValidationExecutor:[1-9]",
@@ -73,19 +74,9 @@ public abstract class OfflineToolUtils
     "Strong-Reference-Leak-Detector:[1-9]",
     "Background_Reporter:[1-9]",
     "EXPIRING-MAP-REAPER:[1-9]",
-    "ObjectCleanerThread",
-    "process reaper",  // spawned by the jvm when executing external processes
-                       // and may still be active when we check
-    "Attach Listener", // spawned in intellij IDEA
-    "JNA Cleaner",     // spawned by JNA
     };
 
-    static final String[] NON_DEFAULT_MEMTABLE_THREADS =
-    {
-    "((Native|Slab|Heap)Pool|Logged)Cleaner"
-    };
-
-    public void assertNoUnexpectedThreadsStarted(String[] optionalThreadNames, boolean allowNonDefaultMemtableThreads)
+    public void assertNoUnexpectedThreadsStarted(String[] expectedThreadNames, String[] optionalThreadNames)
     {
         ThreadMXBean threads = ManagementFactory.getThreadMXBean();
 
@@ -98,26 +89,32 @@ public abstract class OfflineToolUtils
                                     .filter(Objects::nonNull)
                                     .map(ThreadInfo::getThreadName)
                                     .collect(Collectors.toSet());
-        Iterable<String> optionalNames = optionalThreadNames != null
-                                         ? Arrays.asList(optionalThreadNames)
-                                         : Collections.emptyList();
-        if (allowNonDefaultMemtableThreads && DatabaseDescriptor.getMemtableConfigurations().containsKey("default"))
-            optionalNames = Iterables.concat(optionalNames, Arrays.asList(NON_DEFAULT_MEMTABLE_THREADS));
 
-        List<Pattern> optional = StreamSupport.stream(optionalNames.spliterator(), false)
-                                              .map(Pattern::compile)
-                                              .collect(Collectors.toList());
+        List<Pattern> expected = expectedThreadNames != null
+                                 ? Arrays.stream(expectedThreadNames).map(Pattern::compile).collect(Collectors.toList())
+                                 : Collections.emptyList();
+
+        List<Pattern> optional = optionalThreadNames != null
+                                 ? Arrays.stream(optionalThreadNames).map(Pattern::compile).collect(Collectors.toList())
+                                 : Collections.emptyList();
 
         current.removeAll(initial);
 
+        List<Pattern> notPresent = expected.stream()
+                                           .filter(threadNamePattern -> !current.stream().anyMatch(threadName -> threadNamePattern.matcher(threadName).matches()))
+                                           .collect(Collectors.toList());
+
         Set<String> remain = current.stream()
-                                    .filter(threadName -> optional.stream().noneMatch(pattern -> pattern.matcher(threadName).matches()))
+                                    .filter(threadName -> expected.stream().anyMatch(pattern -> pattern.matcher(threadName).matches()))
+                                    .filter(threadName -> optional.stream().anyMatch(pattern -> pattern.matcher(threadName).matches()))
                                     .collect(Collectors.toSet());
 
         if (!remain.isEmpty())
             System.err.println("Unexpected thread names: " + remain);
+        if (!notPresent.isEmpty())
+            System.err.println("Mandatory thread missing: " + notPresent);
 
-        assertTrue("Wrong thread status, active threads unaccounted for: " + remain, remain.isEmpty());
+        assertTrue("Wrong thread status", remain.isEmpty() && notPresent.isEmpty());
     }
 
     public void assertSchemaNotLoaded()
@@ -196,7 +193,7 @@ public abstract class OfflineToolUtils
     @BeforeClass
     public static void setupTester()
     {
-        CassandraRelevantProperties.PARTITIONER.setString("org.apache.cassandra.dht.Murmur3Partitioner");
+        System.setProperty("cassandra.partitioner", "org.apache.cassandra.dht.Murmur3Partitioner");
 
         // may start an async appender
         LoggerFactory.getLogger(OfflineToolUtils.class);
@@ -235,7 +232,7 @@ public abstract class OfflineToolUtils
     
     protected void assertCorrectEnvPostTest()
     {
-        assertNoUnexpectedThreadsStarted(OPTIONAL_THREADS_WITH_SCHEMA, true);
+        assertNoUnexpectedThreadsStarted(EXPECTED_THREADS_WITH_SCHEMA, OPTIONAL_THREADS_WITH_SCHEMA);
         assertSchemaLoaded();
         assertServerNotLoaded();
     }

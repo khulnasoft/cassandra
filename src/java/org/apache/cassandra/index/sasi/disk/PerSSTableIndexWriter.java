@@ -21,18 +21,12 @@ import java.nio.ByteBuffer;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.Maps;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import org.apache.cassandra.concurrent.ExecutorPlus;
+import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
+import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.rows.Row;
@@ -43,37 +37,46 @@ import org.apache.cassandra.index.sasi.utils.CombinedTermIterator;
 import org.apache.cassandra.index.sasi.utils.TypeUtil;
 import org.apache.cassandra.io.FSError;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.SSTableFlushObserver;
+import org.apache.cassandra.io.sstable.SSTable;
+import org.apache.cassandra.io.sstable.format.SSTableFlushObserver;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
-import org.apache.cassandra.utils.concurrent.CountDownLatch;
-import org.apache.cassandra.utils.concurrent.ImmediateFuture;
 
-import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
-import static org.apache.cassandra.utils.concurrent.CountDownLatch.newCountDownLatch;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Maps;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.Uninterruptibles;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class PerSSTableIndexWriter implements SSTableFlushObserver
 {
     private static final Logger logger = LoggerFactory.getLogger(PerSSTableIndexWriter.class);
 
     private static final int POOL_SIZE = 8;
-    private static final ExecutorPlus INDEX_FLUSHER_MEMTABLE;
-    private static final ExecutorPlus INDEX_FLUSHER_GENERAL;
+    private static final ThreadPoolExecutor INDEX_FLUSHER_MEMTABLE;
+    private static final ThreadPoolExecutor INDEX_FLUSHER_GENERAL;
 
     static
     {
-        INDEX_FLUSHER_GENERAL = executorFactory().withJmxInternal()
-                                                 .pooled("SASI-General", POOL_SIZE);
+        INDEX_FLUSHER_GENERAL = new JMXEnabledThreadPoolExecutor(POOL_SIZE, POOL_SIZE, 1, TimeUnit.MINUTES,
+                                                                 new LinkedBlockingQueue<>(),
+                                                                 new NamedThreadFactory("SASI-General"),
+                                                                 "internal");
+        INDEX_FLUSHER_GENERAL.allowCoreThreadTimeOut(true);
 
-        INDEX_FLUSHER_MEMTABLE = executorFactory().withJmxInternal()
-                                                  .pooled("SASI-Memtable", POOL_SIZE);
+        INDEX_FLUSHER_MEMTABLE = new JMXEnabledThreadPoolExecutor(POOL_SIZE, POOL_SIZE, 1, TimeUnit.MINUTES,
+                                                                  new LinkedBlockingQueue<>(),
+                                                                  new NamedThreadFactory("SASI-Memtable"),
+                                                                  "internal");
+        INDEX_FLUSHER_MEMTABLE.allowCoreThreadTimeOut(true);
     }
 
-    private final long nowInSec = FBUtilities.nowInSeconds();
+    private final int nowInSec = FBUtilities.nowInSeconds();
 
     private final Descriptor descriptor;
     private final OperationType source;
@@ -100,24 +103,27 @@ public class PerSSTableIndexWriter implements SSTableFlushObserver
             indexes.put(entry.getKey(), newIndex(entry.getValue()));
     }
 
-    @Override
     public void begin()
     {}
 
-    @Override
-    public void startPartition(DecoratedKey key, long keyPosition, long KeyPositionForSASI)
+    public void startPartition(DecoratedKey key, long curPosition)
     {
         currentKey = key;
-        currentKeyPosition = KeyPositionForSASI;
+        currentKeyPosition = curPosition;
     }
 
     @Override
-    public void staticRow(Row staticRow)
+    public void partitionLevelDeletion(DeletionTime deletionTime, long position)
+    {
+        // do nothing
+    }
+
+    @Override
+    public void staticRow(Row staticRow, long position)
     {
         nextUnfilteredCluster(staticRow);
     }
 
-    @Override
     public void nextUnfilteredCluster(Unfiltered unfiltered)
     {
         if (!unfiltered.isRow())
@@ -137,8 +143,7 @@ public class PerSSTableIndexWriter implements SSTableFlushObserver
         });
     }
 
-    @Override
-    public void complete()
+    public void complete(SSTable sstable)
     {
         if (isComplete)
             return;
@@ -147,11 +152,11 @@ public class PerSSTableIndexWriter implements SSTableFlushObserver
 
         try
         {
-            CountDownLatch latch = newCountDownLatch(indexes.size());
+            CountDownLatch latch = new CountDownLatch(indexes.size());
             for (Index index : indexes.values())
                 index.complete(latch);
 
-            latch.awaitUninterruptibly();
+            Uninterruptibles.awaitUninterruptibly(latch);
         }
         finally
         {
@@ -256,14 +261,15 @@ public class PerSSTableIndexWriter implements SSTableFlushObserver
             final OnDiskIndexBuilder builder = currentBuilder;
             currentBuilder = newIndexBuilder();
 
-            final File segmentFile = file(isFinal);
+            final String segmentFile = filename(isFinal);
 
             return () -> {
-                long start = nanoTime();
+                long start = System.nanoTime();
 
                 try
                 {
-                    return builder.finish(segmentFile) ? new OnDiskIndex(segmentFile, columnIndex.getValidator(), null) : null;
+                    File index = new File(segmentFile);
+                    return builder.finish(index) ? new OnDiskIndex(index, columnIndex.getValidator(), null) : null;
                 }
                 catch (Exception | FSError e)
                 {
@@ -273,7 +279,7 @@ public class PerSSTableIndexWriter implements SSTableFlushObserver
                 finally
                 {
                     if (!isFinal)
-                        logger.info("Flushed index segment {}, took {} ms.", segmentFile, TimeUnit.NANOSECONDS.toMillis(nanoTime() - start));
+                        logger.info("Flushed index segment {}, took {} ms.", segmentFile, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start));
                 }
             };
         }
@@ -282,8 +288,8 @@ public class PerSSTableIndexWriter implements SSTableFlushObserver
         {
             logger.info("Scheduling index flush to {}", outputFile);
 
-            getExecutor().submit(() -> {
-                long start1 = nanoTime();
+            getExecutor().submit((Runnable) () -> {
+                long start1 = System.nanoTime();
 
                 OnDiskIndex[] parts = new OnDiskIndex[segments.size() + 1];
 
@@ -299,8 +305,9 @@ public class PerSSTableIndexWriter implements SSTableFlushObserver
                     // parts are present but there is something still in memory, let's flush that inline
                     if (!currentBuilder.isEmpty())
                     {
+                        @SuppressWarnings("resource")
                         OnDiskIndex last = scheduleSegmentFlush(false).call();
-                        segments.add(ImmediateFuture.success(last));
+                        segments.add(Futures.immediateFuture(last));
                     }
 
                     int index = 0;
@@ -308,6 +315,7 @@ public class PerSSTableIndexWriter implements SSTableFlushObserver
 
                     for (Future<OnDiskIndex> f : segments)
                     {
+                        @SuppressWarnings("resource")
                         OnDiskIndex part = f.get();
                         if (part == null)
                             continue;
@@ -325,23 +333,24 @@ public class PerSSTableIndexWriter implements SSTableFlushObserver
                 catch (Exception | FSError e)
                 {
                     logger.error("Failed to flush index {}.", outputFile, e);
-                    outputFile.tryDelete();
+                    FileUtils.delete(outputFile);
                 }
                 finally
                 {
-                    logger.info("Index flush to {} took {} ms.", outputFile, TimeUnit.NANOSECONDS.toMillis(nanoTime() - start1));
+                    logger.info("Index flush to {} took {} ms.", outputFile, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start1));
 
                     for (int segment = 0; segment < segmentNumber; segment++)
                     {
+                        @SuppressWarnings("resource")
                         OnDiskIndex part = parts[segment];
 
                         if (part != null)
                             FileUtils.closeQuietly(part);
 
-                        outputFile.withSuffix("_" + segment).tryDelete();
+                        FileUtils.delete(outputFile + "_" + segment);
                     }
 
-                    latch.decrement();
+                    latch.countDown();
                 }
             });
         }
@@ -356,9 +365,9 @@ public class PerSSTableIndexWriter implements SSTableFlushObserver
             return new OnDiskIndexBuilder(keyValidator, columnIndex.getValidator(), columnIndex.getMode().mode);
         }
 
-        public File file(boolean isFinal)
+        public String filename(boolean isFinal)
         {
-            return isFinal ? outputFile : outputFile.withSuffix("_" + segmentNumber++);
+            return outputFile + (isFinal ? "" : "_" + segmentNumber++);
         }
     }
 
@@ -375,6 +384,6 @@ public class PerSSTableIndexWriter implements SSTableFlushObserver
 
     public boolean equals(Object o)
     {
-        return o instanceof PerSSTableIndexWriter && descriptor.equals(((PerSSTableIndexWriter) o).descriptor);
+        return !(o == null || !(o instanceof PerSSTableIndexWriter)) && descriptor.equals(((PerSSTableIndexWriter) o).descriptor);
     }
 }

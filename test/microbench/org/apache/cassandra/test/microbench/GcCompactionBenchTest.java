@@ -45,17 +45,16 @@ import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
+import org.apache.cassandra.db.compaction.CompactionSSTable;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.CompactionParams.TombstoneOption;
 import org.apache.cassandra.utils.FBUtilities;
-
-import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 
 public class GcCompactionBenchTest extends CQLTester
 {
     private static final String SIZE_TIERED_STRATEGY = "SizeTieredCompactionStrategy', 'min_sstable_size' : '0";
     private static final String LEVELED_STRATEGY = "LeveledCompactionStrategy', 'sstable_size_in_mb' : '16";
+    private static final String UNIFIED_STRATEGY = "UnifiedCompactionStrategy', 'min_sstable_size_in_mb' : '16";
 
     private static final int DEL_SECTIONS = 1000;
     private static final int FLUSH_FREQ = 10000;
@@ -189,9 +188,9 @@ public class GcCompactionBenchTest extends CQLTester
             if (ii % (FLUSH_FREQ * 10) == 0)
             {
                 System.out.println("C");
-                long startTime = nanoTime();
+                long startTime = System.nanoTime();
                 getCurrentColumnFamilyStore().enableAutoCompaction(true);
-                long endTime = nanoTime();
+                long endTime = System.nanoTime();
                 compactionTimeNanos += endTime - startTime;
                 getCurrentColumnFamilyStore().disableAutoCompaction();
             }
@@ -206,7 +205,7 @@ public class GcCompactionBenchTest extends CQLTester
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
 
-        long onStartTime = currentTimeMillis();
+        long onStartTime = System.currentTimeMillis();
         ExecutorService es = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
         List<Future<?>> tasks = new ArrayList<>();
         for (int ti = 0; ti < 1; ++ti)
@@ -230,27 +229,27 @@ public class GcCompactionBenchTest extends CQLTester
             task.get();
 
         flush();
-        long onEndTime = currentTimeMillis();
+        long onEndTime = System.currentTimeMillis();
         int startRowCount = countRows(cfs);
         int startTombCount = countTombstoneMarkers(cfs);
         int startRowDeletions = countRowDeletions(cfs);
         int startTableCount = cfs.getLiveSSTables().size();
         int startTableMaxLevel = cfs.getLiveSSTables().stream().mapToInt(SSTableReader::getSSTableLevel).max().orElseGet(() -> 0);
-        long startSize = SSTableReader.getTotalBytes(cfs.getLiveSSTables());
+        long startSize = CompactionSSTable.getTotalBytes(cfs.getLiveSSTables());
         System.out.println();
 
         String hashesBefore = getHashes();
 
-        long startTime = currentTimeMillis();
+        long startTime = System.currentTimeMillis();
         CompactionManager.instance.performGarbageCollection(cfs, tombstoneOption, 0);
-        long endTime = currentTimeMillis();
+        long endTime = System.currentTimeMillis();
 
         int endRowCount = countRows(cfs);
         int endTombCount = countTombstoneMarkers(cfs);
         int endRowDeletions = countRowDeletions(cfs);
         int endTableCount = cfs.getLiveSSTables().size();
         int endTableMaxLevel = cfs.getLiveSSTables().stream().mapToInt(SSTableReader::getSSTableLevel).max().orElseGet(() -> 0);
-        long endSize = SSTableReader.getTotalBytes(cfs.getLiveSSTables());
+        long endSize = CompactionSSTable.getTotalBytes(cfs.getLiveSSTables());
 
         System.out.println(cfs.getCompactionParametersJson());
         System.out.println(String.format("%s compactions completed in %.3fs",
@@ -270,9 +269,9 @@ public class GcCompactionBenchTest extends CQLTester
 
     private String getHashes() throws Throwable
     {
-        long startTime = currentTimeMillis();
+        long startTime = System.currentTimeMillis();
         String hashes = Arrays.toString(getRows(execute(hashQuery))[0]);
-        long endTime = currentTimeMillis();
+        long endTime = System.currentTimeMillis();
         System.out.println(String.format("Hashes: %s, retrieved in %.3fs", hashes, (endTime - startTime) * 1e-3));
         return hashes;
     }
@@ -305,6 +304,12 @@ public class GcCompactionBenchTest extends CQLTester
     public void testCopyCompaction() throws Throwable
     {
         testGcCompaction(TombstoneOption.NONE, TombstoneOption.NONE, LEVELED_STRATEGY);
+    }
+
+    @Test
+    public void testCopyCompactionUCS() throws Throwable
+    {
+        testGcCompaction(TombstoneOption.NONE, TombstoneOption.NONE, UNIFIED_STRATEGY);
     }
 
     @Test
@@ -350,7 +355,7 @@ public class GcCompactionBenchTest extends CQLTester
     int countRows(ColumnFamilyStore cfs)
     {
         boolean enforceStrictLiveness = cfs.metadata().enforceStrictLiveness();
-        long nowInSec = FBUtilities.nowInSeconds();
+        int nowInSec = FBUtilities.nowInSeconds();
         return count(cfs, x -> x.isRow() && ((Row) x).hasLiveData(nowInSec, enforceStrictLiveness));
     }
 

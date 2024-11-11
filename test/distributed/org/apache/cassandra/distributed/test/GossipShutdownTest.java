@@ -20,30 +20,29 @@ package org.apache.cassandra.distributed.test;
 
 import java.io.IOException;
 import java.io.Serializable;
+import java.net.InetSocketAddress;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.apache.cassandra.utils.concurrent.Condition;
 import org.junit.Test;
 
 import org.apache.cassandra.distributed.Cluster;
+import org.apache.cassandra.distributed.api.ConsistencyLevel;
+import org.apache.cassandra.gms.ApplicationState;
 import org.apache.cassandra.gms.EndpointState;
+import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.gms.IEndpointStateChangeSubscriber;
+import org.apache.cassandra.gms.VersionedValue;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.concurrent.SimpleCondition;
 
-
-import static java.lang.Thread.sleep;
-import static org.apache.cassandra.distributed.api.ConsistencyLevel.ALL;
 import static org.apache.cassandra.distributed.api.Feature.GOSSIP;
 import static org.apache.cassandra.distributed.api.Feature.NETWORK;
-import static org.apache.cassandra.gms.Gossiper.instance;
-import static org.apache.cassandra.net.Verb.GOSSIP_DIGEST_ACK;
-import static org.apache.cassandra.net.Verb.GOSSIP_DIGEST_SYN;
-import static org.apache.cassandra.utils.concurrent.Condition.newOneTimeCondition;
 
 public class GossipShutdownTest extends TestBaseImpl
 {
@@ -62,27 +61,27 @@ public class GossipShutdownTest extends TestBaseImpl
             cluster.schemaChange("create table "+KEYSPACE+".tbl (id int primary key, v int)");
 
             for (int i = 0; i < 10; i++)
-                cluster.coordinator(1).execute("insert into "+KEYSPACE+".tbl (id, v) values (?,?)", ALL, i, i);
+                cluster.coordinator(1).execute("insert into "+KEYSPACE+".tbl (id, v) values (?,?)", ConsistencyLevel.ALL, i, i);
 
-            Condition timeToShutdown = newOneTimeCondition();
-            Condition waitForShutdown = newOneTimeCondition();
+            SimpleCondition timeToShutdown = new SimpleCondition();
+            SimpleCondition waitForShutdown = new SimpleCondition();
             AtomicBoolean signalled = new AtomicBoolean(false);
             Future f = es.submit(() -> {
                 await(timeToShutdown);
 
                 cluster.get(1).runOnInstance(() -> {
-                    instance.register(new EPChanges());
+                    Gossiper.instance.register(new EPChanges());
                 });
 
                 cluster.get(2).runOnInstance(() -> {
                     StorageService.instance.setIsShutdownUnsafeForTests(true);
-                    instance.stop();
+                    Gossiper.instance.stop();
                 });
                 waitForShutdown.signalAll();
             });
 
-            cluster.filters().outbound().from(2).to(1).verbs(GOSSIP_DIGEST_SYN.id).messagesMatching((from, to, message) -> true).drop();
-            cluster.filters().outbound().from(2).to(1).verbs(GOSSIP_DIGEST_ACK.id).messagesMatching((from, to, message) ->
+            cluster.filters().outbound().from(2).to(1).verbs(Verb.GOSSIP_DIGEST_SYN.id).messagesMatching((from, to, message) -> true).drop();
+            cluster.filters().outbound().from(2).to(1).verbs(Verb.GOSSIP_DIGEST_ACK.id).messagesMatching((from, to, message) ->
                                                                                                          {
                                                                                                              if (signalled.compareAndSet(false, true))
                                                                                                              {
@@ -93,7 +92,7 @@ public class GossipShutdownTest extends TestBaseImpl
                                                                                                              return true;
                                                                                                          }).drop();
 
-            sleep(10000); // wait for gossip to exchange a few messages
+            Thread.sleep(10000); // wait for gossip to exchange a few messages
             f.get();
         }
         finally
@@ -102,7 +101,7 @@ public class GossipShutdownTest extends TestBaseImpl
         }
     }
 
-    private static void await(Condition sc)
+    private static void await(SimpleCondition sc)
     {
         try
         {

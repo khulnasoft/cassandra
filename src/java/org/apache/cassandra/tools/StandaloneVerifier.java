@@ -35,24 +35,22 @@ import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.ParseException;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.db.compaction.Verifier;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.IVerifier;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.OutputHandler;
-import org.apache.cassandra.utils.Throwables;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_UTIL_ALLOW_TOOL_REINIT_FOR_TEST;
 import static org.apache.cassandra.tools.BulkLoader.CmdLineOptions;
 
 public class StandaloneVerifier
@@ -60,34 +58,29 @@ public class StandaloneVerifier
     private static final String TOOL_NAME = "sstableverify";
     private static final String VERBOSE_OPTION  = "verbose";
     private static final String EXTENDED_OPTION = "extended";
+    private static final String VALIDATE_ALL_ROWS = "validate_all_rows";
     private static final String DEBUG_OPTION  = "debug";
     private static final String HELP_OPTION  = "help";
     private static final String CHECK_VERSION = "check_version";
     private static final String MUTATE_REPAIR_STATUS = "mutate_repair_status";
     private static final String QUICK = "quick";
-    private static final String FORCE = "force";
     private static final String TOKEN_RANGE = "token_range";
 
     public static void main(String args[])
     {
         Options options = Options.parseArgs(args);
-        if (!options.force)
-        {
-            System.err.println("verify will not run without -f or --force. See CASSANDRA-17017 for details.");
-            Options.printUsage(Options.getCmdLineOptions());
-            System.exit(1);
-        }
         initDatabaseDescriptorForTool();
-        ClusterMetadataService.initializeForTools(false);
+
         System.out.println("sstableverify using the following options: " + options);
 
-        List<SSTableReader> sstables = new ArrayList<>();
-        int exitCode = 0;
         try
         {
+            // load keyspace descriptions.
+            Schema.instance.loadFromDisk();
+
             boolean hasFailed = false;
 
-            if (Schema.instance.getTableMetadata(options.keyspaceName, options.cfName) == null)
+            if (Schema.instance.getTableMetadataRef(options.keyspaceName, options.cfName) == null)
                 throw new IllegalArgumentException(String.format("Unknown keyspace/table %s.%s",
                                                                  options.keyspaceName,
                                                                  options.cfName));
@@ -99,74 +92,68 @@ public class StandaloneVerifier
             OutputHandler handler = new OutputHandler.SystemOutput(options.verbose, options.debug);
             Directories.SSTableLister lister = cfs.getDirectories().sstableLister(Directories.OnTxnErr.THROW).skipTemporary(true);
 
+            List<SSTableReader> sstables = new ArrayList<>();
+
             // Verify sstables
             for (Map.Entry<Descriptor, Set<Component>> entry : lister.list().entrySet())
             {
                 Set<Component> components = entry.getValue();
-                if (!components.containsAll(entry.getKey().getFormat().primaryComponents()))
+                Descriptor descriptor = entry.getKey();
+                if (!components.contains(Component.DATA) ||
+                    (SSTableFormat.Type.BIG == descriptor.getFormat().getType() && !components.contains(Component.PRIMARY_INDEX)))
                     continue;
 
                 try
                 {
-                    SSTableReader sstable = SSTableReader.openNoValidation(entry.getKey(), components, cfs);
+                    SSTableReader sstable = descriptor.getFormat().getReaderFactory().openNoValidation(descriptor, components, cfs);
                     sstables.add(sstable);
                 }
                 catch (Exception e)
                 {
                     JVMStabilityInspector.inspectThrowable(e);
-                    System.err.println(String.format("Error Loading %s: %s", entry.getKey(), e.getMessage()));
+                    System.err.println(String.format("Error Loading %s: %s", descriptor, e.getMessage()));
                     if (options.debug)
                         e.printStackTrace(System.err);
-                    exitCode = 1;
-                    return;
+                    System.exit(1);
                 }
             }
-            IVerifier.Options verifyOptions = IVerifier.options().invokeDiskFailurePolicy(false)
-                                                       .extendedVerification(options.extended)
-                                                       .checkVersion(options.checkVersion)
-                                                       .mutateRepairStatus(options.mutateRepairStatus)
-                                                       .checkOwnsTokens(!options.tokens.isEmpty())
-                                                       .tokenLookup(ignore -> options.tokens)
-                                                       .build();
+            Verifier.Options verifyOptions = Verifier.options().invokeDiskFailurePolicy(false)
+                                                               .extendedVerification(options.extended)
+                                                               .validateAllRows(options.validateAllRows)
+                                                               .checkVersion(options.checkVersion)
+                                                               .mutateRepairStatus(options.mutateRepairStatus)
+                                                               .checkOwnsTokens(!options.tokens.isEmpty())
+                                                               .tokenLookup(ignore -> options.tokens)
+                                                               .build();
             handler.output("Running verifier with the following options: " + verifyOptions);
             for (SSTableReader sstable : sstables)
             {
-                try (IVerifier verifier = sstable.getVerifier(cfs, handler, true, verifyOptions))
+                try (Verifier verifier = new Verifier(cfs, sstable, handler, true, verifyOptions))
                 {
                     verifier.verify();
                 }
                 catch (Exception e)
                 {
-                    handler.warn(e, String.format("Error verifying %s: %s", sstable, e.getMessage()));
+                    handler.warn(String.format("Error verifying %s: %s", sstable, e.getMessage()), e);
                     hasFailed = true;
                 }
             }
 
             CompactionManager.instance.finishCompactionsAndShutdown(5, TimeUnit.MINUTES);
 
-            for (SSTableReader reader : sstables)
-                Throwables.perform((Throwable) null, () -> reader.selfRef().close());
-
-            exitCode = hasFailed ? 1 : 0; // We need that to stop non daemonized threads
+            System.exit( hasFailed ? 1 : 0 ); // We need that to stop non daemonized threads
         }
         catch (Exception e)
         {
             System.err.println(e.getMessage());
             if (options.debug)
                 e.printStackTrace(System.err);
-            exitCode = 1;
-        }
-        finally
-        {
-            for (SSTableReader reader : sstables)
-                Throwables.perform((Throwable) null, () -> reader.selfRef().close());
-
-            System.exit(exitCode);
+            System.exit(1);
         }
     }
 
     private static void initDatabaseDescriptorForTool() {
-        if (TEST_UTIL_ALLOW_TOOL_REINIT_FOR_TEST.getBoolean())
+        if (Boolean.getBoolean(Util.ALLOW_TOOL_REINIT_FOR_TEST))
             DatabaseDescriptor.toolInitialization(false); //Necessary for testing
         else
             Util.initDatabaseDescriptor();
@@ -180,10 +167,10 @@ public class StandaloneVerifier
         public boolean debug;
         public boolean verbose;
         public boolean extended;
+        public boolean validateAllRows;
         public boolean checkVersion;
         public boolean mutateRepairStatus;
         public boolean quick;
-        public boolean force;
         public Collection<Range<Token>> tokens;
 
         private Options(String keyspaceName, String cfName)
@@ -209,8 +196,8 @@ public class StandaloneVerifier
                 String[] args = cmd.getArgs();
                 if (args.length != 2)
                 {
-                    String prefix = args.length < 2 ? "Missing" : "Too many";
-                    System.err.println(prefix + " arguments");
+                    String msg = args.length < 2 ? "Missing arguments" : "Too many arguments";
+                    System.err.println(msg);
                     printUsage(options);
                     System.exit(1);
                 }
@@ -223,10 +210,10 @@ public class StandaloneVerifier
                 opts.debug = cmd.hasOption(DEBUG_OPTION);
                 opts.verbose = cmd.hasOption(VERBOSE_OPTION);
                 opts.extended = cmd.hasOption(EXTENDED_OPTION);
+                opts.validateAllRows = cmd.hasOption(VALIDATE_ALL_ROWS);
                 opts.checkVersion = cmd.hasOption(CHECK_VERSION);
                 opts.mutateRepairStatus = cmd.hasOption(MUTATE_REPAIR_STATUS);
                 opts.quick = cmd.hasOption(QUICK);
-                opts.force = cmd.hasOption(FORCE);
 
                 if (cmd.hasOption(TOKEN_RANGE))
                 {
@@ -280,23 +267,16 @@ public class StandaloneVerifier
             options.addOption("c",  CHECK_VERSION,         "make sure sstables are the latest version");
             options.addOption("r",  MUTATE_REPAIR_STATUS,  "don't mutate repair status");
             options.addOption("q",  QUICK,                 "do a quick check, don't read all data");
-            options.addOption("f",  FORCE,                 "force verify - see CASSANDRA-17017");
             options.addOptionList("t", TOKEN_RANGE, "range", "long token range of the format left,right. This may be provided multiple times to define multiple different ranges");
             return options;
         }
 
         public static void printUsage(CmdLineOptions options)
         {
-            String usage = String.format("%s [options] <keyspace> <column_family> force", TOOL_NAME);
+            String usage = String.format("%s [options] <keyspace> <column_family>", TOOL_NAME);
             StringBuilder header = new StringBuilder();
             header.append("--\n");
             header.append("Verify the sstable for the provided table." );
-            header.append("\n--\n");
-            header.append("NOTE: There are significant risks associated with using this tool; it likely doesn't do what " +
-                          "you expect and there are known edge cases. You must provide a -f or --force argument in " +
-                          "order to allow usage of the tool -> see CASSANDRA-9947 and CASSANDRA-17017 for known risks.\n");
-            header.append("https://issues.apache.org/jira/browse/CASSANDRA-9947\n");
-            header.append("https://issues.apache.org/jira/browse/CASSANDRA-17017");
             header.append("\n--\n");
             header.append("Options are:");
             new HelpFormatter().printHelp(usage, header.toString(), options, "");

@@ -23,6 +23,7 @@ import java.util.zip.CRC32;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandler;
+import org.apache.cassandra.utils.memory.BufferPool;
 
 import static org.apache.cassandra.net.Crc.*;
 
